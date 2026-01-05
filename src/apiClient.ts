@@ -43,6 +43,7 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Retry wrapper with exponential backoff.
+ * Does not retry on 404 errors (expected for missing order books).
  */
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -54,8 +55,14 @@ async function withRetry<T>(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
-    } catch (error) {
+    } catch (error: any) {
       lastError = error as Error;
+
+      // Don't retry on 404 errors - they're expected for tokens without order books
+      if (error?.response?.status === 404) {
+        throw error;
+      }
+
       if (attempt < maxRetries) {
         const delay = baseDelay * Math.pow(2, attempt);
         console.warn(
@@ -176,7 +183,11 @@ export class PolymarketClient {
         token_id: tokenId,
       });
       return response;
-    } catch (error) {
+    } catch (error: any) {
+      // 404 errors are expected for tokens without order books - handle silently
+      if (error?.response?.status === 404) {
+        return null;
+      }
       console.error(`Error fetching order book for token ${tokenId}:`, error);
       return null;
     }
@@ -251,14 +262,20 @@ export class PolymarketClient {
       let yesToken: TokenData | null = null;
       let noToken: TokenData | null = null;
 
-      for (const token of tokens) {
-        const tokenId = token.token_id || '';
+      // Filter valid tokens first
+      const validTokens = tokens.filter((t) => t.token_id);
+
+      // Fetch all order books in parallel for better performance
+      const orderBooks = await Promise.all(
+        validTokens.map((token) => this.getOrderBook(token.token_id))
+      );
+
+      // Process each token with its order book
+      for (let i = 0; i < validTokens.length; i++) {
+        const token = validTokens[i];
+        const tokenId = token.token_id;
         const outcome = (token.outcome || '').toUpperCase();
-
-        if (!tokenId) continue;
-
-        // Fetch order book
-        const orderBook = await this.getOrderBook(tokenId);
+        const orderBook = orderBooks[i];
 
         let bestBid: OrderBookLevel | null = null;
         let bestAsk: OrderBookLevel | null = null;
