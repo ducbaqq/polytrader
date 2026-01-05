@@ -102,12 +102,15 @@ export class PaperTrader {
     const tradeStats = await getTotalTradeStats();
     const pnl = await getLatestPnL();
 
-    const positionValue = positions.reduce((sum, p) => sum + (p.market_value || 0), 0);
-    const unrealizedPnl = positions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0);
+    // Parse as numbers (PostgreSQL returns numeric as strings)
+    const positionValue = positions.reduce((sum, p) => sum + parseFloat(String(p.market_value || 0)), 0);
+    const unrealizedPnl = positions.reduce((sum, p) => sum + parseFloat(String(p.unrealized_pnl || 0)), 0);
     const realizedPnl = tradeStats.net_pnl;
 
-    // Update cash balance based on trades
-    this.cashBalance = this.initialCapital - tradeStats.total_volume + tradeStats.net_pnl;
+    // Update cash balance based on trades (handle NaN from corrupted data)
+    const totalVolume = isNaN(tradeStats.total_volume) ? 0 : tradeStats.total_volume;
+    const netPnl = isNaN(tradeStats.net_pnl) ? 0 : tradeStats.net_pnl;
+    this.cashBalance = this.initialCapital - totalVolume + netPnl;
 
     const paperPositions: PaperPosition[] = positions.map((p) => ({
       marketId: p.market_id,

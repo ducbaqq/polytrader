@@ -28,8 +28,16 @@ export class OpportunityDetector {
   private volumeSpikeMultiplier: number;
   private thinBookMakerCount: number;
 
-  private opportunities: Opportunity[] = [];
   private opportunityCounts: Map<OpportunityType, number> = new Map();
+
+  // Note: Opportunities are stored in DB, not in memory (to prevent memory leaks)
+  getOpportunities(): Opportunity[] {
+    return [];
+  }
+
+  getRecentOpportunities(hours: number = 1.0, opType?: OpportunityType): Opportunity[] {
+    return [];
+  }
 
   constructor(config: OpportunityDetectorConfig) {
     this.scanner = config.scanner;
@@ -42,17 +50,6 @@ export class OpportunityDetector {
       `OpportunityDetector initialized with thresholds: ` +
         `arb=${this.arbitrageThreshold}, spread=${this.wideSpreadThreshold}, ` +
         `volume_spike=${this.volumeSpikeMultiplier}x, thin_book=${this.thinBookMakerCount} makers`
-    );
-  }
-
-  getOpportunities(): Opportunity[] {
-    return [...this.opportunities];
-  }
-
-  getRecentOpportunities(hours: number = 1.0, opType?: OpportunityType): Opportunity[] {
-    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
-    return this.opportunities.filter(
-      (op) => op.timestamp >= cutoff && (opType === undefined || op.type === opType)
     );
   }
 
@@ -358,10 +355,7 @@ export class OpportunityDetector {
     const mispricings = this.detectMispricing(snapshot.markets);
     allOpportunities.push(...mispricings);
 
-    // Update history
-    this.opportunities.push(...allOpportunities);
-
-    // Update counts
+    // Update counts (don't accumulate opportunities in memory - they're stored in DB)
     for (const op of allOpportunities) {
       const count = this.opportunityCounts.get(op.type) || 0;
       this.opportunityCounts.set(op.type, count + 1);
@@ -389,14 +383,16 @@ export class OpportunityDetector {
 
   getStats(): DetectorStats {
     const byType: Record<string, number> = {};
+    let total = 0;
     for (const [type, count] of this.opportunityCounts) {
       byType[type] = count;
+      total += count;
     }
 
     return {
-      totalOpportunities: this.opportunities.length,
+      totalOpportunities: total,
       byType,
-      recent1h: this.getRecentOpportunities(1.0).length,
+      recent1h: 0, // No longer tracking in memory
       thresholds: {
         arbitrage: this.arbitrageThreshold,
         wideSpread: this.wideSpreadThreshold,
@@ -406,15 +402,6 @@ export class OpportunityDetector {
     };
   }
 
-  clearOldOpportunities(hours: number = 24): void {
-    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
-    const oldCount = this.opportunities.length;
-    this.opportunities = this.opportunities.filter((op) => op.timestamp >= cutoff);
-    const removed = oldCount - this.opportunities.length;
-    if (removed > 0) {
-      console.log(`Cleared ${removed} old opportunities`);
-    }
-  }
 }
 
 /**

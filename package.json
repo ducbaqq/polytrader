@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/index.js",
+    "start": "NODE_TLS_REJECT_UNAUTHORIZED=0 node --max-old-space-size=512 dist/index.js",
     "dev": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts",
     "scan-once": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts --scan-once",
     "validate": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts validate",

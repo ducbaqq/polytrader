@@ -87,12 +87,17 @@ export async function checkFills(): Promise<number> {
  * Check if an order would have filled given current order book.
  */
 function checkIfWouldFill(order: DBPaperOrder, orderBook: DBOrderBookSnapshot): boolean {
+  // Parse as numbers (PostgreSQL returns numeric as strings)
+  const orderPrice = parseFloat(String(order.order_price));
+  const bestAsk = orderBook.best_ask_price !== null ? parseFloat(String(orderBook.best_ask_price)) : null;
+  const bestBid = orderBook.best_bid_price !== null ? parseFloat(String(orderBook.best_bid_price)) : null;
+
   if (order.side === 'BUY') {
     // BUY order fills if market ask <= our bid price
-    return orderBook.best_ask_price !== null && orderBook.best_ask_price <= order.order_price;
+    return bestAsk !== null && bestAsk <= orderPrice;
   } else {
     // SELL order fills if market bid >= our ask price
-    return orderBook.best_bid_price !== null && orderBook.best_bid_price >= order.order_price;
+    return bestBid !== null && bestBid >= orderPrice;
   }
 }
 
@@ -104,17 +109,23 @@ async function executeFill(
   orderBook: DBOrderBookSnapshot
 ): Promise<void> {
   await withTransaction(async (client) => {
+    // Parse DB values as numbers (PostgreSQL returns numeric as strings)
+    const orderPrice = parseFloat(String(order.order_price));
+    const orderSize = parseFloat(String(order.order_size));
+    const bestAsk = orderBook.best_ask_price !== null ? parseFloat(String(orderBook.best_ask_price)) : null;
+    const bestBid = orderBook.best_bid_price !== null ? parseFloat(String(orderBook.best_bid_price)) : null;
+
     // Determine fill price (conservative estimate)
     let fillPrice: number;
     if (order.side === 'BUY') {
       // For buys, we pay the ask price (or our limit price, whichever is lower)
-      fillPrice = Math.min(order.order_price, orderBook.best_ask_price || order.order_price);
+      fillPrice = Math.min(orderPrice, bestAsk ?? orderPrice);
     } else {
       // For sells, we get the bid price (or our limit price, whichever is higher)
-      fillPrice = Math.max(order.order_price, orderBook.best_bid_price || order.order_price);
+      fillPrice = Math.max(orderPrice, bestBid ?? orderPrice);
     }
 
-    const fillSize = order.order_size;
+    const fillSize = orderSize;
     const tradeValue = fillPrice * fillSize;
 
     // Calculate costs
@@ -143,6 +154,7 @@ async function executeFill(
     });
 
     // Update position
+    const midPrice = orderBook.mid_price !== null ? parseFloat(String(orderBook.mid_price)) : null;
     await updatePositionAfterTrade(
       client,
       order.market_id,
@@ -150,7 +162,7 @@ async function executeFill(
       order.side as OrderSide,
       fillPrice,
       fillSize,
-      orderBook.mid_price
+      midPrice
     );
   });
 }
