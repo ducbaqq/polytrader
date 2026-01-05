@@ -267,3 +267,221 @@ export function getNoPrice(market: MarketData): number {
   if (market.noToken.bestAsk) return market.noToken.bestAsk.price;
   return 0;
 }
+
+// ============ EXTENDED OPPORTUNITY FOR DB ============
+
+export interface ExtendedOpportunity extends Opportunity {
+  yesPrice?: number;
+  noPrice?: number;
+  category?: string;
+  marketAgeHours?: number;
+  potentialProfitPct?: number;
+  potentialProfitUsd?: number;
+}
+
+// ============ VALIDATOR CONFIGURATION ============
+
+export interface ValidatorConfig {
+  // Scan intervals (seconds)
+  fullScanInterval: number;      // All markets
+  priorityScanInterval: number;  // Top 100 markets
+  priorityMarketCount: number;   // How many top markets
+
+  // Paper trading
+  paperTradingEnabled: boolean;
+  initialCapital: number;
+  marketsToSelect: number;
+
+  // Analysis
+  hourlyAnalysisEnabled: boolean;
+  dailyAnalysisEnabled: boolean;
+
+  // Data retention
+  retentionDays: number;
+
+  // Thresholds (from detector)
+  arbitrageThreshold: number;
+  wideSpreadThreshold: number;
+  volumeSpikeMultiplier: number;
+  thinBookMakerCount: number;
+}
+
+export const DEFAULT_VALIDATOR_CONFIG: ValidatorConfig = {
+  fullScanInterval: 60,
+  priorityScanInterval: 15,
+  priorityMarketCount: 100,
+  paperTradingEnabled: true,
+  initialCapital: 1000,
+  marketsToSelect: 3,
+  hourlyAnalysisEnabled: true,
+  dailyAnalysisEnabled: true,
+  retentionDays: 7,
+  arbitrageThreshold: 0.995,
+  wideSpreadThreshold: 0.05,
+  volumeSpikeMultiplier: 3.0,
+  thinBookMakerCount: 5,
+};
+
+// ============ PAPER TRADING TYPES ============
+
+export type OrderSide = 'BUY' | 'SELL';
+export type TokenSide = 'YES' | 'NO';
+export type OrderStatus = 'PENDING' | 'FILLED' | 'PARTIALLY_FILLED' | 'CANCELLED' | 'EXPIRED';
+export type MarketStatus = 'ACTIVE' | 'PAUSED' | 'CLOSED';
+
+export interface PaperOrder {
+  orderId: string;
+  marketId: string;
+  side: OrderSide;
+  tokenSide: TokenSide;
+  price: number;
+  size: number;
+  status: OrderStatus;
+  placedAt: Date;
+  filledAt?: Date;
+  fillPrice?: number;
+  fillSize?: number;
+}
+
+export interface PaperTrade {
+  tradeId: string;
+  marketId: string;
+  orderId: string;
+  side: OrderSide;
+  tokenSide: TokenSide;
+  price: number;
+  size: number;
+  value: number;
+  platformFee: number;
+  gasCost: number;
+  slippageCost: number;
+  totalCost: number;
+  netValue: number;
+  executedAt: Date;
+}
+
+export interface PaperPosition {
+  marketId: string;
+  tokenSide: TokenSide;
+  quantity: number;
+  averageCost: number;
+  costBasis: number;
+  currentPrice: number | null;
+  marketValue: number | null;
+  unrealizedPnl: number | null;
+  unrealizedPnlPct: number | null;
+}
+
+export interface PortfolioSummary {
+  cashBalance: number;
+  positionValue: number;
+  totalEquity: number;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  totalPnl: number;
+  positions: PaperPosition[];
+}
+
+// ============ ANALYSIS TYPES ============
+
+export interface TimeAnalysisRow {
+  analysisDate: Date;
+  hourOfDay: number;
+  arbitrageCount: number;
+  avgArbitrageSpread: number;
+  wideSpreadCount: number;
+  avgWideSpread: number;
+  ordersPlaced: number;
+  ordersFilled: number;
+  fillRate: number;
+  tradesExecuted: number;
+  grossProfit: number;
+  netProfit: number;
+  avgVolume: number;
+  activeMarkets: number;
+}
+
+export interface CategoryAnalysisRow {
+  analysisDate: Date;
+  category: string;
+  opportunitiesFound: number;
+  avgSpread: number;
+  tradesExecuted: number;
+  fillRate: number;
+  grossProfit: number;
+  netProfit: number;
+  roi: number;
+  avgVolume: number;
+  marketCount: number;
+}
+
+// ============ VALIDATION SUMMARY ============
+
+export type Recommendation = 'BUILD_BOT' | 'MARGINAL' | 'DONT_BUILD';
+
+export interface ValidationSummary {
+  reportDate: Date;
+  daysAnalyzed: number;
+
+  // Discovery results
+  totalScans: number;
+  arbitrageOpportunities: number;
+  arbitrageAvgDurationSec: number;
+  arbitrageBestCaseProfit: number;
+  arbitrageRealisticProfit: number;
+  arbitrageVerdict: string;
+
+  // Paper trading results
+  marketsTested: number;
+  totalOrders: number;
+  totalFills: number;
+  overallFillRate: number;
+
+  // P&L
+  grossProfit: number;
+  platformFees: number;
+  gasCosts: number;
+  slippageCosts: number;
+  netProfit: number;
+
+  // Projections
+  roiWeekly: number;
+  projectedMonthly: number;
+
+  // Cost breakdown
+  feesPctOfGross: number;
+  gasPctOfGross: number;
+  totalCostsPct: number;
+
+  // Risk metrics
+  worstDayLoss: number;
+  maxDrawdownPct: number;
+  winRate: number;
+  dailyPnlStdDev: number;
+
+  // Best performers
+  bestMarketCategory: string;
+  bestHours: number[];
+  worstMarketCategory: string;
+
+  // Decision
+  recommendation: Recommendation;
+  recommendationReason: string;
+  nextSteps: string;
+}
+
+// ============ VALIDATOR STATS ============
+
+export interface ValidatorStats {
+  startTime: Date;
+  uptime: number;
+  totalScans: number;
+  totalOpportunities: number;
+  opportunitiesByType: Record<string, number>;
+  paperTradingEnabled: boolean;
+  totalPaperTrades: number;
+  currentPnl: number;
+  lastScanTime: Date | null;
+  lastScanDuration: number;
+  dbRowCounts: Record<string, number>;
+}

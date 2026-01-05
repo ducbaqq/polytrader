@@ -14,9 +14,13 @@ import { MarketScanner, createScannerFromEnv } from './scanner';
 import { OpportunityDetector, createDetectorFromEnv } from './detector';
 import { DataStorage, createStorageFromEnv } from './storage';
 import { Dashboard, createDashboardFromEnv } from './dashboard';
+import { MarketValidator, createValidatorFromEnv } from './validator';
+import { initDatabase, closeDatabase } from './database/index';
+import { verifySchema, clearAllData, getTableCounts } from './database/schema';
+import { generateValidationReport } from './analyzer/reportGenerator';
 
-// Load environment variables
-dotenv.config();
+// Load environment variables (override shell env vars with .env file)
+dotenv.config({ override: true });
 
 class PolymarketBot {
   private scanner: MarketScanner | null = null;
@@ -289,15 +293,81 @@ async function runScanOnce(): Promise<number> {
   return 0;
 }
 
+async function runValidator(): Promise<void> {
+  const validator = createValidatorFromEnv();
+  await validator.start();
+}
+
+async function runReport(): Promise<void> {
+  console.log('Generating validation report...');
+  initDatabase();
+
+  const schemaCheck = await verifySchema();
+  if (!schemaCheck.valid) {
+    console.error('Database schema invalid. Missing tables:', schemaCheck.missing);
+    process.exit(1);
+  }
+
+  try {
+    const summary = await generateValidationReport(7, './reports');
+    console.log('\n=== VALIDATION SUMMARY ===');
+    console.log(`Recommendation: ${summary.recommendation}`);
+    console.log(`Net Profit: $${summary.netProfit.toFixed(2)}`);
+    console.log(`Win Rate: ${(summary.winRate * 100).toFixed(1)}%`);
+    console.log(`Fill Rate: ${(summary.overallFillRate * 100).toFixed(1)}%`);
+    console.log('\n' + summary.recommendationReason);
+  } finally {
+    await closeDatabase();
+  }
+}
+
+async function runReset(): Promise<void> {
+  console.log('Resetting database...');
+  initDatabase();
+
+  const schemaCheck = await verifySchema();
+  if (!schemaCheck.valid) {
+    console.error('Database schema invalid. Missing tables:', schemaCheck.missing);
+    process.exit(1);
+  }
+
+  console.log('Clearing all data...');
+  await clearAllData();
+  console.log('Database reset complete');
+  await closeDatabase();
+}
+
+async function runDbStatus(): Promise<void> {
+  console.log('Checking database status...');
+  initDatabase();
+
+  const schemaCheck = await verifySchema();
+  console.log(`Schema valid: ${schemaCheck.valid}`);
+  if (!schemaCheck.valid) {
+    console.log('Missing tables:', schemaCheck.missing);
+  }
+
+  const counts = await getTableCounts();
+  console.log('\nTable row counts:');
+  for (const [table, count] of Object.entries(counts)) {
+    console.log(`  ${table}: ${count}`);
+  }
+
+  await closeDatabase();
+}
+
 async function main(): Promise<void> {
   const program = new Command();
 
   program
     .name('polymarket-bot')
-    .description('Polymarket Market Discovery Bot')
+    .description('Polymarket Market Discovery Bot & Validator')
     .version('1.0.0');
 
+  // Default command - original discovery bot
   program
+    .command('discover', { isDefault: true })
+    .description('Run the market discovery bot with terminal dashboard')
     .option('--scan-once', 'Run a single scan and exit')
     .action(async (options) => {
       if (options.scanOnce) {
@@ -322,6 +392,48 @@ async function main(): Promise<void> {
 
         const bot = new PolymarketBot(scanInterval, dashboardInterval, saveInterval);
         await bot.start();
+      }
+    });
+
+  // Validate command - full validation system
+  program
+    .command('validate')
+    .description('Run the market validation system (scans + paper trading + analysis)')
+    .action(async () => {
+      await runValidator();
+    });
+
+  // Report command - generate report from existing data
+  program
+    .command('report')
+    .description('Generate validation report from existing data')
+    .action(async () => {
+      await runReport();
+    });
+
+  // Reset command - clear all data
+  program
+    .command('reset')
+    .description('Reset database (clear all data)')
+    .action(async () => {
+      await runReset();
+    });
+
+  // DB status command
+  program
+    .command('db-status')
+    .description('Check database status and table counts')
+    .action(async () => {
+      await runDbStatus();
+    });
+
+  // Keep --scan-once as top-level option for backwards compatibility
+  program
+    .option('--scan-once', 'Run a single scan and exit')
+    .action(async (options) => {
+      if (options.scanOnce) {
+        const exitCode = await runScanOnce();
+        process.exit(exitCode);
       }
     });
 
