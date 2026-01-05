@@ -62,6 +62,7 @@ export interface MarketScannerConfig {
   scanInterval?: number;
   maxMarkets?: number;
   minVolume?: number;
+  batchSize?: number;
   onScanComplete?: ScanCompleteCallback;
 }
 
@@ -70,6 +71,7 @@ export class MarketScanner {
   private scanInterval: number;
   private maxMarkets?: number;
   private minVolume: number;
+  private batchSize: number;
   private onScanComplete?: ScanCompleteCallback;
 
   private currentSnapshot: MarketSnapshot | null = null;
@@ -89,9 +91,10 @@ export class MarketScanner {
     this.scanInterval = config.scanInterval || 30;
     this.maxMarkets = config.maxMarkets;
     this.minVolume = config.minVolume || 0;
+    this.batchSize = config.batchSize || 10;
     this.onScanComplete = config.onScanComplete;
 
-    console.log(`MarketScanner initialized with ${this.scanInterval}s interval`);
+    console.log(`MarketScanner initialized with ${this.scanInterval}s interval, batch size ${this.batchSize}`);
   }
 
   getCurrentSnapshot(): MarketSnapshot | null {
@@ -130,30 +133,39 @@ export class MarketScanner {
         return null;
       }
 
-      // Process each market
+      // Process markets in batches for better performance
       const processedMarkets: MarketData[] = [];
       let failedCount = 0;
+      let processedCount = 0;
 
-      for (let i = 0; i < rawMarkets.length; i++) {
-        try {
-          const marketData = await this.client.buildMarketData(rawMarkets[i]);
+      for (let i = 0; i < rawMarkets.length; i += this.batchSize) {
+        const batch = rawMarkets.slice(i, i + this.batchSize);
 
-          if (marketData) {
+        // Process batch in parallel
+        const results = await Promise.allSettled(
+          batch.map((rawMarket) => this.client.buildMarketData(rawMarket))
+        );
+
+        // Collect results
+        for (const result of results) {
+          if (result.status === 'fulfilled' && result.value) {
+            const marketData = result.value;
             processedMarkets.push(marketData);
 
             // Update volume history
             this.markets.set(marketData.marketId, marketData);
             const history = this.getVolumeHistory(marketData.marketId);
             addVolumeSample(history, marketData.volume24h);
+          } else {
+            failedCount++;
           }
-        } catch (error) {
-          failedCount++;
-          continue;
         }
 
+        processedCount += batch.length;
+
         // Log progress every 50 markets
-        if ((i + 1) % 50 === 0) {
-          console.log(`Processed ${i + 1}/${rawMarkets.length} markets`);
+        if (processedCount % 50 < this.batchSize) {
+          console.log(`Processed ${processedCount}/${rawMarkets.length} markets`);
         }
       }
 
@@ -263,11 +275,13 @@ export function createScannerFromEnv(onScanComplete?: ScanCompleteCallback): Mar
   const maxMarketsStr = process.env.MAX_MARKETS || '';
   const maxMarkets = maxMarketsStr ? parseInt(maxMarketsStr) : undefined;
   const minVolume = parseFloat(process.env.MIN_VOLUME || '1000');
+  const batchSize = parseInt(process.env.BATCH_SIZE || '10');
 
   return new MarketScanner({
     scanInterval,
     maxMarkets,
     minVolume,
+    batchSize,
     onScanComplete,
   });
 }
