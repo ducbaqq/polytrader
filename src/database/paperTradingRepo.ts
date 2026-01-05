@@ -278,8 +278,22 @@ export async function upsertPosition(
   costBasis: number,
   currentPrice: number | null
 ): Promise<void> {
+  // Market value = quantity * price (negative for short positions)
   const marketValue = currentPrice ? quantity * currentPrice : null;
-  const unrealizedPnl = marketValue ? marketValue - costBasis : null;
+
+  // P&L calculation differs for long vs short positions:
+  // LONG (qty > 0): P&L = marketValue - costBasis (what it's worth - what you paid)
+  // SHORT (qty < 0): P&L = costBasis + marketValue (what you received + negative value = received - cost to close)
+  let unrealizedPnl: number | null = null;
+  if (marketValue !== null) {
+    if (quantity >= 0) {
+      unrealizedPnl = marketValue - costBasis;
+    } else {
+      // Short position: you received costBasis, would cost |marketValue| to close
+      unrealizedPnl = costBasis + marketValue; // marketValue is negative, so this is costBasis - |marketValue|
+    }
+  }
+
   // Clamp percentage to prevent numeric overflow (NUMERIC(10,2) max is ~10^8)
   let unrealizedPnlPct: number | null = null;
   if (costBasis > 0.01 && unrealizedPnl !== null) {
@@ -327,12 +341,25 @@ export async function updatePositionPrices(
   tokenSide: 'YES' | 'NO',
   currentPrice: number
 ): Promise<void> {
+  // P&L calculation differs for long vs short positions:
+  // LONG (qty >= 0): P&L = marketValue - costBasis
+  // SHORT (qty < 0): P&L = costBasis + marketValue (marketValue is negative)
   await client.query(
     `UPDATE paper_positions
      SET current_price = $1,
          market_value = quantity * $1,
-         unrealized_pnl = (quantity * $1) - cost_basis,
-         unrealized_pnl_pct = CASE WHEN cost_basis > 0 THEN ((quantity * $1) - cost_basis) / cost_basis ELSE NULL END,
+         unrealized_pnl = CASE
+           WHEN quantity >= 0 THEN (quantity * $1) - cost_basis
+           ELSE cost_basis + (quantity * $1)
+         END,
+         unrealized_pnl_pct = CASE
+           WHEN cost_basis > 0.01 THEN
+             CASE
+               WHEN quantity >= 0 THEN ((quantity * $1) - cost_basis) / cost_basis
+               ELSE (cost_basis + (quantity * $1)) / cost_basis
+             END
+           ELSE NULL
+         END,
          updated_at = NOW()
      WHERE market_id = $2 AND token_side = $3`,
     [currentPrice, marketId, tokenSide]

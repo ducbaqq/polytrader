@@ -452,6 +452,13 @@ export class MarketValidator {
 
     this.pendingOperations++;
     try {
+      // Check if we have active paper markets - if not, select new ones
+      const activeMarkets = await getActivePaperMarkets();
+      if (activeMarkets.length === 0) {
+        console.log(`[${new Date().toISOString()}] No active paper markets found - selecting new ones...`);
+        await this.selectPaperTradingMarkets();
+      }
+
       const result = await this.paperTrader.runCycle();
 
       if (result.ordersPlaced > 0 || result.ordersFilled > 0) {

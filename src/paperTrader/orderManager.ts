@@ -72,6 +72,18 @@ export async function checkFills(): Promise<number> {
     const wouldFill = checkIfWouldFill(order, orderBook);
 
     if (wouldFill) {
+      // For SELL orders, check if we have enough position to sell (no short selling allowed)
+      if (order.side === 'SELL') {
+        const position = await getPositionByMarket(order.market_id, order.token_side as TokenSide);
+        const currentQty = position ? parseFloat(String(position.quantity)) : 0;
+        const orderSize = parseFloat(String(order.order_size));
+
+        if (currentQty < orderSize) {
+          // Not enough position to sell - skip this order (it will expire)
+          continue;
+        }
+      }
+
       await executeFill(order, orderBook);
       fillCount++;
     }
