@@ -14,7 +14,6 @@ export interface DBMarketSnapshot {
   category: string | null;
   end_date: Date | null;
   volume_24h: number | null;
-  volume_1h: number | null;
   last_trade_time: Date | null;
   num_makers: number | null;
   status: string | null;
@@ -39,7 +38,6 @@ export async function insertMarketSnapshots(
     'category',
     'end_date',
     'volume_24h',
-    'volume_1h',
     'last_trade_time',
     'num_makers',
     'status',
@@ -52,7 +50,6 @@ export async function insertMarketSnapshots(
     m.category || null,
     m.endDate || null,
     m.volume24h || 0,
-    m.volume1h || 0,
     m.timeSinceLastTrade ? new Date(Date.now() - m.timeSinceLastTrade * 1000) : null,
     m.totalActiveMakers || 0,
     'active',

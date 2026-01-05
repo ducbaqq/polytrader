@@ -179,8 +179,9 @@ async function updatePositionAfterTrade(
     newAverageCost = price;
     newCostBasis = price * size;
   } else {
-    const oldQty = existingPosition.quantity;
-    const oldCost = existingPosition.cost_basis;
+    // Parse as numbers (PostgreSQL returns numeric as strings)
+    const oldQty = parseFloat(String(existingPosition.quantity));
+    const oldCost = parseFloat(String(existingPosition.cost_basis));
 
     if (side === 'BUY') {
       // Adding to position
@@ -200,7 +201,7 @@ async function updatePositionAfterTrade(
         // Still long, reduce cost basis proportionally
         const reductionRatio = size / oldQty;
         newCostBasis = oldCost * (1 - reductionRatio);
-        newAverageCost = existingPosition.average_cost;
+        newAverageCost = parseFloat(String(existingPosition.average_cost));
       } else if (newQuantity < 0) {
         // Position flipped to short
         newCostBasis = Math.abs(newQuantity) * price;

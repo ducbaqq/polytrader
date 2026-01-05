@@ -417,7 +417,6 @@ export class PolymarketClient {
         endDate,
         category,
         volume24h,
-        volume1h: 0,
         yesToken,
         noToken,
         yesNoSum,

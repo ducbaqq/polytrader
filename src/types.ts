@@ -32,7 +32,6 @@ export interface MarketData {
   endDate: Date | null;
   category: string;
   volume24h: number;
-  volume1h: number;
   yesToken: TokenData | null;
   noToken: TokenData | null;
   yesNoSum: number;

@@ -110,7 +110,6 @@ export class DataStorage {
         endDate: m.endDate?.toISOString() || null,
         category: m.category,
         volume24h: m.volume24h,
-        volume1h: m.volume1h,
         yesToken: m.yesToken,
         noToken: m.noToken,
         yesNoSum: m.yesNoSum,

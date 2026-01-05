@@ -280,7 +280,12 @@ export async function upsertPosition(
 ): Promise<void> {
   const marketValue = currentPrice ? quantity * currentPrice : null;
   const unrealizedPnl = marketValue ? marketValue - costBasis : null;
-  const unrealizedPnlPct = costBasis > 0 && unrealizedPnl ? unrealizedPnl / costBasis : null;
+  // Clamp percentage to prevent numeric overflow (NUMERIC(10,2) max is ~10^8)
+  let unrealizedPnlPct: number | null = null;
+  if (costBasis > 0.01 && unrealizedPnl !== null) {
+    const rawPct = unrealizedPnl / costBasis;
+    unrealizedPnlPct = Math.max(-99999999, Math.min(99999999, rawPct));
+  }
 
   await client.query(
     `INSERT INTO paper_positions (
@@ -356,10 +361,10 @@ export async function recordPnLSnapshot(
   cashBalance: number,
   initialCapital: number = 1000
 ): Promise<void> {
-  // Get position values
+  // Get position values (parse as floats - PostgreSQL returns numeric as strings)
   const positions = await getPositions();
-  const positionValue = positions.reduce((sum, p) => sum + (p.market_value || 0), 0);
-  const unrealizedPnl = positions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0);
+  const positionValue = positions.reduce((sum, p) => sum + parseFloat(String(p.market_value || 0)), 0);
+  const unrealizedPnl = positions.reduce((sum, p) => sum + parseFloat(String(p.unrealized_pnl || 0)), 0);
 
   // Get realized P&L from trades
   const tradeStats = await getTotalTradeStats();
