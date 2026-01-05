@@ -491,7 +491,7 @@ export class MarketValidator {
       opportunitiesByType: opStats.by_type,
       paperTradingEnabled: this.config.paperTradingEnabled,
       totalPaperTrades: tradeStats.total_trades,
-      currentPnl: pnl?.total_pnl || 0,
+      currentPnl: parseFloat(String(pnl?.total_pnl || 0)),
       lastScanTime: this.lastScanTime,
       lastScanDuration: this.lastScanDuration,
       dbRowCounts: tableCounts,
