@@ -1,0 +1,29 @@
+{
+  "name": "polymarket-discovery-bot",
+  "version": "1.0.0",
+  "description": "Polymarket market discovery and opportunity detection bot",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "scan-once": "ts-node src/index.ts --scan-once"
+  },
+  "keywords": ["polymarket", "trading", "bot", "arbitrage"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@polymarket/clob-client": "^4.0.0",
+    "axios": "^1.6.0",
+    "chalk": "^4.1.2",
+    "cli-table3": "^0.6.3",
+    "commander": "^11.1.0",
+    "dotenv": "^16.3.1",
+    "ethers": "^5.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.0"
+  }
+}

@@ -1,0 +1,431 @@
+/**
+ * Opportunity detection module for identifying trading opportunities.
+ */
+
+import {
+  MarketData,
+  MarketSnapshot,
+  Opportunity,
+  OpportunityType,
+  DetectorStats,
+  getYesPrice,
+  getNoPrice,
+} from './types';
+import { MarketScanner } from './scanner';
+
+export interface OpportunityDetectorConfig {
+  scanner: MarketScanner;
+  arbitrageThreshold?: number;
+  wideSpreadThreshold?: number;
+  volumeSpikeMultiplier?: number;
+  thinBookMakerCount?: number;
+}
+
+export class OpportunityDetector {
+  private scanner: MarketScanner;
+  private arbitrageThreshold: number;
+  private wideSpreadThreshold: number;
+  private volumeSpikeMultiplier: number;
+  private thinBookMakerCount: number;
+
+  private opportunities: Opportunity[] = [];
+  private opportunityCounts: Map<OpportunityType, number> = new Map();
+
+  constructor(config: OpportunityDetectorConfig) {
+    this.scanner = config.scanner;
+    this.arbitrageThreshold = config.arbitrageThreshold || 0.995;
+    this.wideSpreadThreshold = config.wideSpreadThreshold || 0.05;
+    this.volumeSpikeMultiplier = config.volumeSpikeMultiplier || 3.0;
+    this.thinBookMakerCount = config.thinBookMakerCount || 5;
+
+    console.log(
+      `OpportunityDetector initialized with thresholds: ` +
+        `arb=${this.arbitrageThreshold}, spread=${this.wideSpreadThreshold}, ` +
+        `volume_spike=${this.volumeSpikeMultiplier}x, thin_book=${this.thinBookMakerCount} makers`
+    );
+  }
+
+  getOpportunities(): Opportunity[] {
+    return [...this.opportunities];
+  }
+
+  getRecentOpportunities(hours: number = 1.0, opType?: OpportunityType): Opportunity[] {
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
+    return this.opportunities.filter(
+      (op) => op.timestamp >= cutoff && (opType === undefined || op.type === opType)
+    );
+  }
+
+  /**
+   * Detect arbitrage opportunity when YES + NO < threshold.
+   */
+  detectArbitrage(market: MarketData): Opportunity | null {
+    if (market.yesNoSum <= 0 || market.yesNoSum >= this.arbitrageThreshold) {
+      return null;
+    }
+
+    // Calculate available liquidity
+    let availableLiquidity = 0;
+    if (market.yesToken?.bestAsk) {
+      availableLiquidity = market.yesToken.bestAsk.size;
+    }
+    if (market.noToken?.bestAsk) {
+      if (availableLiquidity === 0) {
+        availableLiquidity = market.noToken.bestAsk.size;
+      } else {
+        availableLiquidity = Math.min(availableLiquidity, market.noToken.bestAsk.size);
+      }
+    }
+
+    const spreadSize = 1.0 - market.yesNoSum;
+    const potentialProfit = spreadSize * availableLiquidity;
+
+    const opportunity: Opportunity = {
+      type: OpportunityType.ARBITRAGE,
+      marketId: market.marketId,
+      question: market.question,
+      timestamp: new Date(),
+      description: `YES+NO sum = ${market.yesNoSum.toFixed(4)} (threshold: ${this.arbitrageThreshold})`,
+      potentialProfit,
+      yesNoSum: market.yesNoSum,
+      availableLiquidity,
+      spreadPct: 0,
+      tokenSide: '',
+      currentVolume: 0,
+      averageVolume: 0,
+      spikeMultiplier: 0,
+      makerCount: 0,
+      volume: 0,
+      relatedMarketId: '',
+      priceDifference: 0,
+    };
+
+    console.log(
+      `ARBITRAGE: ${market.question.slice(0, 50)}... ` +
+        `sum=${market.yesNoSum.toFixed(4)}, liq=$${availableLiquidity.toFixed(2)}`
+    );
+
+    return opportunity;
+  }
+
+  /**
+   * Detect wide spread opportunities for market making.
+   */
+  detectWideSpread(market: MarketData): Opportunity[] {
+    const opportunities: Opportunity[] = [];
+
+    const tokens = [
+      { token: market.yesToken, side: 'YES' },
+      { token: market.noToken, side: 'NO' },
+    ];
+
+    for (const { token, side } of tokens) {
+      if (!token || token.spreadPct <= this.wideSpreadThreshold) {
+        continue;
+      }
+
+      const opportunity: Opportunity = {
+        type: OpportunityType.WIDE_SPREAD,
+        marketId: market.marketId,
+        question: market.question,
+        timestamp: new Date(),
+        description: `${side} spread = ${(token.spreadPct * 100).toFixed(2)}% (threshold: ${(this.wideSpreadThreshold * 100).toFixed(0)}%)`,
+        potentialProfit: 0,
+        yesNoSum: 0,
+        availableLiquidity: market.totalLiquidityAtBest,
+        spreadPct: token.spreadPct,
+        tokenSide: side,
+        currentVolume: 0,
+        averageVolume: 0,
+        spikeMultiplier: 0,
+        makerCount: 0,
+        volume: 0,
+        relatedMarketId: '',
+        priceDifference: 0,
+      };
+
+      opportunities.push(opportunity);
+    }
+
+    return opportunities;
+  }
+
+  /**
+   * Detect significant volume spikes.
+   */
+  detectVolumeSpike(market: MarketData): Opportunity | null {
+    const avgVolume = this.scanner.get1hVolumeAverage(market.marketId);
+
+    if (avgVolume <= 0) {
+      return null;
+    }
+
+    const currentVolume = market.volume24h;
+    const multiplier = currentVolume / avgVolume;
+
+    if (multiplier < this.volumeSpikeMultiplier) {
+      return null;
+    }
+
+    const opportunity: Opportunity = {
+      type: OpportunityType.VOLUME_SPIKE,
+      marketId: market.marketId,
+      question: market.question,
+      timestamp: new Date(),
+      description: `Volume ${multiplier.toFixed(1)}x above 1h average`,
+      potentialProfit: 0,
+      yesNoSum: 0,
+      availableLiquidity: 0,
+      spreadPct: 0,
+      tokenSide: '',
+      currentVolume,
+      averageVolume: avgVolume,
+      spikeMultiplier: multiplier,
+      makerCount: 0,
+      volume: 0,
+      relatedMarketId: '',
+      priceDifference: 0,
+    };
+
+    console.log(
+      `VOLUME SPIKE: ${market.question.slice(0, 50)}... ` +
+        `${multiplier.toFixed(1)}x ($${currentVolume.toLocaleString()} vs $${avgVolume.toLocaleString()} avg)`
+    );
+
+    return opportunity;
+  }
+
+  /**
+   * Detect thin order books on high-volume markets.
+   */
+  detectThinBook(market: MarketData): Opportunity | null {
+    const MIN_VOLUME_FOR_THIN_BOOK = 10000;
+
+    if (market.volume24h < MIN_VOLUME_FOR_THIN_BOOK) {
+      return null;
+    }
+
+    if (market.totalActiveMakers >= this.thinBookMakerCount) {
+      return null;
+    }
+
+    const opportunity: Opportunity = {
+      type: OpportunityType.THIN_BOOK,
+      marketId: market.marketId,
+      question: market.question,
+      timestamp: new Date(),
+      description: `Only ${market.totalActiveMakers} active makers with $${market.volume24h.toLocaleString()} volume`,
+      potentialProfit: 0,
+      yesNoSum: 0,
+      availableLiquidity: 0,
+      spreadPct: 0,
+      tokenSide: '',
+      currentVolume: 0,
+      averageVolume: 0,
+      spikeMultiplier: 0,
+      makerCount: market.totalActiveMakers,
+      volume: market.volume24h,
+      relatedMarketId: '',
+      priceDifference: 0,
+    };
+
+    return opportunity;
+  }
+
+  /**
+   * Extract a key for grouping related markets (for mispricing detection).
+   */
+  private extractMarketKey(question: string): string | null {
+    const patterns = [
+      // Price targets
+      /(BTC|ETH|SOL|XRP)\s*[><=]+\s*\$?(\d+[KkMm]?)/i,
+      // Election/political
+      /Will\s+(\w+)\s+(win|be elected|become)/i,
+      // Event outcomes
+      /(\w+)\s+(happens?|occurs?|passes?)\s+by/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = question.match(pattern);
+      if (match) {
+        return match
+          .slice(1)
+          .filter(Boolean)
+          .map((g) => g.toLowerCase())
+          .join('_');
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Detect mispricing between correlated markets.
+   */
+  detectMispricing(markets: MarketData[]): Opportunity[] {
+    const opportunities: Opportunity[] = [];
+    const groups: Map<string, MarketData[]> = new Map();
+
+    // Group markets by their key
+    for (const market of markets) {
+      const key = this.extractMarketKey(market.question);
+      if (key) {
+        if (!groups.has(key)) {
+          groups.set(key, []);
+        }
+        groups.get(key)!.push(market);
+      }
+    }
+
+    // Analyze each group for mispricing
+    for (const [key, group] of groups) {
+      if (group.length < 2) continue;
+
+      const datedMarkets = group.filter((m) => m.endDate);
+      if (datedMarkets.length < 2) continue;
+
+      datedMarkets.sort((a, b) => a.endDate!.getTime() - b.endDate!.getTime());
+
+      for (let i = 0; i < datedMarkets.length - 1; i++) {
+        const earlier = datedMarkets[i];
+        const later = datedMarkets[i + 1];
+
+        const earlierYes = getYesPrice(earlier);
+        const laterYes = getYesPrice(later);
+
+        if (earlierYes > 0 && laterYes > 0) {
+          const priceDiff = earlierYes - laterYes;
+
+          if (priceDiff > 0.05) {
+            const opportunity: Opportunity = {
+              type: OpportunityType.MISPRICING,
+              marketId: earlier.marketId,
+              question: earlier.question,
+              timestamp: new Date(),
+              description: `Earlier event priced higher than later: ${(earlierYes * 100).toFixed(2)}% vs ${(laterYes * 100).toFixed(2)}%`,
+              potentialProfit: 0,
+              yesNoSum: 0,
+              availableLiquidity: 0,
+              spreadPct: 0,
+              tokenSide: '',
+              currentVolume: 0,
+              averageVolume: 0,
+              spikeMultiplier: 0,
+              makerCount: 0,
+              volume: 0,
+              relatedMarketId: later.marketId,
+              priceDifference: priceDiff,
+            };
+
+            console.log(
+              `MISPRICING: ${key} - earlier=${(earlierYes * 100).toFixed(2)}%, later=${(laterYes * 100).toFixed(2)}%`
+            );
+
+            opportunities.push(opportunity);
+          }
+        }
+      }
+    }
+
+    return opportunities;
+  }
+
+  /**
+   * Analyze a market snapshot and detect all opportunities.
+   */
+  analyzeSnapshot(snapshot: MarketSnapshot): Opportunity[] {
+    const allOpportunities: Opportunity[] = [];
+
+    for (const market of snapshot.markets) {
+      // Arbitrage
+      const arb = this.detectArbitrage(market);
+      if (arb) allOpportunities.push(arb);
+
+      // Wide spreads
+      const spreads = this.detectWideSpread(market);
+      allOpportunities.push(...spreads);
+
+      // Volume spikes
+      const spike = this.detectVolumeSpike(market);
+      if (spike) allOpportunities.push(spike);
+
+      // Thin books
+      const thin = this.detectThinBook(market);
+      if (thin) allOpportunities.push(thin);
+    }
+
+    // Mispricing (needs all markets at once)
+    const mispricings = this.detectMispricing(snapshot.markets);
+    allOpportunities.push(...mispricings);
+
+    // Update history
+    this.opportunities.push(...allOpportunities);
+
+    // Update counts
+    for (const op of allOpportunities) {
+      const count = this.opportunityCounts.get(op.type) || 0;
+      this.opportunityCounts.set(op.type, count + 1);
+    }
+
+    const countByType = {
+      arb: allOpportunities.filter((o) => o.type === OpportunityType.ARBITRAGE).length,
+      spread: allOpportunities.filter((o) => o.type === OpportunityType.WIDE_SPREAD).length,
+      spike: allOpportunities.filter((o) => o.type === OpportunityType.VOLUME_SPIKE).length,
+      thin: allOpportunities.filter((o) => o.type === OpportunityType.THIN_BOOK).length,
+      misprice: allOpportunities.filter((o) => o.type === OpportunityType.MISPRICING).length,
+    };
+
+    console.log(
+      `Analysis complete: ${allOpportunities.length} opportunities detected ` +
+        `(arb=${countByType.arb}, spread=${countByType.spread}, ` +
+        `spike=${countByType.spike}, thin=${countByType.thin}, misprice=${countByType.misprice})`
+    );
+
+    // Update snapshot with opportunities
+    snapshot.opportunities = allOpportunities;
+
+    return allOpportunities;
+  }
+
+  getStats(): DetectorStats {
+    const byType: Record<string, number> = {};
+    for (const [type, count] of this.opportunityCounts) {
+      byType[type] = count;
+    }
+
+    return {
+      totalOpportunities: this.opportunities.length,
+      byType,
+      recent1h: this.getRecentOpportunities(1.0).length,
+      thresholds: {
+        arbitrage: this.arbitrageThreshold,
+        wideSpread: this.wideSpreadThreshold,
+        volumeSpikeMultiplier: this.volumeSpikeMultiplier,
+        thinBookMakerCount: this.thinBookMakerCount,
+      },
+    };
+  }
+
+  clearOldOpportunities(hours: number = 24): void {
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
+    const oldCount = this.opportunities.length;
+    this.opportunities = this.opportunities.filter((op) => op.timestamp >= cutoff);
+    const removed = oldCount - this.opportunities.length;
+    if (removed > 0) {
+      console.log(`Cleared ${removed} old opportunities`);
+    }
+  }
+}
+
+/**
+ * Create an OpportunityDetector using environment variables.
+ */
+export function createDetectorFromEnv(scanner: MarketScanner): OpportunityDetector {
+  return new OpportunityDetector({
+    scanner,
+    arbitrageThreshold: parseFloat(process.env.ARBITRAGE_THRESHOLD || '0.995'),
+    wideSpreadThreshold: parseFloat(process.env.WIDE_SPREAD_THRESHOLD || '0.05'),
+    volumeSpikeMultiplier: parseFloat(process.env.VOLUME_SPIKE_MULTIPLIER || '3.0'),
+    thinBookMakerCount: parseInt(process.env.THIN_BOOK_MAKER_COUNT || '5'),
+  });
+}
