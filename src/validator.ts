@@ -65,6 +65,7 @@ export class MarketValidator {
   private analysisIntervalId: NodeJS.Timeout | null = null;
   private pnlRecordIntervalId: NodeJS.Timeout | null = null;
   private paperTradingIntervalId: NodeJS.Timeout | null = null;
+  private dashboardIntervalId: NodeJS.Timeout | null = null;
 
   private priorityMarketIds: Set<string> = new Set();
   private cashBalance: number;
@@ -146,19 +147,8 @@ export class MarketValidator {
     // Start intervals
     this.startIntervals();
 
-    console.log(`
-╔════════════════════════════════════════════════════════════════╗
-║           POLYMARKET MARKET VALIDATOR STARTED                  ║
-╠════════════════════════════════════════════════════════════════╣
-║  Full scan interval:     ${this.config.fullScanInterval}s                              ║
-║  Priority scan interval: ${this.config.priorityScanInterval}s                              ║
-║  Priority markets:       ${this.config.priorityMarketCount}                              ║
-║  Paper trading:          ${this.config.paperTradingEnabled ? 'ENABLED' : 'DISABLED'}                          ║
-║  Initial capital:        $${this.config.initialCapital}                           ║
-║                                                                ║
-║  Press Ctrl+C to stop                                          ║
-╚════════════════════════════════════════════════════════════════╝
-    `);
+    // Render initial dashboard
+    await this.renderDashboard();
   }
 
   /**
@@ -196,6 +186,12 @@ export class MarketValidator {
         60 * 1000
       );
     }
+
+    // Dashboard refresh every 10 seconds
+    this.dashboardIntervalId = setInterval(
+      () => this.renderDashboard(),
+      10 * 1000
+    );
   }
 
   /**
@@ -475,6 +471,80 @@ export class MarketValidator {
   }
 
   /**
+   * Render the live dashboard to the console.
+   */
+  private async renderDashboard(): Promise<void> {
+    if (this.isStopping) return;
+
+    try {
+      // Gather all stats
+      const opStats = await getOpportunityStats();
+      const tradeStats = await getTotalTradeStats();
+      const pnl = await getLatestPnL();
+
+      let portfolio = { cashBalance: this.cashBalance, positionValue: 0, totalEquity: this.cashBalance, unrealizedPnl: 0 };
+      if (this.paperTrader) {
+        portfolio = await this.paperTrader.getPortfolioSummary();
+      }
+
+      const runtime = this.startTime ? this.formatDuration(Date.now() - this.startTime.getTime()) : '0s';
+      const lastScan = this.lastScanTime ? this.lastScanTime.toLocaleTimeString() : 'Never';
+
+      // Parse numeric values from DB
+      const realizedPnl = parseFloat(String(pnl?.realized_pnl || 0));
+      const unrealizedPnl = parseFloat(String(portfolio.unrealizedPnl || 0));
+      const totalPnl = realizedPnl + unrealizedPnl;
+      const cashBalance = parseFloat(String(portfolio.cashBalance || this.cashBalance));
+      const positionValue = parseFloat(String(portfolio.positionValue || 0));
+      const totalEquity = cashBalance + positionValue;
+
+      // Calculate fill rate
+      const totalOrders = tradeStats.total_trades > 0 ? tradeStats.total_trades * 2 : 0; // Rough estimate
+      const fillRate = totalOrders > 0 ? ((tradeStats.total_trades / totalOrders) * 100).toFixed(1) : '0.0';
+
+      // Format P&L with color indicators
+      const pnlSign = totalPnl >= 0 ? '+' : '';
+      const pnlDisplay = `${pnlSign}$${totalPnl.toFixed(2)}`;
+
+      // Clear screen and move cursor to top
+      process.stdout.write('\x1B[2J\x1B[0f');
+
+      // Render dashboard
+      console.log(`
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    POLYMARKET MARKET VALIDATOR                               ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Runtime: ${runtime.padEnd(20)}                    Last scan: ${lastScan.padEnd(15)}   ║
+║  Total scans: ${String(this.totalScans).padEnd(10)}                        Scan duration: ${this.lastScanDuration.toFixed(1).padEnd(6)}s  ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  OPPORTUNITIES DETECTED                                                      ║
+║  ├─ Arbitrage:    ${String(opStats.by_type.arbitrage || 0).padEnd(8)}  ├─ Mispricing:   ${String(opStats.by_type.mispricing || 0).padEnd(8)}           ║
+║  ├─ Wide Spread:  ${String(opStats.by_type.wide_spread || 0).padEnd(8)}  └─ Thin Book:   ${String(opStats.by_type.thin_book || 0).padEnd(8)}           ║
+║  └─ Total:        ${String(opStats.total).padEnd(8)}                                             ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  PAPER TRADING                                                               ║
+║  ├─ Trades executed:  ${String(tradeStats.total_trades).padEnd(8)}                                       ║
+║  ├─ Total volume:     $${tradeStats.total_volume.toFixed(2).padEnd(12)}                                  ║
+║  └─ Total fees:       $${tradeStats.total_fees.toFixed(2).padEnd(12)}                                  ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  PORTFOLIO                                                                   ║
+║  ├─ Cash balance:     $${cashBalance.toFixed(2).padEnd(12)}                                  ║
+║  ├─ Position value:   $${positionValue.toFixed(2).padEnd(12)}                                  ║
+║  ├─ Total equity:     $${totalEquity.toFixed(2).padEnd(12)}                                  ║
+║  ├─ Realized P&L:     $${realizedPnl.toFixed(2).padEnd(12)}                                  ║
+║  ├─ Unrealized P&L:   $${unrealizedPnl.toFixed(2).padEnd(12)}                                  ║
+║  └─ TOTAL P&L:        ${pnlDisplay.padEnd(14)}                                  ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Config: Full scan ${this.config.fullScanInterval}s | Priority scan ${this.config.priorityScanInterval}s | ${this.priorityMarketIds.size} priority markets        ║
+║  Press Ctrl+C to stop                                                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+      `);
+    } catch (error) {
+      // Silently ignore dashboard errors to avoid spam
+    }
+  }
+
+  /**
    * Get current validator statistics.
    */
   async getStats(): Promise<ValidatorStats> {
@@ -514,6 +584,7 @@ export class MarketValidator {
     if (this.analysisIntervalId) clearInterval(this.analysisIntervalId);
     if (this.pnlRecordIntervalId) clearInterval(this.pnlRecordIntervalId);
     if (this.paperTradingIntervalId) clearInterval(this.paperTradingIntervalId);
+    if (this.dashboardIntervalId) clearInterval(this.dashboardIntervalId);
 
     // Wait for pending operations to complete (max 10 seconds)
     let waitTime = 0;
