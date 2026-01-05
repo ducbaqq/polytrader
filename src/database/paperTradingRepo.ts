@@ -467,13 +467,16 @@ export async function selectMediumVolumeMarket(): Promise<{ market_id: string; q
  */
 export async function selectNewMarket(): Promise<{ market_id: string; question: string; volume_24h: number } | null> {
   return queryOne(
-    `SELECT DISTINCT ms.market_id, ms.question, ms.volume_24h
-     FROM market_snapshots ms
-     LEFT JOIN paper_markets pm ON ms.market_id = pm.market_id AND pm.status = 'ACTIVE'
-     WHERE ms.created_at > NOW() - INTERVAL '24 hours'
-       AND ms.volume_24h > 10000
-       AND pm.id IS NULL
-     ORDER BY ms.created_at DESC
+    `SELECT market_id, question, volume_24h FROM (
+       SELECT DISTINCT ON (ms.market_id) ms.market_id, ms.question, ms.volume_24h, ms.created_at
+       FROM market_snapshots ms
+       LEFT JOIN paper_markets pm ON ms.market_id = pm.market_id AND pm.status = 'ACTIVE'
+       WHERE ms.created_at > NOW() - INTERVAL '24 hours'
+         AND ms.volume_24h > 10000
+         AND pm.id IS NULL
+       ORDER BY ms.market_id, ms.created_at DESC
+     ) sub
+     ORDER BY created_at DESC
      LIMIT 1`
   );
 }
