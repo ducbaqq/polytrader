@@ -265,13 +265,21 @@ export async function placeMarketMakingOrders(
     return { buyOrderId: null, sellOrderId: null };
   }
 
+  // Parse as numbers (PostgreSQL returns numeric as strings)
+  const bestBid = parseFloat(String(orderBook.best_bid_price));
+  const bestAsk = parseFloat(String(orderBook.best_ask_price));
+
+  if (isNaN(bestBid) || isNaN(bestAsk)) {
+    return { buyOrderId: null, sellOrderId: null };
+  }
+
   // Use percentage-based tick improvement for low-priced tokens
   // Minimum tick is 0.001 (0.1 cent), or 1% of price for very low prices
   const minTick = 0.001;
-  const adjustedTick = Math.max(minTick, Math.min(tickImprovement, orderBook.best_bid_price * 0.1));
+  const adjustedTick = Math.max(minTick, Math.min(tickImprovement, bestBid * 0.1));
 
-  const buyPrice = Math.min(orderBook.best_bid_price + adjustedTick, 0.99);  // Cap at 99 cents
-  const sellPrice = Math.max(orderBook.best_ask_price - adjustedTick, 0.01); // Floor at 1 cent
+  const buyPrice = Math.min(bestBid + adjustedTick, 0.99);  // Cap at 99 cents
+  const sellPrice = Math.max(bestAsk - adjustedTick, 0.01); // Floor at 1 cent
 
   // Validate prices are sensible
   if (buyPrice <= 0 || buyPrice >= 1 || sellPrice <= 0 || sellPrice >= 1) {
@@ -286,6 +294,8 @@ export async function placeMarketMakingOrders(
   let buyOrderId: string | null = null;
   let sellOrderId: string | null = null;
 
+  const spreadPercent = orderBook.spread_percent !== null ? parseFloat(String(orderBook.spread_percent)) : null;
+
   try {
     buyOrderId = await placeOrder(
       {
@@ -295,9 +305,9 @@ export async function placeMarketMakingOrders(
         price: buyPrice,
         size: orderSize,
       },
-      orderBook.best_bid_price,
-      orderBook.best_ask_price,
-      orderBook.spread_percent
+      bestBid,
+      bestAsk,
+      spreadPercent
     );
   } catch (error) {
     console.error('Failed to place buy order:', error);
@@ -312,9 +322,9 @@ export async function placeMarketMakingOrders(
         price: sellPrice,
         size: orderSize,
       },
-      orderBook.best_bid_price,
-      orderBook.best_ask_price,
-      orderBook.spread_percent
+      bestBid,
+      bestAsk,
+      spreadPercent
     );
   } catch (error) {
     console.error('Failed to place sell order:', error);
