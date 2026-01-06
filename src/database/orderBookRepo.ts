@@ -204,3 +204,44 @@ export async function deleteOldOrderBooks(daysToKeep: number = 7): Promise<numbe
   );
   return parseInt(result?.count || '0', 10);
 }
+
+/**
+ * Get price change percentage over the last N minutes.
+ * Returns the percentage change from oldest to newest price.
+ * Negative value means price dropped.
+ */
+export async function getPriceChange(
+  marketId: string,
+  tokenSide: 'YES' | 'NO',
+  minutes: number = 30
+): Promise<number | null> {
+  const result = await queryOne<{ old_price: string; new_price: string }>(
+    `WITH price_data AS (
+       SELECT
+         mid_price,
+         scan_timestamp,
+         ROW_NUMBER() OVER (ORDER BY scan_timestamp ASC) as oldest_rank,
+         ROW_NUMBER() OVER (ORDER BY scan_timestamp DESC) as newest_rank
+       FROM order_book_snapshots
+       WHERE market_id = $1
+         AND token_side = $2
+         AND scan_timestamp > NOW() - INTERVAL '${minutes} minutes'
+         AND mid_price IS NOT NULL
+     )
+     SELECT
+       (SELECT mid_price FROM price_data WHERE oldest_rank = 1) as old_price,
+       (SELECT mid_price FROM price_data WHERE newest_rank = 1) as new_price`,
+    [marketId, tokenSide]
+  );
+
+  if (!result?.old_price || !result?.new_price) {
+    return null;
+  }
+
+  const oldPrice = parseFloat(result.old_price);
+  const newPrice = parseFloat(result.new_price);
+
+  if (oldPrice <= 0) return null;
+
+  return (newPrice - oldPrice) / oldPrice;
+}

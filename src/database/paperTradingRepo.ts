@@ -549,3 +549,47 @@ export async function selectNewMarket(): Promise<{ market_id: string; question: 
      LIMIT 1`
   );
 }
+
+// ============ RISK MANAGEMENT QUERIES ============
+
+/**
+ * Check if there was a recent SELL trade for a market/token (for balanced trading).
+ * Returns true if a sell occurred in the last N minutes, or if no position exists yet.
+ */
+export async function hasRecentSell(
+  marketId: string,
+  tokenSide: 'YES' | 'NO',
+  minutes: number = 10
+): Promise<boolean> {
+  const result = await queryOne<{ has_recent_sell: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM paper_trades
+       WHERE market_id = $1
+         AND token_side = $2
+         AND side = 'SELL'
+         AND executed_at > NOW() - INTERVAL '${minutes} minutes'
+     ) as has_recent_sell`,
+    [marketId, tokenSide]
+  );
+  return result?.has_recent_sell ?? false;
+}
+
+/**
+ * Check if we have any position in this market/token.
+ * Used to allow initial buys without requiring prior sells.
+ */
+export async function hasExistingPosition(
+  marketId: string,
+  tokenSide: 'YES' | 'NO'
+): Promise<boolean> {
+  const result = await queryOne<{ has_position: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM paper_positions
+       WHERE market_id = $1
+         AND token_side = $2
+         AND quantity > 0
+     ) as has_position`,
+    [marketId, tokenSide]
+  );
+  return result?.has_position ?? false;
+}

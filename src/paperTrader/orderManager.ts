@@ -14,11 +14,29 @@ import {
   insertPaperTrade,
   upsertPosition,
   getPositionByMarket,
+  hasRecentSell,
+  hasExistingPosition,
   DBPaperOrder,
 } from '../database/paperTradingRepo';
-import { getLatestOrderBook, DBOrderBookSnapshot } from '../database/orderBookRepo';
+import { getLatestOrderBook, getPriceChange, DBOrderBookSnapshot } from '../database/orderBookRepo';
+
 import { calculateTradeCosts, calculateNetValue } from './costCalculator';
 import { OrderSide, TokenSide } from '../types';
+
+// ============ RISK MANAGEMENT CONSTANTS ============
+
+// A: Position limit - max contracts per token to prevent concentration
+const MAX_POSITION = 300;
+
+// B: Stop loss - skip buying if unrealized P&L below this threshold
+const STOP_LOSS_PCT = -0.05;
+
+// C: Balanced trading - require sell in last N minutes (unless no position)
+const BALANCED_TRADE_WINDOW_MINUTES = 10;
+
+// E: Trend detection - skip buying if price dropped more than this in last 30 mins
+const TREND_DROP_THRESHOLD = -0.05;
+const TREND_LOOKBACK_MINUTES = 30;
 
 export interface OrderRequest {
   marketId: string;
@@ -252,6 +270,7 @@ async function updatePositionAfterTrade(
 /**
  * Place market making orders for a given market.
  * Places both a buy order slightly above best bid and a sell order slightly below best ask.
+ * Includes risk management checks to prevent accumulation in falling markets.
  */
 export async function placeMarketMakingOrders(
   marketId: string,
@@ -303,23 +322,74 @@ export async function placeMarketMakingOrders(
 
   const spreadPercent = orderBook.spread_percent !== null ? parseFloat(String(orderBook.spread_percent)) : null;
 
-  try {
-    buyOrderId = await placeOrder(
-      {
-        marketId,
-        side: 'BUY',
-        tokenSide,
-        price: buyPrice,
-        size: orderSize,
-      },
-      bestBid,
-      bestAsk,
-      spreadPercent
-    );
-  } catch (error) {
-    console.error('Failed to place buy order:', error);
+  // ============ RISK MANAGEMENT CHECKS FOR BUY ORDERS ============
+  let skipBuy = false;
+  let skipReason = '';
+
+  // Get current position for risk checks
+  const position = await getPositionByMarket(marketId, tokenSide);
+  const currentQty = position ? parseFloat(String(position.quantity)) : 0;
+  const unrealizedPnlPct = position?.unrealized_pnl_pct
+    ? parseFloat(String(position.unrealized_pnl_pct))
+    : 0;
+
+  // A: Position limit check
+  if (currentQty >= MAX_POSITION) {
+    skipBuy = true;
+    skipReason = `Position limit reached (${currentQty}/${MAX_POSITION})`;
   }
 
+  // B: Stop loss check
+  if (!skipBuy && currentQty > 0 && unrealizedPnlPct < STOP_LOSS_PCT) {
+    skipBuy = true;
+    skipReason = `Stop loss triggered (${(unrealizedPnlPct * 100).toFixed(1)}% < ${(STOP_LOSS_PCT * 100).toFixed(1)}%)`;
+  }
+
+  // C: Balanced trading check (only if we have a position)
+  if (!skipBuy && currentQty > 0) {
+    const hasPosition = await hasExistingPosition(marketId, tokenSide);
+    const recentlySold = await hasRecentSell(marketId, tokenSide, BALANCED_TRADE_WINDOW_MINUTES);
+
+    if (hasPosition && !recentlySold) {
+      skipBuy = true;
+      skipReason = `Balanced trading: no sell in last ${BALANCED_TRADE_WINDOW_MINUTES} mins`;
+    }
+  }
+
+  // E: Trend detection check
+  if (!skipBuy) {
+    const priceChange = await getPriceChange(marketId, tokenSide, TREND_LOOKBACK_MINUTES);
+    if (priceChange !== null && priceChange < TREND_DROP_THRESHOLD) {
+      skipBuy = true;
+      skipReason = `Price dropping (${(priceChange * 100).toFixed(1)}% in last ${TREND_LOOKBACK_MINUTES} mins)`;
+    }
+  }
+
+  if (skipBuy) {
+    console.log(`[RISK] Skipping BUY for ${marketId}/${tokenSide}: ${skipReason}`);
+  }
+
+  // Place BUY order (if not skipped by risk management)
+  if (!skipBuy) {
+    try {
+      buyOrderId = await placeOrder(
+        {
+          marketId,
+          side: 'BUY',
+          tokenSide,
+          price: buyPrice,
+          size: orderSize,
+        },
+        bestBid,
+        bestAsk,
+        spreadPercent
+      );
+    } catch (error) {
+      console.error('Failed to place buy order:', error);
+    }
+  }
+
+  // Place SELL order (always try, no risk management needed for sells)
   try {
     sellOrderId = await placeOrder(
       {
