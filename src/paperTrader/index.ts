@@ -21,7 +21,7 @@ export interface PaperTraderConfig {
 }
 
 const DEFAULT_CONFIG: PaperTraderConfig = {
-  orderSize: 10,
+  orderSize: 30,
   tickImprovement: 0.01,
   maxOrdersPerMarket: 2,
   tradingEnabled: true,
@@ -100,17 +100,18 @@ export class PaperTrader {
   async getPortfolioSummary(): Promise<PortfolioSummary> {
     const positions = await getPositions();
     const tradeStats = await getTotalTradeStats();
-    const pnl = await getLatestPnL();
 
     // Parse as numbers (PostgreSQL returns numeric as strings)
     const positionValue = positions.reduce((sum, p) => sum + parseFloat(String(p.market_value || 0)), 0);
     const unrealizedPnl = positions.reduce((sum, p) => sum + parseFloat(String(p.unrealized_pnl || 0)), 0);
-    const realizedPnl = tradeStats.net_pnl;
 
-    // Update cash balance based on trades (handle NaN from corrupted data)
-    const totalVolume = isNaN(tradeStats.total_volume) ? 0 : tradeStats.total_volume;
-    const netPnl = isNaN(tradeStats.net_pnl) ? 0 : tradeStats.net_pnl;
-    this.cashBalance = this.initialCapital - totalVolume + netPnl;
+    // Cash balance = initial capital + cash flow from trades
+    // net_value is negative for buys (cash out), positive for sells (cash in)
+    const totalCashFlow = isNaN(tradeStats.total_cash_flow) ? 0 : tradeStats.total_cash_flow;
+    this.cashBalance = this.initialCapital + totalCashFlow;
+
+    // Realized P&L is 0 until positions are closed (we only track unrealized for now)
+    const realizedPnl = 0;
 
     const paperPositions: PaperPosition[] = positions.map((p) => ({
       marketId: p.market_id,

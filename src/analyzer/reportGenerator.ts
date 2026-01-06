@@ -128,7 +128,7 @@ export async function generateValidationReport(
   const slippageCosts = parseFloat(costBreakdown?.slippage_costs || '0');
 
   const grossProfit = tradeStats.total_volume;
-  const netProfit = tradeStats.net_pnl;
+  const netProfit = tradeStats.total_cash_flow;  // Sum of all trade net_values
 
   const feesPctOfGross = grossProfit > 0 ? platformFees / grossProfit : 0;
   const gasPctOfGross = grossProfit > 0 ? gasCosts / grossProfit : 0;

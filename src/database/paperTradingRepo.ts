@@ -229,19 +229,19 @@ export async function getTotalTradeStats(): Promise<{
   total_trades: number;
   total_volume: number;
   total_fees: number;
-  net_pnl: number;
+  total_cash_flow: number;  // Sum of net_value: negative for buys, positive for sells
 }> {
   const result = await queryOne<{
     total_trades: string;
     total_volume: string;
     total_fees: string;
-    net_pnl: string;
+    total_cash_flow: string;
   }>(
     `SELECT
        COUNT(*) as total_trades,
        SUM(value) as total_volume,
        SUM(total_cost) as total_fees,
-       SUM(CASE WHEN side = 'SELL' THEN net_value ELSE -net_value END) as net_pnl
+       SUM(net_value) as total_cash_flow
      FROM paper_trades`
   );
 
@@ -249,7 +249,7 @@ export async function getTotalTradeStats(): Promise<{
     total_trades: parseInt(result?.total_trades || '0', 10),
     total_volume: parseFloat(result?.total_volume || '0'),
     total_fees: parseFloat(result?.total_fees || '0'),
-    net_pnl: parseFloat(result?.net_pnl || '0'),
+    total_cash_flow: parseFloat(result?.total_cash_flow || '0'),
   };
 }
 
@@ -393,9 +393,8 @@ export async function recordPnLSnapshot(
   const positionValue = positions.reduce((sum, p) => sum + parseFloat(String(p.market_value || 0)), 0);
   const unrealizedPnl = positions.reduce((sum, p) => sum + parseFloat(String(p.unrealized_pnl || 0)), 0);
 
-  // Get realized P&L from trades
-  const tradeStats = await getTotalTradeStats();
-  const realizedPnl = tradeStats.net_pnl;
+  // Realized P&L is 0 until positions are closed
+  const realizedPnl = 0;
 
   // Calculate totals
   const totalEquity = cashBalance + positionValue;
