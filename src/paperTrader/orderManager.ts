@@ -107,8 +107,8 @@ export async function checkFills(): Promise<number> {
     }
   }
 
-  // Expire old pending orders
-  await expireOldPendingOrders(5);
+  // Expire old pending orders (30 seconds instead of 5 minutes)
+  await expireOldPendingOrders(0.5);
 
   return fillCount;
 }
@@ -408,4 +408,303 @@ export async function placeMarketMakingOrders(
   }
 
   return { buyOrderId, sellOrderId };
+}
+
+// ============ ARBITRAGE TRADING ============
+
+export interface ArbitrageOrderResult {
+  yesOrderId: string | null;
+  noOrderId: string | null;
+  hedged: boolean;
+  fetchTimeMs: number;
+  orderTimeMs: number;
+  yesAsk: number | null;
+  noAsk: number | null;
+  sum: number | null;
+  theoreticalProfit: number | null;
+}
+
+/**
+ * Place arbitrage orders for a market - BUY both YES and NO tokens.
+ * Only places orders if arbitrage opportunity still exists.
+ */
+export async function placeArbitrageOrders(
+  marketId: string,
+  orderSize: number
+): Promise<ArbitrageOrderResult> {
+  const startTime = Date.now();
+
+  // Fetch order books for both sides
+  const [yesBook, noBook] = await Promise.all([
+    getLatestOrderBook(marketId, 'YES'),
+    getLatestOrderBook(marketId, 'NO'),
+  ]);
+  const fetchTimeMs = Date.now() - startTime;
+
+  // Check if we have valid order book data
+  if (!yesBook?.best_ask_price || !noBook?.best_ask_price) {
+    console.log(`[ARB] ${marketId}: No order book data (fetch: ${fetchTimeMs}ms)`);
+    return {
+      yesOrderId: null,
+      noOrderId: null,
+      hedged: false,
+      fetchTimeMs,
+      orderTimeMs: 0,
+      yesAsk: null,
+      noAsk: null,
+      sum: null,
+      theoreticalProfit: null,
+    };
+  }
+
+  const yesAsk = parseFloat(String(yesBook.best_ask_price));
+  const noAsk = parseFloat(String(noBook.best_ask_price));
+  const sum = yesAsk + noAsk;
+
+  // Verify arbitrage still exists (sum < $0.995)
+  if (sum >= 0.995) {
+    console.log(`[ARB] ${marketId}: Opportunity gone. YES=${yesAsk.toFixed(4)} NO=${noAsk.toFixed(4)} sum=${sum.toFixed(4)} (fetch: ${fetchTimeMs}ms)`);
+    return {
+      yesOrderId: null,
+      noOrderId: null,
+      hedged: false,
+      fetchTimeMs,
+      orderTimeMs: 0,
+      yesAsk,
+      noAsk,
+      sum,
+      theoreticalProfit: null,
+    };
+  }
+
+  // Check available liquidity
+  const yesAskSize = parseFloat(String(yesBook.best_ask_size)) || 0;
+  const noAskSize = parseFloat(String(noBook.best_ask_size)) || 0;
+  const availableLiquidity = Math.min(yesAskSize, noAskSize);
+
+  // Adjust order size to available liquidity
+  const actualOrderSize = Math.min(orderSize, availableLiquidity);
+  if (actualOrderSize < 10) {
+    console.log(`[ARB] ${marketId}: Insufficient liquidity. Available=${availableLiquidity.toFixed(0)} (fetch: ${fetchTimeMs}ms)`);
+    return {
+      yesOrderId: null,
+      noOrderId: null,
+      hedged: false,
+      fetchTimeMs,
+      orderTimeMs: 0,
+      yesAsk,
+      noAsk,
+      sum,
+      theoreticalProfit: null,
+    };
+  }
+
+  const theoreticalProfit = (1 - sum) * actualOrderSize;
+  console.log(`[ARB] ${marketId}: Placing orders. YES=${yesAsk.toFixed(4)} NO=${noAsk.toFixed(4)} sum=${sum.toFixed(4)} size=${actualOrderSize} profit=$${theoreticalProfit.toFixed(2)}`);
+
+  // Place both orders as close together as possible
+  const orderStartTime = Date.now();
+  let yesOrderId: string | null = null;
+  let noOrderId: string | null = null;
+
+  try {
+    // Place YES order at ask price (to get filled immediately)
+    yesOrderId = await placeOrder(
+      {
+        marketId,
+        side: 'BUY',
+        tokenSide: 'YES',
+        price: yesAsk,
+        size: actualOrderSize,
+      },
+      yesBook.best_bid_price ? parseFloat(String(yesBook.best_bid_price)) : null,
+      yesAsk,
+      null
+    );
+  } catch (error) {
+    console.error(`[ARB] ${marketId}: Failed to place YES order:`, error);
+  }
+
+  try {
+    // Place NO order at ask price (to get filled immediately)
+    noOrderId = await placeOrder(
+      {
+        marketId,
+        side: 'BUY',
+        tokenSide: 'NO',
+        price: noAsk,
+        size: actualOrderSize,
+      },
+      noBook.best_bid_price ? parseFloat(String(noBook.best_bid_price)) : null,
+      noAsk,
+      null
+    );
+  } catch (error) {
+    console.error(`[ARB] ${marketId}: Failed to place NO order:`, error);
+  }
+
+  const orderTimeMs = Date.now() - orderStartTime;
+  console.log(`[ARB] ${marketId}: Orders placed in ${orderTimeMs}ms. YES=${yesOrderId?.slice(0, 8) || 'FAILED'} NO=${noOrderId?.slice(0, 8) || 'FAILED'}`);
+
+  return {
+    yesOrderId,
+    noOrderId,
+    hedged: false,
+    fetchTimeMs,
+    orderTimeMs,
+    yesAsk,
+    noAsk,
+    sum,
+    theoreticalProfit,
+  };
+}
+
+/**
+ * Check arbitrage positions for partial fills and hedge if needed.
+ * Called after checkFills() to handle one-sided fills.
+ */
+export async function handlePartialArbitrageFills(
+  arbMarketIds: string[]
+): Promise<{ marketId: string; action: string; hedgeOrderId: string | null }[]> {
+  const results: { marketId: string; action: string; hedgeOrderId: string | null }[] = [];
+
+  for (const marketId of arbMarketIds) {
+    const yesPos = await getPositionByMarket(marketId, 'YES');
+    const noPos = await getPositionByMarket(marketId, 'NO');
+
+    const yesQty = yesPos ? parseFloat(String(yesPos.quantity)) : 0;
+    const noQty = noPos ? parseFloat(String(noPos.quantity)) : 0;
+
+    // If balanced, nothing to do
+    if (Math.abs(yesQty - noQty) < 0.01) {
+      continue;
+    }
+
+    // If imbalanced, we have a partial fill problem
+    console.log(`[ARB-HEDGE] ${marketId}: Imbalanced! YES=${yesQty.toFixed(0)} NO=${noQty.toFixed(0)}`);
+
+    let hedgeOrderId: string | null = null;
+    let action: string;
+
+    if (yesQty > noQty) {
+      // Sell excess YES tokens at best bid
+      const excess = yesQty - noQty;
+      const yesBook = await getLatestOrderBook(marketId, 'YES');
+      if (yesBook?.best_bid_price) {
+        const bestBid = parseFloat(String(yesBook.best_bid_price));
+        try {
+          hedgeOrderId = await placeOrder(
+            {
+              marketId,
+              side: 'SELL',
+              tokenSide: 'YES',
+              price: bestBid,
+              size: excess,
+            },
+            bestBid,
+            yesBook.best_ask_price ? parseFloat(String(yesBook.best_ask_price)) : null,
+            null
+          );
+          action = `Selling ${excess.toFixed(0)} excess YES at ${bestBid.toFixed(4)}`;
+          console.log(`[ARB-HEDGE] ${marketId}: ${action}`);
+        } catch (error) {
+          action = `Failed to sell excess YES: ${error}`;
+          console.error(`[ARB-HEDGE] ${marketId}: ${action}`);
+        }
+      } else {
+        action = 'No YES bid to hedge against';
+      }
+    } else {
+      // Sell excess NO tokens at best bid
+      const excess = noQty - yesQty;
+      const noBook = await getLatestOrderBook(marketId, 'NO');
+      if (noBook?.best_bid_price) {
+        const bestBid = parseFloat(String(noBook.best_bid_price));
+        try {
+          hedgeOrderId = await placeOrder(
+            {
+              marketId,
+              side: 'SELL',
+              tokenSide: 'NO',
+              price: bestBid,
+              size: excess,
+            },
+            bestBid,
+            noBook.best_ask_price ? parseFloat(String(noBook.best_ask_price)) : null,
+            null
+          );
+          action = `Selling ${excess.toFixed(0)} excess NO at ${bestBid.toFixed(4)}`;
+          console.log(`[ARB-HEDGE] ${marketId}: ${action}`);
+        } catch (error) {
+          action = `Failed to sell excess NO: ${error}`;
+          console.error(`[ARB-HEDGE] ${marketId}: ${action}`);
+        }
+      } else {
+        action = 'No NO bid to hedge against';
+      }
+    }
+
+    results.push({ marketId, action, hedgeOrderId });
+  }
+
+  return results;
+}
+
+// ============ LOGGING FOR AUTOPSY ============
+
+/**
+ * Log why an order expired (didn't fill).
+ */
+export function logOrderExpiredReason(order: DBPaperOrder): string {
+  const orderPrice = parseFloat(String(order.order_price));
+  const bestBid = order.best_bid_at_order !== null ? parseFloat(String(order.best_bid_at_order)) : null;
+  const bestAsk = order.best_ask_at_order !== null ? parseFloat(String(order.best_ask_at_order)) : null;
+  const spread = (bestAsk !== null && bestBid !== null) ? bestAsk - bestBid : null;
+  const orderAge = Date.now() - new Date(order.placed_at).getTime();
+
+  let reason = 'Unknown';
+
+  if (order.side === 'BUY') {
+    if (bestAsk !== null && orderPrice < bestAsk) {
+      reason = `BUY price ${orderPrice.toFixed(4)} below ask ${bestAsk.toFixed(4)} (gap: ${(bestAsk - orderPrice).toFixed(4)})`;
+    } else if (bestAsk === null) {
+      reason = 'No ask available in order book';
+    }
+  } else {
+    if (bestBid !== null && orderPrice > bestBid) {
+      reason = `SELL price ${orderPrice.toFixed(4)} above bid ${bestBid.toFixed(4)} (gap: ${(orderPrice - bestBid).toFixed(4)})`;
+    } else if (bestBid === null) {
+      reason = 'No bid available in order book';
+    }
+  }
+
+  // Additional context
+  if (spread !== null && spread > 0.10) {
+    reason += ` | Wide spread (${(spread * 100).toFixed(1)}%)`;
+  }
+
+  console.log(`[ORDER-EXPIRED] ${order.market_id}/${order.token_side} ${order.side}: ${reason} (age: ${orderAge}ms)`);
+
+  return reason;
+}
+
+/**
+ * Log order fill details.
+ */
+export function logOrderFilled(
+  order: DBPaperOrder,
+  fillPrice: number,
+  fillSize: number
+): void {
+  const orderPrice = parseFloat(String(order.order_price));
+  const slippage = fillPrice - orderPrice;
+  const orderAge = Date.now() - new Date(order.placed_at).getTime();
+  const value = fillPrice * fillSize;
+
+  console.log(
+    `[ORDER-FILLED] ${order.market_id}/${order.token_side} ${order.side}: ` +
+    `order=${orderPrice.toFixed(4)} fill=${fillPrice.toFixed(4)} ` +
+    `slippage=${slippage >= 0 ? '+' : ''}${slippage.toFixed(4)} ` +
+    `size=${fillSize} value=$${value.toFixed(2)} (age: ${orderAge}ms)`
+  );
 }

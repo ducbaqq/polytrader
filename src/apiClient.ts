@@ -362,29 +362,40 @@ export class PolymarketClient {
         }
       }
 
-      // Calculate YES + NO sum
+      // Calculate YES + NO sum using ASK prices (executable cost for arbitrage)
+      // This is what you'd actually PAY to buy both sides
       let yesNoSum = 0;
+      let minArbLiquidity = 0;
       if (yesToken && noToken) {
-        let yesPrice = 0;
-        let noPrice = 0;
+        // For arbitrage detection, we MUST use ask prices (what we pay to buy)
+        // Only flag arbitrage if both ask prices exist
+        if (yesToken.bestAsk && noToken.bestAsk) {
+          yesNoSum = yesToken.bestAsk.price + noToken.bestAsk.price;
+          // Minimum liquidity available for arbitrage (limited by smaller side)
+          minArbLiquidity = Math.min(yesToken.bestAsk.size, noToken.bestAsk.size);
+        } else {
+          // Fallback for display purposes only (not valid for arbitrage)
+          let yesPrice = 0;
+          let noPrice = 0;
 
-        if (yesToken.bestBid && yesToken.bestAsk) {
-          yesPrice = (yesToken.bestBid.price + yesToken.bestAsk.price) / 2;
-        } else if (yesToken.bestBid) {
-          yesPrice = yesToken.bestBid.price;
-        } else if (yesToken.bestAsk) {
-          yesPrice = yesToken.bestAsk.price;
+          if (yesToken.bestBid && yesToken.bestAsk) {
+            yesPrice = (yesToken.bestBid.price + yesToken.bestAsk.price) / 2;
+          } else if (yesToken.bestBid) {
+            yesPrice = yesToken.bestBid.price;
+          } else if (yesToken.bestAsk) {
+            yesPrice = yesToken.bestAsk.price;
+          }
+
+          if (noToken.bestBid && noToken.bestAsk) {
+            noPrice = (noToken.bestBid.price + noToken.bestAsk.price) / 2;
+          } else if (noToken.bestBid) {
+            noPrice = noToken.bestBid.price;
+          } else if (noToken.bestAsk) {
+            noPrice = noToken.bestAsk.price;
+          }
+
+          yesNoSum = yesPrice + noPrice;
         }
-
-        if (noToken.bestBid && noToken.bestAsk) {
-          noPrice = (noToken.bestBid.price + noToken.bestAsk.price) / 2;
-        } else if (noToken.bestBid) {
-          noPrice = noToken.bestBid.price;
-        } else if (noToken.bestAsk) {
-          noPrice = noToken.bestAsk.price;
-        }
-
-        yesNoSum = yesPrice + noPrice;
       }
 
       // Calculate total liquidity at best prices

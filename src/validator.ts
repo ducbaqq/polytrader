@@ -10,6 +10,7 @@ import {
   ValidatorConfig,
   DEFAULT_VALIDATOR_CONFIG,
   ValidatorStats,
+  OpportunityType,
   getYesPrice,
   getNoPrice,
 } from './types';
@@ -268,6 +269,28 @@ export class MarketValidator {
         // Upsert opportunities
         const opResult = await upsertOpportunities(client, opportunities, scanTimestamp);
         console.log(`  Opportunities: ${opResult.inserted} new, ${opResult.expired} expired`);
+
+        // Auto-add arbitrage markets to paper trading
+        for (const op of opportunities) {
+          if (op.type === OpportunityType.ARBITRAGE) {
+            try {
+              // Find market data for volume info
+              const marketData = markets.find(m => m.marketId === op.marketId);
+              await insertPaperMarket(
+                op.marketId,
+                op.question || marketData?.question || null,
+                'ARBITRAGE',
+                null,
+                marketData?.volume24h || 0,
+                this.config.initialCapital / 10  // Smaller allocation for arb
+              );
+              console.log(`[ARB-AUTO] Added arbitrage market to paper trading: ${op.marketId}`);
+            } catch (error) {
+              // Market may already exist in paper_markets
+              console.log(`[ARB-AUTO] Arbitrage market ${op.marketId} already in paper trading`);
+            }
+          }
+        }
       });
 
       if (this.isStopping) return;

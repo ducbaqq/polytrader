@@ -55,23 +55,29 @@ export class OpportunityDetector {
 
   /**
    * Detect arbitrage opportunity when YES + NO < threshold.
+   * Now uses ASK prices (executable cost) instead of mid prices.
    */
   detectArbitrage(market: MarketData): Opportunity | null {
+    // yesNoSum is now calculated using ask prices in apiClient
     if (market.yesNoSum <= 0 || market.yesNoSum >= this.arbitrageThreshold) {
       return null;
     }
 
-    // Calculate available liquidity
-    let availableLiquidity = 0;
-    if (market.yesToken?.bestAsk) {
-      availableLiquidity = market.yesToken.bestAsk.size;
+    // Require both ask prices to exist for valid arbitrage
+    if (!market.yesToken?.bestAsk || !market.noToken?.bestAsk) {
+      return null;
     }
-    if (market.noToken?.bestAsk) {
-      if (availableLiquidity === 0) {
-        availableLiquidity = market.noToken.bestAsk.size;
-      } else {
-        availableLiquidity = Math.min(availableLiquidity, market.noToken.bestAsk.size);
-      }
+
+    // Calculate available liquidity (minimum of both sides)
+    const availableLiquidity = Math.min(
+      market.yesToken.bestAsk.size,
+      market.noToken.bestAsk.size
+    );
+
+    // Require minimum liquidity of 100 contracts (~$50) to be worth trading
+    const MIN_ARB_LIQUIDITY = 100;
+    if (availableLiquidity < MIN_ARB_LIQUIDITY) {
+      return null;
     }
 
     const spreadSize = 1.0 - market.yesNoSum;

@@ -460,8 +460,8 @@ export async function getPnLHistory(
 // ============ MARKET SELECTION QUERIES ============
 
 /**
- * Select a liquid market with balanced prices (YES and NO both between 0.20-0.80).
- * This ensures we're not trading extreme long-shots where one side is nearly worthless.
+ * Select a liquid market with balanced prices and tight spreads.
+ * Prioritizes markets with proven performance (if any history exists).
  */
 export async function selectLiquidMarket(): Promise<{ market_id: string; question: string; avg_volume: number } | null> {
   return queryOne(
@@ -471,26 +471,54 @@ export async function selectLiquidMarket(): Promise<{ market_id: string; questio
          ms.question,
          ms.volume_24h,
          MAX(CASE WHEN obs.token_side = 'YES' THEN obs.best_bid_price END) as yes_price,
-         MAX(CASE WHEN obs.token_side = 'NO' THEN obs.best_bid_price END) as no_price
+         MAX(CASE WHEN obs.token_side = 'NO' THEN obs.best_bid_price END) as no_price,
+         AVG(obs.spread_percent) as avg_spread
        FROM market_snapshots ms
        JOIN order_book_snapshots obs ON ms.id = obs.market_snapshot_id
        WHERE ms.scan_timestamp > NOW() - INTERVAL '6 hours'
        GROUP BY ms.market_id, ms.question, ms.volume_24h, ms.scan_timestamp
+     ),
+     market_performance AS (
+       SELECT
+         market_id,
+         COUNT(*) as past_trades,
+         SUM(CASE WHEN side = 'SELL' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) as sell_rate,
+         COALESCE(SUM(net_value), 0) as past_pnl
+       FROM paper_trades
+       WHERE executed_at > NOW() - INTERVAL '7 days'
+       GROUP BY market_id
+     ),
+     order_stats AS (
+       SELECT
+         market_id,
+         SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) as fill_rate
+       FROM paper_orders
+       WHERE placed_at > NOW() - INTERVAL '24 hours'
+       GROUP BY market_id
      )
      SELECT mp.market_id, mp.question, AVG(mp.volume_24h) as avg_volume
      FROM market_prices mp
      LEFT JOIN paper_markets pm ON mp.market_id = pm.market_id AND pm.status = 'ACTIVE'
+     LEFT JOIN market_performance perf ON mp.market_id = perf.market_id
+     LEFT JOIN order_stats os ON mp.market_id = os.market_id
      WHERE pm.id IS NULL
        AND mp.yes_price BETWEEN 0.20 AND 0.80
        AND mp.no_price BETWEEN 0.20 AND 0.80
+       AND (mp.avg_spread IS NULL OR mp.avg_spread < 0.10)  -- Max 10% spread
+       AND (os.fill_rate IS NULL OR os.fill_rate >= 0.10)   -- Drop <10% fill rate markets
      GROUP BY mp.market_id, mp.question
-     ORDER BY avg_volume DESC
+     ORDER BY
+       CASE WHEN perf.past_trades > 5 AND perf.past_pnl > 0 THEN 0 ELSE 1 END,  -- Profitable first
+       os.fill_rate DESC NULLS LAST,  -- Higher fill rate
+       AVG(mp.avg_spread) ASC NULLS LAST,  -- Tighter spreads
+       AVG(mp.volume_24h) DESC  -- Then by volume
      LIMIT 1`
   );
 }
 
 /**
- * Select a medium volume market with balanced prices.
+ * Select a medium volume market with tight spreads.
+ * Orders by LOWEST spread (ASC), not highest.
  */
 export async function selectMediumVolumeMarket(): Promise<{ market_id: string; question: string; avg_volume: number } | null> {
   return queryOne(
@@ -507,17 +535,53 @@ export async function selectMediumVolumeMarket(): Promise<{ market_id: string; q
        WHERE ms.scan_timestamp > NOW() - INTERVAL '6 hours'
          AND ms.volume_24h BETWEEN 20000 AND 100000
        GROUP BY ms.market_id, ms.question, ms.volume_24h, ms.scan_timestamp
+     ),
+     order_stats AS (
+       SELECT
+         market_id,
+         SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) as fill_rate
+       FROM paper_orders
+       WHERE placed_at > NOW() - INTERVAL '24 hours'
+       GROUP BY market_id
      )
      SELECT mp.market_id, mp.question, AVG(mp.volume_24h) as avg_volume
      FROM market_prices mp
      LEFT JOIN paper_markets pm ON mp.market_id = pm.market_id AND pm.status = 'ACTIVE'
+     LEFT JOIN order_stats os ON mp.market_id = os.market_id
      WHERE pm.id IS NULL
        AND mp.yes_price BETWEEN 0.20 AND 0.80
        AND mp.no_price BETWEEN 0.20 AND 0.80
+       AND mp.avg_spread IS NOT NULL
+       AND mp.avg_spread < 0.05  -- Max 5% spread for medium volume
+       AND (os.fill_rate IS NULL OR os.fill_rate >= 0.10)  -- Drop <10% fill rate markets
      GROUP BY mp.market_id, mp.question
-     ORDER BY AVG(mp.avg_spread) DESC NULLS LAST
+     ORDER BY AVG(mp.avg_spread) ASC NULLS LAST  -- LOWEST spread first (fixed from DESC)
      LIMIT 1`
   );
+}
+
+/**
+ * Drop markets with <10% fill rate in the last 24 hours.
+ */
+export async function dropUnderperformingMarkets(): Promise<number> {
+  const result = await query(`
+    UPDATE paper_markets pm
+    SET status = 'DROPPED'
+    WHERE status = 'ACTIVE'
+      AND market_id IN (
+        SELECT market_id
+        FROM paper_orders
+        WHERE placed_at > NOW() - INTERVAL '24 hours'
+        GROUP BY market_id
+        HAVING COUNT(*) >= 10  -- At least 10 orders to evaluate
+          AND SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END)::float / COUNT(*) < 0.10
+      )
+  `);
+  const dropped = result.rowCount || 0;
+  if (dropped > 0) {
+    console.log(`[MARKET-SELECTION] Dropped ${dropped} underperforming markets (<10% fill rate)`);
+  }
+  return dropped;
 }
 
 /**

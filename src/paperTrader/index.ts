@@ -10,7 +10,12 @@ import {
   recordPnLSnapshot,
   DBPaperMarket,
 } from '../database/paperTradingRepo';
-import { placeMarketMakingOrders, checkFills } from './orderManager';
+import {
+  placeMarketMakingOrders,
+  checkFills,
+  placeArbitrageOrders,
+  handlePartialArbitrageFills,
+} from './orderManager';
 import { PortfolioSummary, PaperPosition, TokenSide } from '../types';
 
 export interface PaperTraderConfig {
@@ -46,20 +51,58 @@ export class PaperTrader {
     ordersPlaced: number;
     ordersFilled: number;
     markets: string[];
+    arbOrdersPlaced: number;
   }> {
+    const cycleStart = Date.now();
+    console.log(`[CYCLE] Starting at ${new Date().toISOString()}`);
+
     if (!this.config.tradingEnabled) {
-      return { ordersPlaced: 0, ordersFilled: 0, markets: [] };
+      console.log(`[CYCLE] Trading disabled, skipping`);
+      return { ordersPlaced: 0, ordersFilled: 0, markets: [], arbOrdersPlaced: 0 };
     }
 
     let ordersPlaced = 0;
+    let arbOrdersPlaced = 0;
     const markets: string[] = [];
+    const arbMarketIds: string[] = [];
 
-    // Get active paper trading markets
+    // Phase 1: Get active paper trading markets
+    const marketsStart = Date.now();
     const activeMarkets = await getActivePaperMarkets();
+    console.log(`[CYCLE] Fetched ${activeMarkets.length} markets in ${Date.now() - marketsStart}ms`);
 
-    // Place orders for each market
-    for (const market of activeMarkets) {
+    // Separate arbitrage markets from regular markets
+    const arbMarkets = activeMarkets.filter(m => m.selection_reason === 'ARBITRAGE');
+    const regularMarkets = activeMarkets.filter(m => m.selection_reason !== 'ARBITRAGE');
+
+    // Phase 2a: Handle ARBITRAGE markets (prioritized)
+    if (arbMarkets.length > 0) {
+      const arbStart = Date.now();
+      console.log(`[CYCLE] Processing ${arbMarkets.length} arbitrage markets`);
+
+      for (const market of arbMarkets) {
+        try {
+          const result = await placeArbitrageOrders(market.market_id, this.config.orderSize);
+
+          if (result.yesOrderId) arbOrdersPlaced++;
+          if (result.noOrderId) arbOrdersPlaced++;
+
+          arbMarketIds.push(market.market_id);
+          markets.push(market.market_id);
+        } catch (error) {
+          console.error(`[CYCLE] Error placing arbitrage orders for ${market.market_id}:`, error);
+        }
+      }
+
+      console.log(`[CYCLE] Arbitrage phase: ${arbOrdersPlaced} orders in ${Date.now() - arbStart}ms`);
+    }
+
+    // Phase 2b: Handle regular market-making markets
+    const mmStart = Date.now();
+    for (const market of regularMarkets) {
       try {
+        const marketStart = Date.now();
+
         // Place YES side orders
         const yesOrders = await placeMarketMakingOrders(
           market.market_id,
@@ -83,15 +126,30 @@ export class PaperTrader {
         if (noOrders.sellOrderId) ordersPlaced++;
 
         markets.push(market.market_id);
+        console.log(`[CYCLE] Market ${market.market_id}: ${(yesOrders.buyOrderId ? 1 : 0) + (yesOrders.sellOrderId ? 1 : 0) + (noOrders.buyOrderId ? 1 : 0) + (noOrders.sellOrderId ? 1 : 0)} orders in ${Date.now() - marketStart}ms`);
       } catch (error) {
-        console.error(`Error placing orders for ${market.market_id}:`, error);
+        console.error(`[CYCLE] Error placing orders for ${market.market_id}:`, error);
+      }
+    }
+    console.log(`[CYCLE] Market-making phase: ${ordersPlaced} orders in ${Date.now() - mmStart}ms`);
+
+    // Phase 3: Check for fills on pending orders
+    const fillsStart = Date.now();
+    const ordersFilled = await checkFills();
+    console.log(`[CYCLE] Fill check: ${ordersFilled} fills in ${Date.now() - fillsStart}ms`);
+
+    // Phase 4: Handle partial arbitrage fills (hedge imbalances)
+    if (arbMarketIds.length > 0) {
+      const hedgeStart = Date.now();
+      const hedgeResults = await handlePartialArbitrageFills(arbMarketIds);
+      if (hedgeResults.length > 0) {
+        console.log(`[CYCLE] Arbitrage hedging: ${hedgeResults.length} markets checked in ${Date.now() - hedgeStart}ms`);
       }
     }
 
-    // Check for fills on pending orders
-    const ordersFilled = await checkFills();
+    console.log(`[CYCLE] Complete in ${Date.now() - cycleStart}ms | MM: ${ordersPlaced} | ARB: ${arbOrdersPlaced} | Filled: ${ordersFilled}`);
 
-    return { ordersPlaced, ordersFilled, markets };
+    return { ordersPlaced, ordersFilled, markets, arbOrdersPlaced };
   }
 
   /**
