@@ -508,8 +508,8 @@ export async function selectLiquidMarket(): Promise<{ market_id: string; questio
        AND (os.fill_rate IS NULL OR os.fill_rate >= 0.10)   -- Drop <10% fill rate markets
      GROUP BY mp.market_id, mp.question
      ORDER BY
-       CASE WHEN perf.past_trades > 5 AND perf.past_pnl > 0 THEN 0 ELSE 1 END,  -- Profitable first
-       os.fill_rate DESC NULLS LAST,  -- Higher fill rate
+       CASE WHEN MAX(perf.past_trades) > 5 AND MAX(perf.past_pnl) > 0 THEN 0 ELSE 1 END,  -- Profitable first
+       MAX(os.fill_rate) DESC NULLS LAST,  -- Higher fill rate
        AVG(mp.avg_spread) ASC NULLS LAST,  -- Tighter spreads
        AVG(mp.volume_24h) DESC  -- Then by volume
      LIMIT 1`
