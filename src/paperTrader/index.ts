@@ -21,7 +21,7 @@ export interface PaperTraderConfig {
 }
 
 const DEFAULT_CONFIG: PaperTraderConfig = {
-  orderSize: 30,
+  orderSize: 100,  // 100 contracts per order for meaningful trade values
   tickImprovement: 0.01,
   maxOrdersPerMarket: 2,
   tradingEnabled: true,

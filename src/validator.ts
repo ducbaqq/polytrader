@@ -94,7 +94,7 @@ export class MarketValidator {
     // Initialize paper trader if enabled
     if (this.config.paperTradingEnabled) {
       this.paperTrader = new PaperTrader(this.config.initialCapital, {
-        orderSize: 30,          // $30 per order (larger size to offset fixed costs)
+        orderSize: 100,         // 100 contracts per order for meaningful trade values
         tickImprovement: 0.01,  // Improve by 1 cent
         maxOrdersPerMarket: 2,
         tradingEnabled: true,

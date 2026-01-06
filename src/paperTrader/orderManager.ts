@@ -291,6 +291,13 @@ export async function placeMarketMakingOrders(
     return { buyOrderId: null, sellOrderId: null };
   }
 
+  // Minimum trade value check - skip if trade value too small relative to gas costs
+  // At $0.10 gas per trade, need at least $5 trade value for fees to be < 2%
+  const tradeValue = orderSize * bestBid;
+  if (tradeValue < 5.0) {
+    return { buyOrderId: null, sellOrderId: null };
+  }
+
   let buyOrderId: string | null = null;
   let sellOrderId: string | null = null;
 

@@ -460,53 +460,91 @@ export async function getPnLHistory(
 // ============ MARKET SELECTION QUERIES ============
 
 /**
- * Select a liquid market (highest volume, lowest spread).
+ * Select a liquid market with balanced prices (YES and NO both between 0.20-0.80).
+ * This ensures we're not trading extreme long-shots where one side is nearly worthless.
  */
 export async function selectLiquidMarket(): Promise<{ market_id: string; question: string; avg_volume: number } | null> {
   return queryOne(
-    `SELECT ms.market_id, ms.question, AVG(ms.volume_24h) as avg_volume
-     FROM market_snapshots ms
-     LEFT JOIN paper_markets pm ON ms.market_id = pm.market_id AND pm.status = 'ACTIVE'
-     WHERE ms.scan_timestamp > NOW() - INTERVAL '24 hours'
-       AND pm.id IS NULL
-     GROUP BY ms.market_id, ms.question
+    `WITH market_prices AS (
+       SELECT
+         ms.market_id,
+         ms.question,
+         ms.volume_24h,
+         MAX(CASE WHEN obs.token_side = 'YES' THEN obs.best_bid_price END) as yes_price,
+         MAX(CASE WHEN obs.token_side = 'NO' THEN obs.best_bid_price END) as no_price
+       FROM market_snapshots ms
+       JOIN order_book_snapshots obs ON ms.id = obs.market_snapshot_id
+       WHERE ms.scan_timestamp > NOW() - INTERVAL '6 hours'
+       GROUP BY ms.market_id, ms.question, ms.volume_24h, ms.scan_timestamp
+     )
+     SELECT mp.market_id, mp.question, AVG(mp.volume_24h) as avg_volume
+     FROM market_prices mp
+     LEFT JOIN paper_markets pm ON mp.market_id = pm.market_id AND pm.status = 'ACTIVE'
+     WHERE pm.id IS NULL
+       AND mp.yes_price BETWEEN 0.20 AND 0.80
+       AND mp.no_price BETWEEN 0.20 AND 0.80
+     GROUP BY mp.market_id, mp.question
      ORDER BY avg_volume DESC
      LIMIT 1`
   );
 }
 
 /**
- * Select a medium volume market (good spread opportunities).
+ * Select a medium volume market with balanced prices.
  */
 export async function selectMediumVolumeMarket(): Promise<{ market_id: string; question: string; avg_volume: number } | null> {
   return queryOne(
-    `SELECT ms.market_id, ms.question, AVG(ms.volume_24h) as avg_volume
-     FROM market_snapshots ms
-     LEFT JOIN order_book_snapshots obs ON ms.id = obs.market_snapshot_id
-     LEFT JOIN paper_markets pm ON ms.market_id = pm.market_id AND pm.status = 'ACTIVE'
-     WHERE ms.scan_timestamp > NOW() - INTERVAL '24 hours'
-       AND ms.volume_24h BETWEEN 20000 AND 50000
-       AND pm.id IS NULL
-     GROUP BY ms.market_id, ms.question
-     ORDER BY AVG(obs.spread_percent) DESC NULLS LAST
+    `WITH market_prices AS (
+       SELECT
+         ms.market_id,
+         ms.question,
+         ms.volume_24h,
+         MAX(CASE WHEN obs.token_side = 'YES' THEN obs.best_bid_price END) as yes_price,
+         MAX(CASE WHEN obs.token_side = 'NO' THEN obs.best_bid_price END) as no_price,
+         AVG(obs.spread_percent) as avg_spread
+       FROM market_snapshots ms
+       JOIN order_book_snapshots obs ON ms.id = obs.market_snapshot_id
+       WHERE ms.scan_timestamp > NOW() - INTERVAL '6 hours'
+         AND ms.volume_24h BETWEEN 20000 AND 100000
+       GROUP BY ms.market_id, ms.question, ms.volume_24h, ms.scan_timestamp
+     )
+     SELECT mp.market_id, mp.question, AVG(mp.volume_24h) as avg_volume
+     FROM market_prices mp
+     LEFT JOIN paper_markets pm ON mp.market_id = pm.market_id AND pm.status = 'ACTIVE'
+     WHERE pm.id IS NULL
+       AND mp.yes_price BETWEEN 0.20 AND 0.80
+       AND mp.no_price BETWEEN 0.20 AND 0.80
+     GROUP BY mp.market_id, mp.question
+     ORDER BY AVG(mp.avg_spread) DESC NULLS LAST
      LIMIT 1`
   );
 }
 
 /**
- * Select a new market (< 24h old with decent volume).
+ * Select a new market with balanced prices.
  */
 export async function selectNewMarket(): Promise<{ market_id: string; question: string; volume_24h: number } | null> {
   return queryOne(
-    `SELECT market_id, question, volume_24h FROM (
-       SELECT DISTINCT ON (ms.market_id) ms.market_id, ms.question, ms.volume_24h, ms.created_at
+    `WITH market_prices AS (
+       SELECT DISTINCT ON (ms.market_id)
+         ms.market_id,
+         ms.question,
+         ms.volume_24h,
+         ms.created_at,
+         MAX(CASE WHEN obs.token_side = 'YES' THEN obs.best_bid_price END) OVER (PARTITION BY ms.market_id) as yes_price,
+         MAX(CASE WHEN obs.token_side = 'NO' THEN obs.best_bid_price END) OVER (PARTITION BY ms.market_id) as no_price
        FROM market_snapshots ms
-       LEFT JOIN paper_markets pm ON ms.market_id = pm.market_id AND pm.status = 'ACTIVE'
-       WHERE ms.created_at > NOW() - INTERVAL '24 hours'
+       JOIN order_book_snapshots obs ON ms.id = obs.market_snapshot_id
+       WHERE ms.created_at > NOW() - INTERVAL '48 hours'
          AND ms.volume_24h > 10000
-         AND pm.id IS NULL
        ORDER BY ms.market_id, ms.created_at DESC
-     ) sub
+     )
+     SELECT market_id, question, volume_24h
+     FROM market_prices mp
+     LEFT JOIN paper_markets pm ON mp.market_id = pm.market_id AND pm.status = 'ACTIVE'
+     WHERE pm.id IS NULL
+       AND mp.yes_price BETWEEN 0.20 AND 0.80
+       AND mp.no_price BETWEEN 0.20 AND 0.80
      ORDER BY created_at DESC
      LIMIT 1`
   );
