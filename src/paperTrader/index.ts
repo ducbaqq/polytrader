@@ -110,9 +110,6 @@ export class PaperTrader {
     const totalCashFlow = isNaN(tradeStats.total_cash_flow) ? 0 : tradeStats.total_cash_flow;
     this.cashBalance = this.initialCapital + totalCashFlow;
 
-    // Realized P&L is 0 until positions are closed (we only track unrealized for now)
-    const realizedPnl = 0;
-
     const paperPositions: PaperPosition[] = positions.map((p) => ({
       marketId: p.market_id,
       tokenSide: p.token_side as TokenSide,
@@ -125,13 +122,17 @@ export class PaperTrader {
       unrealizedPnlPct: p.unrealized_pnl_pct,
     }));
 
+    const totalEquity = this.cashBalance + positionValue;
+    // Total P&L = current equity - initial capital (includes all fees and costs)
+    const totalPnl = totalEquity - this.initialCapital;
+
     return {
       cashBalance: this.cashBalance,
       positionValue,
-      totalEquity: this.cashBalance + positionValue,
-      realizedPnl,
+      totalEquity,
+      realizedPnl: 0,  // Not tracking realized separately
       unrealizedPnl,
-      totalPnl: realizedPnl + unrealizedPnl,
+      totalPnl,
       positions: paperPositions,
     };
   }
