@@ -15,6 +15,7 @@ import { OpportunityDetector, createDetectorFromEnv } from './detector';
 import { DataStorage, createStorageFromEnv } from './storage';
 import { Dashboard, createDashboardFromEnv } from './dashboard';
 import { MarketValidator, createValidatorFromEnv } from './validator';
+import { WSMarketValidator, createWSValidatorFromEnv } from './wsValidator';
 import { initDatabase, closeDatabase } from './database/index';
 import { verifySchema, clearAllData, getTableCounts } from './database/schema';
 import { generateValidationReport } from './analyzer/reportGenerator';
@@ -401,6 +402,15 @@ async function main(): Promise<void> {
     .description('Run the market validation system (scans + paper trading + analysis)')
     .action(async () => {
       await runValidator();
+    });
+
+  // WebSocket validate command - real-time validation using WebSocket
+  program
+    .command('ws-validate')
+    .description('Run validation with WebSocket real-time price updates (lower latency)')
+    .action(async () => {
+      const validator = createWSValidatorFromEnv();
+      await validator.start();
     });
 
   // Report command - generate report from existing data
