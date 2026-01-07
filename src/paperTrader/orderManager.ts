@@ -292,24 +292,28 @@ export async function placeMarketMakingOrders(
     return { buyOrderId: null, sellOrderId: null };
   }
 
-  // Calculate spread and determine if market-making is viable
+  // Calculate spread and determine market-making approach
   const spread = bestAsk - bestBid;
-
-  // Skip if spread is too tight for market-making (need room for tick improvement on both sides)
-  // Minimum viable spread: 2 * minTick = 0.002 + small margin for gas costs
-  const MIN_VIABLE_SPREAD = 0.003;  // 0.3 cents
-  if (spread < MIN_VIABLE_SPREAD) {
-    console.log(`[MM] Skipping ${marketId}/${tokenSide}: spread $${spread.toFixed(4)} < min $${MIN_VIABLE_SPREAD}`);
-    return { buyOrderId: null, sellOrderId: null };
-  }
-
-  // Calculate tick: use at most 40% of spread (20% each side), respecting min/max bounds
   const minTick = 0.001;
-  const maxTickFromSpread = spread * 0.4;  // Leave 60% of spread as margin
-  const adjustedTick = Math.min(tickImprovement, Math.max(minTick, maxTickFromSpread));
 
-  const buyPrice = Math.min(bestBid + adjustedTick, 0.99);  // Cap at 99 cents
-  const sellPrice = Math.max(bestAsk - adjustedTick, 0.01); // Floor at 1 cent
+  let buyPrice: number;
+  let sellPrice: number;
+
+  if (spread <= minTick) {
+    // Minimum tick spread - can't improve, join the queue at best bid/ask
+    buyPrice = bestBid;
+    sellPrice = bestAsk;
+  } else if (spread < 0.005) {
+    // Tight spread (0.1-0.5 cents) - improve by minimum tick only
+    buyPrice = Math.min(bestBid + minTick, 0.99);
+    sellPrice = Math.max(bestAsk - minTick, 0.01);
+  } else {
+    // Wider spread - use percentage-based improvement (max 40% of spread)
+    const maxTickFromSpread = spread * 0.4;
+    const adjustedTick = Math.min(tickImprovement, Math.max(minTick, maxTickFromSpread));
+    buyPrice = Math.min(bestBid + adjustedTick, 0.99);
+    sellPrice = Math.max(bestAsk - adjustedTick, 0.01);
+  }
 
   // Validate prices are sensible
   if (buyPrice <= 0 || buyPrice >= 1 || sellPrice <= 0 || sellPrice >= 1) {
