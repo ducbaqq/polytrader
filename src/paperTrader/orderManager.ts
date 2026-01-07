@@ -292,10 +292,21 @@ export async function placeMarketMakingOrders(
     return { buyOrderId: null, sellOrderId: null };
   }
 
-  // Use percentage-based tick improvement for low-priced tokens
-  // Minimum tick is 0.001 (0.1 cent), or 1% of price for very low prices
+  // Calculate spread and determine if market-making is viable
+  const spread = bestAsk - bestBid;
+
+  // Skip if spread is too tight for market-making (need room for tick improvement on both sides)
+  // Minimum viable spread: 2 * minTick = 0.002 + small margin for gas costs
+  const MIN_VIABLE_SPREAD = 0.003;  // 0.3 cents
+  if (spread < MIN_VIABLE_SPREAD) {
+    console.log(`[MM] Skipping ${marketId}/${tokenSide}: spread $${spread.toFixed(4)} < min $${MIN_VIABLE_SPREAD}`);
+    return { buyOrderId: null, sellOrderId: null };
+  }
+
+  // Calculate tick: use at most 40% of spread (20% each side), respecting min/max bounds
   const minTick = 0.001;
-  const adjustedTick = Math.max(minTick, Math.min(tickImprovement, bestBid * 0.1));
+  const maxTickFromSpread = spread * 0.4;  // Leave 60% of spread as margin
+  const adjustedTick = Math.min(tickImprovement, Math.max(minTick, maxTickFromSpread));
 
   const buyPrice = Math.min(bestBid + adjustedTick, 0.99);  // Cap at 99 cents
   const sellPrice = Math.max(bestAsk - adjustedTick, 0.01); // Floor at 1 cent
@@ -305,8 +316,9 @@ export async function placeMarketMakingOrders(
     return { buyOrderId: null, sellOrderId: null };
   }
 
-  // Only place if there's still a positive spread after our improvement
+  // Safety check: ensure we haven't crossed prices (should never happen with above logic)
   if (sellPrice <= buyPrice) {
+    console.log(`[MM] Price inversion for ${marketId}/${tokenSide}: buy=$${buyPrice.toFixed(4)} sell=$${sellPrice.toFixed(4)}`);
     return { buyOrderId: null, sellOrderId: null };
   }
 
