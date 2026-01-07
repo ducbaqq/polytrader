@@ -1,9 +1,11 @@
 /**
  * WebSocket-based validator - uses real-time data instead of REST polling.
- * This is an alternative to the REST-based MarketValidator that provides
- * lower latency updates via WebSocket connections.
+ *
+ * CRITICAL: Arbitrage detection runs on EVERY WebSocket price update for
+ * instant reaction. Market making runs on a slower 60-second cycle.
  */
 
+import { v4 as uuidv4 } from 'uuid';
 import {
   ValidatorConfig,
   DEFAULT_VALIDATOR_CONFIG,
@@ -33,8 +35,47 @@ import {
   recordPnLSnapshot,
   getLatestPnL,
   getTotalTradeStats,
+  insertPaperOrder,
+  insertPaperTrade,
+  upsertPosition,
 } from './database/paperTradingRepo';
 import { PaperTrader } from './paperTrader';
+import { calculateTradeCosts, calculateNetValue } from './paperTrader/costCalculator';
+
+// ============ FAST-PATH ARBITRAGE TYPES ============
+
+interface MarketPrices {
+  yesAsk: number | null;
+  yesBid: number | null;
+  noAsk: number | null;
+  noBid: number | null;
+  yesAskSize: number | null;
+  noAskSize: number | null;
+  lastUpdate: Date;
+}
+
+interface ArbitrageExecution {
+  marketId: string;
+  yesAsk: number;
+  noAsk: number;
+  sum: number;
+  profit: number;
+  size: number;
+  wssTimestamp: Date;
+  detectionTime: number;  // ms from WSS update to detection
+  executionTime: number;  // ms from detection to order placement
+  totalLatency: number;   // ms from WSS update to order placement
+}
+
+interface LatencyMetrics {
+  totalExecutions: number;
+  avgDetectionTime: number;
+  avgExecutionTime: number;
+  avgTotalLatency: number;
+  minLatency: number;
+  maxLatency: number;
+  last10Latencies: number[];
+}
 
 export class WSMarketValidator {
   private wsScanner: WSMarketScanner;
@@ -61,6 +102,30 @@ export class WSMarketValidator {
 
   private cashBalance: number;
   private paperTrader: PaperTrader | null = null;
+
+  // ============ FAST-PATH ARBITRAGE STATE ============
+  // In-memory price cache for instant arbitrage detection
+  private priceCache: Map<string, MarketPrices> = new Map();
+
+  // Rate limiting: track last arbitrage execution per market
+  private lastArbExecution: Map<string, number> = new Map();
+  private readonly ARB_RATE_LIMIT_MS = 1000; // 1 second between executions per market
+
+  // Latency tracking
+  private arbExecutions: ArbitrageExecution[] = [];
+  private latencyMetrics: LatencyMetrics = {
+    totalExecutions: 0,
+    avgDetectionTime: 0,
+    avgExecutionTime: 0,
+    avgTotalLatency: 0,
+    minLatency: Infinity,
+    maxLatency: 0,
+    last10Latencies: [],
+  };
+
+  // Arbitrage config
+  private readonly ARB_THRESHOLD = 0.995;  // YES + NO must be < this
+  private readonly ARB_ORDER_SIZE = 50;    // Contracts per side
 
   constructor(config: Partial<ValidatorConfig> = {}) {
     this.config = { ...DEFAULT_VALIDATOR_CONFIG, ...config };
@@ -112,13 +177,263 @@ export class WSMarketValidator {
 
   /**
    * Handle incoming price updates.
+   * CRITICAL: This runs on EVERY WebSocket message for real-time arbitrage detection.
    */
   private handlePriceUpdates(updates: WSPriceUpdate[]): void {
+    const receiveTime = Date.now();
     this.totalUpdates += updates.length;
     this.lastUpdateTime = new Date();
 
     // Add to buffer for batch DB write
     this.updateBuffer.push(...updates);
+
+    // FAST PATH: Update price cache and check for arbitrage immediately
+    for (const update of updates) {
+      this.updatePriceCache(update, receiveTime);
+    }
+
+    // Check all updated markets for arbitrage opportunities
+    const updatedMarketIds = new Set(updates.map(u => u.marketId));
+    for (const marketId of updatedMarketIds) {
+      this.checkAndExecuteArbitrage(marketId, receiveTime);
+    }
+  }
+
+  /**
+   * Update in-memory price cache with WebSocket data.
+   */
+  private updatePriceCache(update: WSPriceUpdate, receiveTime: number): void {
+    let prices = this.priceCache.get(update.marketId);
+    if (!prices) {
+      prices = {
+        yesAsk: null,
+        yesBid: null,
+        noAsk: null,
+        noBid: null,
+        yesAskSize: null,
+        noAskSize: null,
+        lastUpdate: new Date(),
+      };
+      this.priceCache.set(update.marketId, prices);
+    }
+
+    if (update.outcome === 'YES') {
+      prices.yesAsk = update.bestAsk?.price ?? prices.yesAsk;
+      prices.yesBid = update.bestBid?.price ?? prices.yesBid;
+      prices.yesAskSize = update.bestAsk?.size ?? prices.yesAskSize;
+    } else {
+      prices.noAsk = update.bestAsk?.price ?? prices.noAsk;
+      prices.noBid = update.bestBid?.price ?? prices.noBid;
+      prices.noAskSize = update.bestAsk?.size ?? prices.noAskSize;
+    }
+    prices.lastUpdate = new Date(receiveTime);
+  }
+
+  /**
+   * FAST-PATH ARBITRAGE: Check and execute arbitrage instantly.
+   * This runs on EVERY price update - must be extremely fast.
+   */
+  private async checkAndExecuteArbitrage(marketId: string, wssReceiveTime: number): Promise<void> {
+    const detectionStart = Date.now();
+
+    // Rate limiting: don't execute more than once per second per market
+    const lastExec = this.lastArbExecution.get(marketId) || 0;
+    if (detectionStart - lastExec < this.ARB_RATE_LIMIT_MS) {
+      return;
+    }
+
+    const prices = this.priceCache.get(marketId);
+    if (!prices || prices.yesAsk === null || prices.noAsk === null) {
+      return;
+    }
+
+    const sum = prices.yesAsk + prices.noAsk;
+
+    // Check if arbitrage exists: YES_ask + NO_ask < threshold
+    if (sum >= this.ARB_THRESHOLD) {
+      return;
+    }
+
+    const detectionTime = Date.now() - detectionStart;
+    const profit = 1 - sum;
+
+    // Calculate available size (minimum of both sides)
+    const availableSize = Math.min(
+      prices.yesAskSize || 0,
+      prices.noAskSize || 0,
+      this.ARB_ORDER_SIZE
+    );
+
+    if (availableSize < 10) {
+      // Not enough liquidity
+      return;
+    }
+
+    console.log(
+      `[FAST-ARB] OPPORTUNITY DETECTED: ${marketId} ` +
+      `YES=${prices.yesAsk.toFixed(4)} NO=${prices.noAsk.toFixed(4)} ` +
+      `sum=${sum.toFixed(4)} profit=${(profit * 100).toFixed(2)}% ` +
+      `detection=${detectionTime}ms`
+    );
+
+    // Execute arbitrage orders
+    const executionStart = Date.now();
+    try {
+      await this.executeArbitrageOrders(marketId, prices, availableSize);
+      this.lastArbExecution.set(marketId, Date.now());
+
+      const executionTime = Date.now() - executionStart;
+      const totalLatency = Date.now() - wssReceiveTime;
+
+      // Track latency metrics
+      this.recordLatencyMetrics({
+        marketId,
+        yesAsk: prices.yesAsk,
+        noAsk: prices.noAsk,
+        sum,
+        profit,
+        size: availableSize,
+        wssTimestamp: new Date(wssReceiveTime),
+        detectionTime,
+        executionTime,
+        totalLatency,
+      });
+
+      console.log(
+        `[FAST-ARB] EXECUTED: ${marketId} ` +
+        `size=${availableSize} ` +
+        `latency: detect=${detectionTime}ms exec=${executionTime}ms total=${totalLatency}ms`
+      );
+    } catch (error) {
+      console.error(`[FAST-ARB] Execution failed for ${marketId}:`, error);
+    }
+  }
+
+  /**
+   * Execute arbitrage orders atomically (both YES and NO).
+   */
+  private async executeArbitrageOrders(
+    marketId: string,
+    prices: MarketPrices,
+    size: number
+  ): Promise<void> {
+    if (prices.yesAsk === null || prices.noAsk === null) return;
+
+    const yesOrderId = uuidv4();
+    const noOrderId = uuidv4();
+    const yesTradeId = uuidv4();
+    const noTradeId = uuidv4();
+
+    // Calculate trade values and costs
+    const yesValue = size * prices.yesAsk;
+    const noValue = size * prices.noAsk;
+    const yesCosts = calculateTradeCosts(yesValue);
+    const noCosts = calculateTradeCosts(noValue);
+    const yesNetValue = calculateNetValue(yesValue, 'BUY', yesCosts);
+    const noNetValue = calculateNetValue(noValue, 'BUY', noCosts);
+
+    await withTransaction(async (client) => {
+      // Place YES BUY order
+      await insertPaperOrder(client, {
+        marketId,
+        orderId: yesOrderId,
+        side: 'BUY',
+        tokenSide: 'YES',
+        orderPrice: prices.yesAsk!,
+        orderSize: size,
+        bestBidAtOrder: prices.yesBid,
+        bestAskAtOrder: prices.yesAsk,
+        spreadAtOrder: prices.yesAsk! - (prices.yesBid || 0),
+      });
+
+      // Place NO BUY order
+      await insertPaperOrder(client, {
+        marketId,
+        orderId: noOrderId,
+        side: 'BUY',
+        tokenSide: 'NO',
+        orderPrice: prices.noAsk!,
+        orderSize: size,
+        bestBidAtOrder: prices.noBid,
+        bestAskAtOrder: prices.noAsk,
+        spreadAtOrder: prices.noAsk! - (prices.noBid || 0),
+      });
+
+      // Record YES trade
+      await insertPaperTrade(client, {
+        tradeId: yesTradeId,
+        marketId,
+        orderId: yesOrderId,
+        side: 'BUY',
+        tokenSide: 'YES',
+        price: prices.yesAsk!,
+        size,
+        value: yesValue,
+        platformFee: yesCosts.platformFee,
+        gasCost: yesCosts.gasCost,
+        slippageCost: yesCosts.slippageCost,
+        totalCost: yesCosts.totalCost,
+        netValue: yesNetValue,
+      });
+
+      // Record NO trade
+      await insertPaperTrade(client, {
+        tradeId: noTradeId,
+        marketId,
+        orderId: noOrderId,
+        side: 'BUY',
+        tokenSide: 'NO',
+        price: prices.noAsk!,
+        size,
+        value: noValue,
+        platformFee: noCosts.platformFee,
+        gasCost: noCosts.gasCost,
+        slippageCost: noCosts.slippageCost,
+        totalCost: noCosts.totalCost,
+        netValue: noNetValue,
+      });
+
+      // Update positions
+      // For arbitrage BUY: cost basis = price * size (what we paid)
+      const yesCostBasis = prices.yesAsk! * size;
+      const noCostBasis = prices.noAsk! * size;
+      await upsertPosition(client, marketId, 'YES', size, prices.yesAsk!, yesCostBasis, prices.yesAsk!);
+      await upsertPosition(client, marketId, 'NO', size, prices.noAsk!, noCostBasis, prices.noAsk!);
+    });
+  }
+
+  /**
+   * Record latency metrics for monitoring.
+   */
+  private recordLatencyMetrics(execution: ArbitrageExecution): void {
+    this.arbExecutions.push(execution);
+
+    // Keep only last 100 executions
+    if (this.arbExecutions.length > 100) {
+      this.arbExecutions.shift();
+    }
+
+    // Update metrics
+    this.latencyMetrics.totalExecutions++;
+    this.latencyMetrics.last10Latencies.push(execution.totalLatency);
+    if (this.latencyMetrics.last10Latencies.length > 10) {
+      this.latencyMetrics.last10Latencies.shift();
+    }
+
+    // Recalculate averages
+    const recent = this.arbExecutions.slice(-20);
+    this.latencyMetrics.avgDetectionTime = recent.reduce((s, e) => s + e.detectionTime, 0) / recent.length;
+    this.latencyMetrics.avgExecutionTime = recent.reduce((s, e) => s + e.executionTime, 0) / recent.length;
+    this.latencyMetrics.avgTotalLatency = recent.reduce((s, e) => s + e.totalLatency, 0) / recent.length;
+    this.latencyMetrics.minLatency = Math.min(this.latencyMetrics.minLatency, execution.totalLatency);
+    this.latencyMetrics.maxLatency = Math.max(this.latencyMetrics.maxLatency, execution.totalLatency);
+  }
+
+  /**
+   * Get latency metrics for display.
+   */
+  getLatencyMetrics(): LatencyMetrics {
+    return { ...this.latencyMetrics };
   }
 
   /**
@@ -566,6 +881,12 @@ export class WSMarketValidator {
       // Clear screen
       process.stdout.write('\x1B[2J\x1B[0f');
 
+      // Latency metrics for fast-path arbitrage
+      const latency = this.latencyMetrics;
+      const avgLatency = latency.totalExecutions > 0 ? `${latency.avgTotalLatency.toFixed(0)}ms` : 'N/A';
+      const minLatency = latency.minLatency < Infinity ? `${latency.minLatency}ms` : 'N/A';
+      const maxLatency = latency.maxLatency > 0 ? `${latency.maxLatency}ms` : 'N/A';
+
       console.log(`
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                POLYMARKET WEBSOCKET VALIDATOR                                ║
@@ -576,16 +897,21 @@ export class WSMarketValidator {
 ║  WEBSOCKET CONNECTION                                                        ║
 ║  ├─ Subscribed assets:  ${String(wsStats.subscribedAssets).padEnd(8)}                                     ║
 ║  ├─ Subscribed markets: ${String(wsStats.subscribedMarkets).padEnd(8)}                                     ║
-║  ├─ Cached prices:      ${String(wsStats.cachedPrices).padEnd(8)}                                     ║
+║  ├─ Cached prices:      ${String(this.priceCache.size).padEnd(8)}                                     ║
 ║  ├─ Messages received:  ${String(wsStats.messagesReceived).padEnd(8)}                                     ║
 ║  └─ Reconnects:         ${String(wsStats.reconnects).padEnd(8)}                                     ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  FAST-PATH ARBITRAGE (Real-time)                                             ║
+║  ├─ Executions:       ${String(latency.totalExecutions).padEnd(8)}  Avg latency: ${avgLatency.padEnd(10)}            ║
+║  ├─ Min latency:      ${minLatency.padEnd(8)}  Max latency: ${maxLatency.padEnd(10)}            ║
+║  └─ Last 10 (ms):     [${latency.last10Latencies.join(', ').padEnd(40).slice(0, 40)}]  ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  OPPORTUNITIES DETECTED                                                      ║
 ║  ├─ Arbitrage:    ${String(opStats.by_type.arbitrage || 0).padEnd(8)}  ├─ Mispricing:   ${String(opStats.by_type.mispricing || 0).padEnd(8)}           ║
 ║  ├─ Wide Spread:  ${String(opStats.by_type.wide_spread || 0).padEnd(8)}  └─ Thin Book:   ${String(opStats.by_type.thin_book || 0).padEnd(8)}           ║
 ║  └─ Total:        ${String(opStats.total).padEnd(8)}                                             ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  PAPER TRADING                                                               ║
+║  PAPER TRADING (Market Making - 60s cycle)                                   ║
 ║  ├─ Trades executed:  ${String(tradeStats.total_trades).padEnd(8)}                                       ║
 ║  ├─ Total volume:     $${tradeStats.total_volume.toFixed(2).padEnd(12)}                                  ║
 ║  └─ Total fees:       $${tradeStats.total_fees.toFixed(2).padEnd(12)}                                  ║
@@ -672,8 +998,21 @@ export class WSMarketValidator {
     for (const [type, count] of Object.entries(stats.opportunitiesByType)) {
       console.log(`  - ${type}: ${count}`);
     }
+
+    // Fast-path arbitrage latency stats
+    const latency = this.latencyMetrics;
+    console.log('\nFast-Path Arbitrage:');
+    console.log(`  Total executions: ${latency.totalExecutions}`);
+    if (latency.totalExecutions > 0) {
+      console.log(`  Avg latency: ${latency.avgTotalLatency.toFixed(1)}ms`);
+      console.log(`  Min latency: ${latency.minLatency}ms`);
+      console.log(`  Max latency: ${latency.maxLatency}ms`);
+      console.log(`  Avg detection: ${latency.avgDetectionTime.toFixed(1)}ms`);
+      console.log(`  Avg execution: ${latency.avgExecutionTime.toFixed(1)}ms`);
+    }
+
     if (stats.paperTradingEnabled) {
-      console.log(`Paper trades: ${stats.totalPaperTrades}`);
+      console.log(`\nPaper trades: ${stats.totalPaperTrades}`);
       console.log(`Current P&L: $${stats.currentPnl.toFixed(2)}`);
     }
     console.log('='.repeat(60));
