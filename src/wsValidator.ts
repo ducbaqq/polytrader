@@ -5,15 +5,12 @@
  */
 
 import {
-  MarketSnapshot,
   ValidatorConfig,
   DEFAULT_VALIDATOR_CONFIG,
   ValidatorStats,
   OpportunityType,
 } from './types';
-import { OpportunityDetector } from './detector';
 import { WSMarketScanner, WSPriceUpdate, createWSScannerFromEnv } from './wsScanner';
-import { MarketScanner } from './scanner';
 import {
   initDatabase,
   closeDatabase,
@@ -21,7 +18,7 @@ import {
   getPool,
 } from './database/index';
 import { verifySchema, getTableCounts } from './database/schema';
-import { batchInsertWSUpdates, detectArbitrageFromWS } from './database/wsRepo';
+import { batchInsertWSUpdates, detectAllOpportunitiesFromWS } from './database/wsRepo';
 import {
   upsertOpportunities,
   getOpportunityStats,
@@ -41,8 +38,6 @@ import { PaperTrader } from './paperTrader';
 
 export class WSMarketValidator {
   private wsScanner: WSMarketScanner;
-  private detector: OpportunityDetector;
-  private scanner: MarketScanner;  // For volume history (used by detector)
   private config: ValidatorConfig;
 
   private isRunning: boolean = false;
@@ -70,22 +65,8 @@ export class WSMarketValidator {
   constructor(config: Partial<ValidatorConfig> = {}) {
     this.config = { ...DEFAULT_VALIDATOR_CONFIG, ...config };
 
-    // Create WebSocket scanner
+    // Create WebSocket scanner (no REST polling needed)
     this.wsScanner = createWSScannerFromEnv();
-
-    // Create a minimal REST scanner for detector volume history
-    this.scanner = new MarketScanner({
-      scanInterval: 300,  // 5 minutes - just for volume history
-      minVolume: parseFloat(process.env.MIN_VOLUME || '10000'),
-    });
-
-    this.detector = new OpportunityDetector({
-      scanner: this.scanner,
-      arbitrageThreshold: this.config.arbitrageThreshold,
-      wideSpreadThreshold: this.config.wideSpreadThreshold,
-      volumeSpikeMultiplier: this.config.volumeSpikeMultiplier,
-      thinBookMakerCount: this.config.thinBookMakerCount,
-    });
 
     this.cashBalance = this.config.initialCapital;
 
@@ -202,9 +183,9 @@ export class WSMarketValidator {
       5 * 60 * 1000
     );
 
-    // Detect arbitrage every 10 seconds
+    // Detect all opportunities every 10 seconds
     this.arbDetectionIntervalId = setInterval(
-      () => this.detectArbitrage(),
+      () => this.detectOpportunities(),
       10 * 1000
     );
 
@@ -257,64 +238,178 @@ export class WSMarketValidator {
   }
 
   /**
-   * Detect arbitrage opportunities from WebSocket data.
+   * Detect all opportunity types from WebSocket data.
    */
-  private async detectArbitrage(): Promise<void> {
+  private async detectOpportunities(): Promise<void> {
     if (this.isStopping) return;
 
     try {
-      const arbOpportunities = await detectArbitrageFromWS(
-        this.config.arbitrageThreshold
-      );
+      const allOpportunities = await detectAllOpportunitiesFromWS({
+        arbitrageThreshold: this.config.arbitrageThreshold,
+        wideSpreadThreshold: this.config.wideSpreadThreshold,
+        volumeSpikeMultiplier: this.config.volumeSpikeMultiplier,
+      });
 
-      if (arbOpportunities.length > 0) {
-        console.log(`[WS-VALIDATOR] Found ${arbOpportunities.length} arbitrage opportunities!`);
+      const { summary } = allOpportunities;
 
-        // Convert to opportunity format and store
-        const opportunities = arbOpportunities.map(arb => ({
-          type: OpportunityType.ARBITRAGE,
-          marketId: arb.marketId,
-          question: '',
-          timestamp: new Date(),
-          description: `YES+NO=${arb.sum.toFixed(4)} (profit: ${(arb.profit * 100).toFixed(2)}%)`,
-          potentialProfit: arb.profit,
-          yesNoSum: arb.sum,
-          availableLiquidity: 0,
-          spreadPct: 0,
-          tokenSide: '',
-          currentVolume: 0,
-          averageVolume: 0,
-          spikeMultiplier: 0,
-          makerCount: 0,
-          volume: 0,
-          relatedMarketId: '',
-          priceDifference: 0,
-        }));
+      if (summary.totalCount > 0) {
+        console.log(
+          `[WS-VALIDATOR] Found ${summary.totalCount} opportunities: ` +
+          `arb=${summary.arbitrageCount}, spread=${summary.wideSpreadCount}, ` +
+          `spike=${summary.volumeSpikeCount}, thin=${summary.thinBookCount}, misprice=${summary.mispricingCount}`
+        );
 
-        // Store opportunities
-        await withTransaction(async (client) => {
-          await upsertOpportunities(client, opportunities, new Date());
-        });
+        const opportunities: Array<{
+          type: OpportunityType;
+          marketId: string;
+          question: string;
+          timestamp: Date;
+          description: string;
+          potentialProfit: number;
+          yesNoSum: number;
+          availableLiquidity: number;
+          spreadPct: number;
+          tokenSide: string;
+          currentVolume: number;
+          averageVolume: number;
+          spikeMultiplier: number;
+          makerCount: number;
+          volume: number;
+          relatedMarketId: string;
+          priceDifference: number;
+        }> = [];
 
-        // Auto-add to paper trading
-        for (const arb of arbOpportunities) {
+        // Convert arbitrage opportunities
+        for (const arb of allOpportunities.arbitrage) {
+          opportunities.push({
+            type: OpportunityType.ARBITRAGE,
+            marketId: arb.marketId,
+            question: '',
+            timestamp: new Date(),
+            description: `YES+NO=${arb.sum.toFixed(4)} (profit: ${(arb.profit * 100).toFixed(2)}%)`,
+            potentialProfit: arb.profit,
+            yesNoSum: arb.sum,
+            availableLiquidity: 0,
+            spreadPct: 0,
+            tokenSide: '',
+            currentVolume: 0,
+            averageVolume: 0,
+            spikeMultiplier: 0,
+            makerCount: 0,
+            volume: 0,
+            relatedMarketId: '',
+            priceDifference: 0,
+          });
+
+          // Auto-add arbitrage to paper trading
           try {
-            await insertPaperMarket(
-              arb.marketId,
-              null,
-              'ARBITRAGE',
-              null,
-              0,
-              this.config.initialCapital / 10
-            );
-            console.log(`[WS-VALIDATOR] Added arbitrage market to paper trading: ${arb.marketId}`);
+            await insertPaperMarket(arb.marketId, null, 'ARBITRAGE', null, 0, this.config.initialCapital / 10);
           } catch (error) {
             // Market may already exist
           }
         }
+
+        // Convert wide spread opportunities
+        for (const spread of allOpportunities.wideSpread) {
+          opportunities.push({
+            type: OpportunityType.WIDE_SPREAD,
+            marketId: spread.marketId,
+            question: '',
+            timestamp: new Date(),
+            description: `${spread.tokenSide} spread=${(spread.spreadPct * 100).toFixed(2)}%`,
+            potentialProfit: 0,
+            yesNoSum: 0,
+            availableLiquidity: spread.liquidity,
+            spreadPct: spread.spreadPct,
+            tokenSide: spread.tokenSide,
+            currentVolume: 0,
+            averageVolume: 0,
+            spikeMultiplier: 0,
+            makerCount: 0,
+            volume: 0,
+            relatedMarketId: '',
+            priceDifference: 0,
+          });
+        }
+
+        // Convert volume spike opportunities
+        for (const spike of allOpportunities.volumeSpike) {
+          opportunities.push({
+            type: OpportunityType.VOLUME_SPIKE,
+            marketId: spike.marketId,
+            question: '',
+            timestamp: new Date(),
+            description: `Volume ${spike.multiplier.toFixed(1)}x above average`,
+            potentialProfit: 0,
+            yesNoSum: 0,
+            availableLiquidity: 0,
+            spreadPct: 0,
+            tokenSide: '',
+            currentVolume: spike.currentVolume,
+            averageVolume: spike.avgVolume,
+            spikeMultiplier: spike.multiplier,
+            makerCount: 0,
+            volume: spike.currentVolume,
+            relatedMarketId: '',
+            priceDifference: 0,
+          });
+        }
+
+        // Convert thin book opportunities
+        for (const thin of allOpportunities.thinBook) {
+          opportunities.push({
+            type: OpportunityType.THIN_BOOK,
+            marketId: thin.marketId,
+            question: '',
+            timestamp: new Date(),
+            description: `Low liquidity ($${thin.totalLiquidity.toFixed(0)}) with $${thin.volume24h.toLocaleString()} volume`,
+            potentialProfit: 0,
+            yesNoSum: 0,
+            availableLiquidity: thin.totalLiquidity,
+            spreadPct: 0,
+            tokenSide: '',
+            currentVolume: 0,
+            averageVolume: 0,
+            spikeMultiplier: 0,
+            makerCount: 0,
+            volume: thin.volume24h,
+            relatedMarketId: '',
+            priceDifference: 0,
+          });
+        }
+
+        // Convert mispricing opportunities
+        for (const misprice of allOpportunities.mispricing) {
+          opportunities.push({
+            type: OpportunityType.MISPRICING,
+            marketId: misprice.marketId1,
+            question: misprice.question1,
+            timestamp: new Date(),
+            description: `Price diff ${(misprice.priceDifference * 100).toFixed(1)}% vs ${misprice.question2.slice(0, 30)}`,
+            potentialProfit: 0,
+            yesNoSum: 0,
+            availableLiquidity: 0,
+            spreadPct: 0,
+            tokenSide: '',
+            currentVolume: 0,
+            averageVolume: 0,
+            spikeMultiplier: 0,
+            makerCount: 0,
+            volume: 0,
+            relatedMarketId: misprice.marketId2,
+            priceDifference: misprice.priceDifference,
+          });
+        }
+
+        // Store all opportunities
+        if (opportunities.length > 0) {
+          await withTransaction(async (client) => {
+            await upsertOpportunities(client, opportunities, new Date());
+          });
+        }
       }
     } catch (error) {
-      console.error('[WS-VALIDATOR] Arbitrage detection failed:', error);
+      console.error('[WS-VALIDATOR] Opportunity detection failed:', error);
     }
   }
 
