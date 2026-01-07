@@ -50,9 +50,17 @@ export async function batchInsertWSUpdates(
       'mid_price',
     ];
 
+    // Deduplicate updates by (marketId, outcome) - keep only the latest
+    const dedupeMap = new Map<string, WSPriceUpdate>();
+    for (const update of updates) {
+      const key = `${update.marketId}:${update.outcome}`;
+      dedupeMap.set(key, update); // Later updates overwrite earlier ones
+    }
+    const dedupedUpdates = Array.from(dedupeMap.values());
+
     const rows: any[][] = [];
 
-    for (const update of updates) {
+    for (const update of dedupedUpdates) {
       const snapshotId = snapshotIdMap.get(update.marketId);
       if (!snapshotId) continue;
 

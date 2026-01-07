@@ -603,7 +603,7 @@ export async function selectNewMarket(): Promise<{ market_id: string; question: 
          AND ms.volume_24h > 10000
        ORDER BY ms.market_id, ms.created_at DESC
      )
-     SELECT market_id, question, volume_24h
+     SELECT mp.market_id, mp.question, mp.volume_24h
      FROM market_prices mp
      LEFT JOIN paper_markets pm ON mp.market_id = pm.market_id AND pm.status = 'ACTIVE'
      WHERE pm.id IS NULL
