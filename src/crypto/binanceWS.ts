@@ -33,9 +33,13 @@ export class BinanceWSClient extends EventEmitter {
   // Current prices for each asset
   private prices: Map<CryptoAsset, number> = new Map();
 
-  // Price history for change calculations (circular buffer)
+  // Price history for change calculations
+  // Only store 1 sample per second, max 300 points (5 minutes)
   private priceHistory: Map<CryptoAsset, PricePoint[]> = new Map();
+  private lastSampleTime: Map<CryptoAsset, number> = new Map();
   private readonly HISTORY_DURATION_MS = 5 * 60 * 1000; // 5 minutes
+  private readonly SAMPLE_INTERVAL_MS = 1000; // 1 sample per second
+  private readonly MAX_HISTORY_POINTS = 300; // 5 min at 1/sec
 
   // Asset mapping from Binance symbols
   private readonly symbolToAsset: Map<string, CryptoAsset> = new Map([
@@ -253,13 +257,37 @@ export class BinanceWSClient extends EventEmitter {
     const history = this.priceHistory.get(asset);
     if (!history) return;
 
+    // Only sample once per second to avoid memory bloat
+    const lastSample = this.lastSampleTime.get(asset) || 0;
+    if (timestamp - lastSample < this.SAMPLE_INTERVAL_MS) {
+      return; // Skip this tick, too soon after last sample
+    }
+    this.lastSampleTime.set(asset, timestamp);
+
     // Add new price point
     history.push({ price, timestamp });
 
-    // Remove old entries (older than 5 minutes)
+    // Efficient cleanup: remove old entries in one operation
     const cutoff = timestamp - this.HISTORY_DURATION_MS;
-    while (history.length > 0 && history[0].timestamp < cutoff) {
-      history.shift();
+    if (history.length > 0 && history[0].timestamp < cutoff) {
+      // Find first index that's within our time window
+      let firstValidIndex = 0;
+      for (let i = 0; i < history.length; i++) {
+        if (history[i].timestamp >= cutoff) {
+          firstValidIndex = i;
+          break;
+        }
+        firstValidIndex = i + 1;
+      }
+      // Remove all old entries at once (more efficient than multiple shifts)
+      if (firstValidIndex > 0) {
+        history.splice(0, firstValidIndex);
+      }
+    }
+
+    // Hard cap to prevent unbounded growth
+    if (history.length > this.MAX_HISTORY_POINTS) {
+      history.splice(0, history.length - this.MAX_HISTORY_POINTS);
     }
   }
 
