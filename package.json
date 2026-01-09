@@ -11,7 +11,9 @@
     "validate": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts validate",
     "report": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts report",
     "reset": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts reset",
-    "db-status": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts db-status"
+    "db-status": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts db-status",
+    "crypto": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/cryptoValidator.ts",
+    "crypto-test": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/cryptoValidator.ts test"
   },
   "keywords": [
     "polymarket",
