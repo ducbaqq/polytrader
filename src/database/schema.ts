@@ -16,6 +16,11 @@ const REQUIRED_TABLES = [
   'time_analysis',
   'category_analysis',
   'validation_summary',
+  // Crypto trading tables
+  'crypto_price_log',
+  'crypto_markets',
+  'crypto_opportunities',
+  'crypto_positions',
 ];
 
 /**
@@ -59,6 +64,12 @@ export async function getTableCounts(): Promise<Record<string, number>> {
 export async function clearAllData(): Promise<void> {
   // Clear in order respecting foreign keys
   const clearOrder = [
+    // Crypto tables first
+    'crypto_positions',
+    'crypto_opportunities',
+    'crypto_price_log',
+    'crypto_markets',
+    // Paper trading tables
     'paper_pnl',
     'paper_trades',
     'paper_positions',
