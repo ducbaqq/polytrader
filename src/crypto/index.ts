@@ -47,6 +47,12 @@ export class CryptoReactiveTrader extends EventEmitter {
   // Cache of tracked markets
   private trackedMarkets: Map<string, CryptoMarket> = new Map();
 
+  // Cache of Polymarket prices (refreshed every 10 seconds)
+  private polyPriceCache: Map<string, { yesPrice: number; noPrice: number; timestamp: number }> = new Map();
+  private readonly POLY_PRICE_CACHE_TTL_MS = 10 * 1000; // 10 seconds
+  private lastPolyPriceRefresh = 0;
+  private isRefreshingPolyPrices = false;
+
   // Recent opportunities for dashboard
   private recentOpportunities: CryptoOpportunity[] = [];
 
@@ -79,6 +85,11 @@ export class CryptoReactiveTrader extends EventEmitter {
       await discoverCryptoMarkets(this.polyClient);
       await this.refreshMarketCache();
       console.log(`[STARTUP] Tracking ${this.trackedMarkets.size} markets`);
+
+      // 2. Initial Polymarket price fetch
+      console.log('[STARTUP] Fetching initial Polymarket prices...');
+      await this.triggerPolyPriceRefresh();
+      console.log(`[STARTUP] Cached prices for ${this.polyPriceCache.size} markets`);
 
       // 2. Setup Polymarket price getter for exit monitor
       this.exitMonitor.setPolymarketPriceGetter(async (marketId: string) => {
@@ -278,26 +289,67 @@ export class CryptoReactiveTrader extends EventEmitter {
   private async getMarketPrices(
     marketId: string
   ): Promise<{ yesPrice: number; noPrice: number } | null> {
+    // Check cache first
+    const cached = this.polyPriceCache.get(marketId);
+    if (cached && Date.now() - cached.timestamp < this.POLY_PRICE_CACHE_TTL_MS) {
+      return { yesPrice: cached.yesPrice, noPrice: cached.noPrice };
+    }
+
+    // Trigger a batch refresh if needed (don't block)
+    this.triggerPolyPriceRefresh();
+
+    // Return stale cache if available, null otherwise
+    if (cached) {
+      return { yesPrice: cached.yesPrice, noPrice: cached.noPrice };
+    }
+    return null;
+  }
+
+  /**
+   * Batch refresh all Polymarket prices (runs every 10 seconds max)
+   */
+  private async triggerPolyPriceRefresh(): Promise<void> {
+    const now = Date.now();
+
+    // Skip if recently refreshed or already refreshing
+    if (this.isRefreshingPolyPrices || now - this.lastPolyPriceRefresh < this.POLY_PRICE_CACHE_TTL_MS) {
+      return;
+    }
+
+    this.isRefreshingPolyPrices = true;
+    this.lastPolyPriceRefresh = now;
+
     try {
-      // Get market from cache
-      const market = this.trackedMarkets.get(marketId);
-      if (!market) return null;
-
-      // Fetch fresh order book data
+      // Fetch all markets once
       const gammaMarkets = await this.polyClient.getAllMarkets(true, 1000, 0);
-      const gammaMarket = gammaMarkets.find((m) => m.id === marketId);
-      if (!gammaMarket) return null;
 
-      const marketData = await this.polyClient.buildMarketData(gammaMarket);
-      if (!marketData) return null;
+      // Update cache for all tracked markets
+      for (const [marketId, market] of this.trackedMarkets) {
+        const gammaMarket = gammaMarkets.find((m) => m.id === marketId);
+        if (!gammaMarket) continue;
 
-      const yesPrice = marketData.yesToken?.bestAsk?.price || 0.5;
-      const noPrice = marketData.noToken?.bestAsk?.price || 0.5;
+        try {
+          const marketData = await this.polyClient.buildMarketData(gammaMarket);
+          if (marketData) {
+            const yesPrice = marketData.yesToken?.bestAsk?.price || 0.5;
+            const noPrice = marketData.noToken?.bestAsk?.price || 0.5;
 
-      return { yesPrice, noPrice };
+            this.polyPriceCache.set(marketId, {
+              yesPrice,
+              noPrice,
+              timestamp: now,
+            });
+          }
+        } catch (err) {
+          // Skip individual market errors
+        }
+      }
+
+      console.log(`[CRYPTO-TRADER] Refreshed Polymarket prices for ${this.polyPriceCache.size} markets`);
     } catch (error) {
-      console.error(`[CRYPTO-TRADER] Error fetching market prices for ${marketId}:`, error);
-      return null;
+      console.error('[CRYPTO-TRADER] Error refreshing Polymarket prices:', error);
+    } finally {
+      this.isRefreshingPolyPrices = false;
     }
   }
 
