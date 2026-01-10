@@ -1,0 +1,109 @@
+Name: Sanderson
+PLAYER_ID:
+1659111c-c962-4b55-a966-770ad40b2c21
+76175ddf-0160-49c5-b1eb-0c1a96c307d6
+661818e5-d406-44de-9e71-f8fb4c2a03ff
+a4e367d9-3eac-47b3-93cb-5246aafe6d3d
+f6aee2de-413e-4a1b-adf9-70b8ceff8ffa
+89bbdceb-d73d-4eda-9417-eb76074023d4
+521c9081-b737-4743-8b7d-771446dd85d7
+4e53261d-8f4e-4b93-8c80-96c997ff6490
+0922acf2-1efe-48af-bb93-36a5992a68d5
+6ae2080c-7935-4eac-9fc2-3d3d665df713
+cd753ced-1bf3-4d2a-bbba-741395863688
+ce7763fb-8aff-441c-8df7-10308a543670
+bc59308a-fbb3-402c-8b5d-17111b31376b
+2548222f-1339-4f98-853e-6adbeb6444af
+40e08248-0f1d-405a-b992-f5a992480563
+b2ce17ba-7679-4335-b46c-497d40deb221
+c554024e-d230-4b6e-a69f-51e9854b1f85
+ff402789-8af7-4d21-a451-df208b42fe23
+ecb0778c-0cbf-499f-a9ed-4ebd2ee1031c
+d4ec45f1-01de-46fd-b0d6-52f2db853244
+
+Payload:
+[
+    {
+        "id": "<PLAYER_ID>",
+        "gameId": "42be6fc9-8e3d-4852-b726-6bceacc90249",
+        "activityAttributes": {
+                "double_eagles_or_better":0,
+                "eagles":0,
+                "birdies":7,
+                "pars":49,
+                "bogeys":13,
+                "double_bogeys":3,
+                "triple_bogeys_or_worse":0,
+                "hole_in_ones":0,
+                "strokes":292,
+                "round":10,
+                "score":12,
+                "thru":72,
+                "position":65,
+                "tied":true,
+                "money":29750,
+                "points":4,
+                "rounds":[
+                   {
+                      "double_eagles_or_better":0,
+                      "eagles":0,
+                      "birdies":1,
+                      "pars":15,
+                      "bogeys":1,
+                      "double_bogeys":1,
+                      "triple_bogeys_or_worse":0,
+                      "hole_in_ones":0,
+                      "strokes":72,
+                      "round":1,
+                      "score":2,
+                      "thru":18
+                   },
+                   {
+                      "double_eagles_or_better":0,
+                      "eagles":0,
+                      "birdies":3,
+                      "pars":10,
+                      "bogeys":4,
+                      "double_bogeys":1,
+                      "triple_bogeys_or_worse":0,
+                      "hole_in_ones":0,
+                      "strokes":73,
+                      "round":2,
+                      "score":3,
+                      "thru":18
+                   },
+                   {
+                      "double_eagles_or_better":0,
+                      "eagles":0,
+                      "birdies":1,
+                      "pars":11,
+                      "bogeys":6,
+                      "double_bogeys":0,
+                      "triple_bogeys_or_worse":0,
+                      "hole_in_ones":0,
+                      "strokes":75,
+                      "round":3,
+                      "score":5,
+                      "thru":18
+                   },
+                   {
+                      "double_eagles_or_better":0,
+                      "eagles":0,
+                      "birdies":2,
+                      "pars":13,
+                      "bogeys":2,
+                      "double_bogeys":1,
+                      "triple_bogeys_or_worse":0,
+                      "hole_in_ones":0,
+                      "strokes":72,
+                      "round":4,
+                      "score":2,
+                      "thru":18
+                   }
+                ],
+                "player_holes_remaining":0,
+                "exit_strokes_subtraction":0
+             },
+             "activityGameUnitsRemaining":5400
+    }
+]
