@@ -15,7 +15,9 @@
     "crypto": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/cryptoValidator.ts",
     "crypto-test": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/cryptoValidator.ts test",
     "crypto:build": "tsc",
-    "crypto:start": "NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/cryptoValidator.js"
+    "crypto:start": "NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/cryptoValidator.js",
+    "sell-trigger": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/priceTriggerWorker.ts",
+    "derive-key": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/deriveApiKey.ts"
   },
   "keywords": [
     "polymarket",
