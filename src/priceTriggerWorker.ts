@@ -27,7 +27,7 @@ const CONFIG = {
   MARKET_SEARCH: 'Khamenei out as Supreme Leader of Iran by January 31',
 
   // Trigger price (best bid must be >= this to sell)
-  TRIGGER_PRICE: 0.25,
+  TRIGGER_PRICE: 0.24,
 
   // WebSocket endpoint
   WS_URL: 'wss://ws-subscriptions-clob.polymarket.com/ws/market',
