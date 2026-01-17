@@ -15,7 +15,7 @@ import axios, { AxiosInstance } from 'axios';
 import { Command } from 'commander';
 import * as fs from 'fs';
 
-import { RateLimiter, withRetry, parsePeriod, extractTags } from './utils/index.js';
+import { RateLimiter, withRetry, parsePeriod, extractTags } from './utils';
 
 const GAMMA_API_URL = 'https://gamma-api.polymarket.com';
 

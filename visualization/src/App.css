@@ -109,11 +109,6 @@ body {
 /* Bubble Styles */
 .bubble-group {
   cursor: pointer;
-  transition: transform 0.2s ease;
-}
-
-.bubble-group:hover {
-  transform: scale(1.05);
 }
 
 .bubble-circle {

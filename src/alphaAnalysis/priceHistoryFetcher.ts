@@ -10,8 +10,8 @@ import {
   DEFAULT_CONFIG,
   DataQualityTier,
   MarketPrices,
-} from './types.js';
-import { RateLimiter, withRetry, ConcurrentRateLimiter, BatchProgress } from '../utils/index.js';
+} from './types';
+import { RateLimiter, withRetry, ConcurrentRateLimiter, BatchProgress } from '../utils';
 
 const CLOB_API_URL = 'https://clob.polymarket.com';
 
@@ -177,10 +177,8 @@ export class PriceHistoryFetcher {
       return results;
     }
 
-    const callsPerSecond = Math.min(this.config.rateLimit.callsPerSecond * concurrency, 20);
     const concurrentLimiter = new ConcurrentRateLimiter({
       maxConcurrent: concurrency,
-      callsPerSecond,
     });
 
     const tasks = apiRequests.map(({ request, tier }) => async (): Promise<void> => {

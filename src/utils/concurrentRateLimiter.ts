@@ -5,11 +5,10 @@
  * Much more efficient than sequential processing for I/O bound tasks.
  */
 
-import { sleep } from './rateLimiter.js';
+import { sleep } from './rateLimiter';
 
 export interface ConcurrentRateLimiterOptions {
   maxConcurrent: number;
-  callsPerSecond: number;
 }
 
 export interface BatchProgress {
@@ -22,7 +21,6 @@ export interface BatchProgress {
 
 const DEFAULT_OPTIONS: ConcurrentRateLimiterOptions = {
   maxConcurrent: 10,
-  callsPerSecond: 20,
 };
 
 export class ConcurrentRateLimiter {

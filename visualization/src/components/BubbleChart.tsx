@@ -88,12 +88,7 @@ function BubbleChart({ categories, onCategoryClick }: BubbleChartProps) {
         .attr('d', arc)
         .attr('fill', slice => slice.data.color)
         .attr('opacity', 0.85)
-        .on('mouseover', function() {
-          d3.select(this).attr('opacity', 1);
-        })
-        .on('mouseout', function() {
-          d3.select(this).attr('opacity', 0.85);
-        });
+        .style('pointer-events', 'none');
     });
 
     // Add category name label
@@ -108,6 +103,7 @@ function BubbleChart({ categories, onCategoryClick }: BubbleChartProps) {
       .attr('fill', '#f1f5f9')
       .attr('font-size', d => Math.min(d.r / 4, 14))
       .attr('font-weight', '600')
+      .style('pointer-events', 'none')
       .text(d => {
         const catData = d.data as unknown as CategoryData;
         // Truncate long names for smaller bubbles
@@ -127,26 +123,10 @@ function BubbleChart({ categories, onCategoryClick }: BubbleChartProps) {
       .attr('text-anchor', 'middle')
       .attr('fill', '#94a3b8')
       .attr('font-size', d => Math.min(d.r / 5, 11))
+      .style('pointer-events', 'none')
       .text(d => {
         const catData = d.data as unknown as CategoryData;
         return `${catData.total.toLocaleString()} markets`;
-      });
-
-    // Add hover effect
-    bubbles
-      .on('mouseover', function() {
-        d3.select(this).select('.bubble-circle')
-          .transition()
-          .duration(200)
-          .attr('stroke', '#3b82f6')
-          .attr('stroke-width', 3);
-      })
-      .on('mouseout', function() {
-        d3.select(this).select('.bubble-circle')
-          .transition()
-          .duration(200)
-          .attr('stroke', '#475569')
-          .attr('stroke-width', 2);
       });
 
   }, [categories, onCategoryClick]);

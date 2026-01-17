@@ -56,7 +56,6 @@ The `ConcurrentRateLimiter` class enables parallel API requests:
 // Usage in priceHistoryFetcher.ts
 const concurrentLimiter = new ConcurrentRateLimiter({
   maxConcurrent: concurrency,  // e.g., 10-20 parallel requests
-  callsPerSecond: 20,          // overall rate limit
 });
 
 await concurrentLimiter.executeInChunks(tasks, 5000, onProgress);

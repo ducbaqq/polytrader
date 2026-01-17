@@ -24,11 +24,11 @@ import {
   DEFAULT_CONFIG,
   MarketPrices,
   DataQualityTier,
-} from './alphaAnalysis/types.js';
-import { PriceHistoryFetcher, BatchFetchRequest } from './alphaAnalysis/priceHistoryFetcher.js';
-import { EdgeCalculator } from './alphaAnalysis/edgeCalculator.js';
-import { Aggregator } from './alphaAnalysis/aggregator.js';
-import { RateLimiter, withRetry, parsePeriod, extractTags } from './utils/index.js';
+} from './alphaAnalysis/types';
+import { PriceHistoryFetcher, BatchFetchRequest } from './alphaAnalysis/priceHistoryFetcher';
+import { EdgeCalculator } from './alphaAnalysis/edgeCalculator';
+import { Aggregator } from './alphaAnalysis/aggregator';
+import { RateLimiter, withRetry, parsePeriod, extractTags } from './utils';
 
 const GAMMA_API_URL = 'https://gamma-api.polymarket.com';
 const CLOB_API_URL = 'https://clob.polymarket.com';

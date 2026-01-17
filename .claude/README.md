@@ -105,8 +105,7 @@ polymarket/
 import { ConcurrentRateLimiter } from './utils/index.js';
 
 const limiter = new ConcurrentRateLimiter({
-  maxConcurrent: 10,   // 10 parallel requests
-  callsPerSecond: 20,  // overall rate limit
+  maxConcurrent: 10,  // 10 parallel requests
 });
 
 // Execute tasks in parallel with progress tracking
