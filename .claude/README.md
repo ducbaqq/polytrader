@@ -39,7 +39,9 @@ polymarket/
 │   ├── apiClient.ts          # Polymarket REST API wrapper
 │   ├── deriveApiKey.ts       # API key derivation utility
 │   ├── exportSettledMarkets.ts # Export settled markets
+│   ├── exportAlphaAnalysis.ts  # Alpha analysis pipeline
 │   ├── types.ts              # TypeScript interfaces
+│   ├── alphaAnalysis/        # Statistical edge analysis
 │   ├── crypto/               # Crypto trading module
 │   ├── database/             # PostgreSQL repositories
 │   ├── paperTrader/          # Paper trading engine
@@ -71,7 +73,8 @@ polymarket/
 | `reset` | `npm run reset` | Clear all database tables |
 | `db-status` | `npm run db-status` | Show table row counts |
 | `derive-key` | `npm run derive-key` | Derive API keys from private key |
-| `export-markets` | `npm run export-markets` | Export settled markets to JSON |
+| `export-markets` | `npm run export-markets -- --period 5d` | Export settled markets to JSON |
+| `alpha-analysis` | `npm run alpha-analysis -- --period 5d --concurrency 15` | Analyze trading edge with parallel fetching |
 
 ---
 
@@ -82,8 +85,35 @@ polymarket/
 | Paper Trader | `src/paperTrader/` | Simulated order execution & portfolio tracking | [paper-trader.md](./paper-trader.md) |
 | Database | `src/database/` | PostgreSQL connection pool & repositories | [database.md](./database.md) |
 | Analyzer | `src/analyzer/` | Time/category analysis, report generation | [analyzer.md](./analyzer.md) |
+| Alpha Analysis | `src/alphaAnalysis/` | Statistical edge calculations, calibration analysis | [alpha-analysis.md](./alpha-analysis.md) |
+| Utils | `src/utils/` | Shared utilities (rate limiting, period parsing, etc.) | See below |
 | CLOB Client | `src/clobClient.ts` | Authenticated order execution | [clob-client.md](./clob-client.md) |
 | API Client | `src/apiClient.ts` | REST API wrapper with rate limiting | Part of wsValidator |
+
+### Shared Utilities (`src/utils/`)
+
+| File | Purpose |
+|------|---------|
+| `concurrentRateLimiter.ts` | Parallel request execution with controlled concurrency (used by alpha analysis for 65x speedup) |
+| `rateLimiter.ts` | Sequential rate limiting with `wait()`, retry logic with exponential backoff |
+| `periodParser.ts` | Parse period strings like `5d`, `2m` into days |
+| `categoryInference.ts` | Infer market categories from question keywords |
+| `index.ts` | Re-exports all utilities |
+
+**ConcurrentRateLimiter Usage:**
+```typescript
+import { ConcurrentRateLimiter } from './utils/index.js';
+
+const limiter = new ConcurrentRateLimiter({
+  maxConcurrent: 10,   // 10 parallel requests
+  callsPerSecond: 20,  // overall rate limit
+});
+
+// Execute tasks in parallel with progress tracking
+await limiter.executeAll(tasks, (progress) => {
+  console.log(`${progress.completed}/${progress.total} @ ${progress.ratePerSecond}/sec`);
+});
+```
 
 ---
 
