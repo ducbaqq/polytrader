@@ -19,7 +19,14 @@
     "sell-trigger": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/priceTriggerWorker.ts",
     "derive-key": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/deriveApiKey.ts",
     "export-markets": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/exportSettledMarkets.ts",
-    "alpha-analysis": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/exportAlphaAnalysis.ts"
+    "alpha-analysis": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/exportAlphaAnalysis.ts",
+    "no-trader": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts",
+    "no-trader:start": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts start",
+    "no-trader:status": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts status",
+    "no-trader:report": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts report",
+    "no-trader:reset": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts reset --force",
+    "no-trader:scan": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts scan-once",
+    "no-trader:monitor": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts monitor-once"
   },
   "keywords": [
     "polymarket",

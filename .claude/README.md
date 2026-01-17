@@ -5,6 +5,7 @@
 A comprehensive trading bot system for Polymarket that includes:
 - Real-time market scanning via WebSocket
 - Paper trading engine for strategy validation
+- **No-betting paper trader** for Entertainment/Weather markets
 - Crypto-reactive trading (Binance → Polymarket)
 - Price-triggered sell orders
 - Settled markets visualization
@@ -45,6 +46,7 @@ polymarket/
 │   ├── crypto/               # Crypto trading module
 │   ├── database/             # PostgreSQL repositories
 │   ├── paperTrader/          # Paper trading engine
+│   ├── noPaperTrader/        # No-betting paper trader for Entertainment/Weather
 │   └── analyzer/             # Report generation
 ├── visualization/            # React app for market visualization
 ├── docs/                     # Architecture documentation
@@ -61,6 +63,7 @@ polymarket/
 | App | Command | Purpose | Documentation |
 |-----|---------|---------|---------------|
 | **WebSocket Validator** | `npm run validate` | Real-time market scanning, arbitrage detection, paper trading | [wsValidator.md](./wsValidator.md) |
+| **No Paper Trader** | `npm run no-trader:start` | Bet No on Entertainment/Weather markets (paper trading) | [no-paper-trader.md](./no-paper-trader.md) |
 | **Crypto Reactive Trader** | `npm run crypto` | Monitor Binance, trade Polymarket crypto markets | [crypto-trader.md](./crypto-trader.md) |
 | **Price Trigger Worker** | `npm run sell-trigger` | Auto-sell when market price reaches target | [price-trigger.md](./price-trigger.md) |
 | **Visualization** | `cd visualization && npm run dev` | Interactive bubble chart of settled markets | [polymarket-visualization.md](./polymarket-visualization.md) |
@@ -83,6 +86,7 @@ polymarket/
 | Module | Location | Purpose | Documentation |
 |--------|----------|---------|---------------|
 | Paper Trader | `src/paperTrader/` | Simulated order execution & portfolio tracking | [paper-trader.md](./paper-trader.md) |
+| No Paper Trader | `src/noPaperTrader/` | No-betting strategy for Entertainment/Weather | [no-paper-trader.md](./no-paper-trader.md) |
 | Database | `src/database/` | PostgreSQL connection pool & repositories | [database.md](./database.md) |
 | Analyzer | `src/analyzer/` | Time/category analysis, report generation | [analyzer.md](./analyzer.md) |
 | Alpha Analysis | `src/alphaAnalysis/` | Statistical edge calculations, calibration analysis | [alpha-analysis.md](./alpha-analysis.md) |
