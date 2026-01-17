@@ -26,7 +26,9 @@
     "no-trader:report": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts report",
     "no-trader:reset": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts reset --force",
     "no-trader:scan": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts scan-once",
-    "no-trader:monitor": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts monitor-once"
+    "no-trader:monitor": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts monitor-once",
+    "no-trader:build": "tsc",
+    "no-trader:prod": "NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/noPaperTraderCli.js start"
   },
   "keywords": [
     "polymarket",
