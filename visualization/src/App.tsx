@@ -4,8 +4,9 @@ import SummaryHeader from './components/SummaryHeader';
 import BubbleChart from './components/BubbleChart';
 import CategoryDetail from './components/CategoryDetail';
 import EdgeAnalysisView from './components/EdgeAnalysisView';
+import MarketBrowserView from './components/MarketBrowserView';
 
-type Tab = 'overview' | 'edge';
+type Tab = 'overview' | 'edge' | 'browser';
 
 function App(): JSX.Element {
   const [data, setData] = useState<ExportData | null>(null);
@@ -39,7 +40,9 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    if (activeTab !== 'edge' || alphaSummary || edgeLoading || edgeError) {
+    // Load alpha data for both 'edge' and 'browser' tabs
+    const needsAlphaData = activeTab === 'edge' || activeTab === 'browser';
+    if (!needsAlphaData || alphaSummary || edgeLoading || edgeError) {
       return;
     }
 
@@ -113,6 +116,12 @@ function App(): JSX.Element {
         >
           Edge Analysis
         </button>
+        <button
+          className={`tab-btn ${activeTab === 'browser' ? 'active' : ''}`}
+          onClick={() => setActiveTab('browser')}
+        >
+          Market Browser
+        </button>
       </nav>
 
       {activeTab === 'overview' && (
@@ -132,6 +141,14 @@ function App(): JSX.Element {
           loading={edgeLoading}
           error={edgeError}
           summary={alphaSummary}
+          markets={alphaMarkets}
+        />
+      )}
+
+      {activeTab === 'browser' && (
+        <BrowserTabContent
+          loading={edgeLoading}
+          error={edgeError}
           markets={alphaMarkets}
         />
       )}
@@ -210,6 +227,37 @@ function EdgeTabContent({ loading, error, summary, markets }: EdgeTabContentProp
 
   if (summary && markets) {
     return <EdgeAnalysisView summary={summary} markets={markets.markets} />;
+  }
+
+  return <div className="loading">No data available</div>;
+}
+
+interface BrowserTabContentProps {
+  loading: boolean;
+  error: string | null;
+  markets: AlphaAnalysisData | null;
+}
+
+function BrowserTabContent({ loading, error, markets }: BrowserTabContentProps): JSX.Element {
+  if (loading) {
+    return <div className="loading">Loading market data...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="error">
+        <h2>Market Data Not Available</h2>
+        <p>{error}</p>
+        <p>Run the alpha analysis pipeline first:</p>
+        <pre>npm run alpha-analysis -- --period 5d</pre>
+        <p>Then copy the output files to the public folder:</p>
+        <pre>cp alpha_summary.json alpha_analysis.json visualization/public/</pre>
+      </div>
+    );
+  }
+
+  if (markets) {
+    return <MarketBrowserView markets={markets.markets} />;
   }
 
   return <div className="loading">No data available</div>;

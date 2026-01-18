@@ -109,6 +109,14 @@ export interface MarketPrices {
   maxNoPrice: number | null;
 }
 
+/**
+ * Stored price point with numeric price (for visualization)
+ */
+export interface StoredPricePoint {
+  t: number;    // Unix timestamp
+  p: number;    // Price (0-1)
+}
+
 export interface MarketEdge {
   impliedNoProb: number;
   actualNoOutcome: 0 | 1;
@@ -134,6 +142,8 @@ export interface AlphaMarket {
     hasFullHistory: boolean;
     pricePointCount: number;
   };
+  /** Raw price history for visualization (tier1/tier2 markets only) */
+  priceHistory?: StoredPricePoint[];
 }
 
 export interface AlphaAnalysisData {

@@ -48,6 +48,14 @@ export interface ClobPriceHistoryResponse {
   history: ClobPricePoint[];
 }
 
+/**
+ * Stored price point with numeric price (for visualization)
+ */
+export interface StoredPricePoint {
+  t: number;    // Unix timestamp
+  p: number;    // Price (0-1)
+}
+
 // ============================================================================
 // Processed Market Types
 // ============================================================================
@@ -89,6 +97,8 @@ export interface AlphaMarket {
   prices: MarketPrices;
   edge: MarketEdge;
   dataQuality: DataQuality;
+  /** Raw price history for visualization (tier1/tier2 markets only) */
+  priceHistory?: StoredPricePoint[];
 }
 
 // ============================================================================

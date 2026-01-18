@@ -60,9 +60,16 @@ export class MarketScanner {
 
       // Filter by target categories using keyword detection
       // (API doesn't provide categories for open markets)
+      // Also filter by volume early to avoid unnecessary API calls
       const categoryMarkets: Array<{ market: GammaMarket; detectedCategory: string }> = [];
 
       for (const market of markets) {
+        // Early volume filter from Gamma data
+        const volume = market.volumeNum || market.volume24hr || 0;
+        if (volume < this.config.minVolume || volume > this.config.maxVolume) {
+          continue;
+        }
+
         // Try API category first, then keyword detection
         let category = market.category;
         if (!category) {
@@ -77,8 +84,13 @@ export class MarketScanner {
       console.log(`Found ${categoryMarkets.length} markets in target categories: ${this.config.categories.join(', ')}`);
 
       // Check each market
+      let processed = 0;
       for (const { market, detectedCategory } of categoryMarkets) {
         await this.processMarket(market, result, detectedCategory);
+        processed++;
+        if (processed % 100 === 0) {
+          console.log(`  Progress: ${processed}/${categoryMarkets.length} (${result.rejectedCount} rejected, ${result.eligibleMarkets.length} eligible)`);
+        }
       }
 
       console.log(`Scan complete: ${result.eligibleMarkets.length} eligible, ${result.positionsOpened} positions opened`);

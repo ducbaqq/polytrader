@@ -24,6 +24,7 @@ import {
   DEFAULT_CONFIG,
   MarketPrices,
   DataQualityTier,
+  StoredPricePoint,
 } from './alphaAnalysis/types';
 import { PriceHistoryFetcher, BatchFetchRequest } from './alphaAnalysis/priceHistoryFetcher';
 import { EdgeCalculator } from './alphaAnalysis/edgeCalculator';
@@ -349,6 +350,7 @@ class AlphaAnalysisExporter {
 
       let hasFullHistory = false;
       let pricePointCount = 0;
+      let priceHistory: StoredPricePoint[] | undefined = undefined;
 
       // Apply price history if available
       if (vm.noTokenId && priceHistoryMap.has(vm.noTokenId)) {
@@ -357,13 +359,21 @@ class AlphaAnalysisExporter {
           prices = this.priceHistoryFetcher.calculatePrices(historyData.history, vm.finalNoPrice);
           hasFullHistory = vm.tier === 'tier1';
           pricePointCount = historyData.history.length;
+
+          // Store price history for tier1/tier2 markets (for visualization)
+          if (vm.tier !== 'tier3') {
+            priceHistory = historyData.history.map((point) => ({
+              t: point.t,
+              p: parseFloat(point.p),
+            }));
+          }
         }
       }
 
       const edge = this.edgeCalculator.calculateMarketEdge(vm.resolution, vm.finalNoPrice);
       const durationDays = this.calculateDuration(vm.market.createdAt || null, vm.market.endDate);
 
-      alphaMarkets.push({
+      const market: AlphaMarket = {
         id: vm.market.id,
         question: vm.market.question,
         tags: this.getTags(vm.market),
@@ -382,7 +392,14 @@ class AlphaAnalysisExporter {
           hasFullHistory,
           pricePointCount,
         },
-      });
+      };
+
+      // Add priceHistory only if defined (avoids undefined in JSON)
+      if (priceHistory) {
+        market.priceHistory = priceHistory;
+      }
+
+      alphaMarkets.push(market);
     }
 
     console.log(`\nProcessed ${alphaMarkets.length} binary markets total`);
