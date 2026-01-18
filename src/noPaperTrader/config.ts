@@ -13,7 +13,6 @@ export interface StrategyConfig {
 
   // Entry conditions
   categories: string[];            // Target categories
-  maxMarketAgeHours: number;       // Max age since creation
   minDurationDays: number;         // Min time until resolution
   maxDurationDays: number;         // Max time until resolution
   minNoPrice: number;              // Min No price (0-1)
@@ -21,6 +20,7 @@ export interface StrategyConfig {
   minVolume: number;               // Min market volume ($)
   maxVolume: number;               // Max market volume ($)
   minEdge: number;                 // Min estimated edge (e.g., 0.05 = 5%)
+  maxTimeBelowThreshold: number;   // Max % of market lifetime No price was below maxNoPrice (0-1)
 
   // Historical No win rates by category (for edge calculation)
   categoryWinRates: Record<string, number>;
@@ -40,6 +40,13 @@ export interface StrategyConfig {
 
 /**
  * Default configuration based on the hypothesis.
+ *
+ * Categories selected based on alpha analysis showing high No win rates:
+ * - Crypto: 100%, Entertainment: 100%, Finance: 98.6%, Weather: 98.5%, Tech: 98.2%
+ * - Excluded: Sports and Politics (lower win rates)
+ *
+ * Note: The Polymarket API doesn't provide category fields for open markets.
+ * We use keyword-based category detection via detectCategoryFromQuestion().
  */
 export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   // Capital
@@ -47,21 +54,24 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   positionSize: 50,
   side: 'NO',
 
-  // Entry conditions
-  categories: ['Entertainment', 'Weather'],
-  maxMarketAgeHours: 48,
+  // Entry conditions - categories detected via keywords in question text
+  categories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],
   minDurationDays: 1,
   maxDurationDays: 7,
-  minNoPrice: 0.50,
-  maxNoPrice: 0.75,
-  minVolume: 200,
+  minNoPrice: 0,           // No minimum price
+  maxNoPrice: 0.60,        // Max 60¢ (was 75¢)
+  minVolume: 1000,         // Min $1,000 (was $200)
   maxVolume: 50000,
-  minEdge: 0.05,  // 5% edge required
+  minEdge: 0.05,           // 5% edge required
+  maxTimeBelowThreshold: 0.25,  // Skip if No price was ≤60¢ for >25% of market lifetime
 
   // Historical win rates from alpha analysis
   categoryWinRates: {
-    'Entertainment': 0.858,  // 85.8%
-    'Weather': 0.831,        // 83.1%
+    'Crypto': 1.00,        // 100%
+    'Entertainment': 1.00, // 100%
+    'Finance': 0.986,      // 98.6%
+    'Weather': 0.985,      // 98.5%
+    'Tech': 0.982,         // 98.2%
   },
 
   // Exit conditions
@@ -91,6 +101,9 @@ export function loadConfig(): StrategyConfig {
     ['NO_TRADER_MIN_EDGE', 'minEdge'],
     ['NO_TRADER_TAKE_PROFIT', 'takeProfitThreshold'],
     ['NO_TRADER_STOP_LOSS', 'stopLossThreshold'],
+    ['NO_TRADER_MAX_NO_PRICE', 'maxNoPrice'],
+    ['NO_TRADER_MIN_VOLUME', 'minVolume'],
+    ['NO_TRADER_MAX_TIME_BELOW_THRESHOLD', 'maxTimeBelowThreshold'],
   ];
 
   for (const [envKey, configKey] of floatMappings) {
@@ -135,7 +148,6 @@ export function checkMarketEligibility(
   category: string,
   noPrice: number,
   volume: number,
-  createdAt: Date | null,
   endDate: Date | null,
   config: StrategyConfig
 ): MarketEligibility {
@@ -158,15 +170,6 @@ export function checkMarketEligibility(
   }
   if (volume > config.maxVolume) {
     return { eligible: false, reason: `Volume $${volume} above max $${config.maxVolume}` };
-  }
-
-  // Check market age
-  if (createdAt) {
-    const ageMs = Date.now() - createdAt.getTime();
-    const ageHours = ageMs / (1000 * 60 * 60);
-    if (ageHours > config.maxMarketAgeHours) {
-      return { eligible: false, reason: `Market age ${ageHours.toFixed(1)}h exceeds max ${config.maxMarketAgeHours}h` };
-    }
   }
 
   // Check time until resolution
@@ -195,4 +198,53 @@ export function checkMarketEligibility(
   }
 
   return { eligible: true, edge };
+}
+
+/**
+ * Keyword patterns for detecting category from market question.
+ * Since Polymarket API doesn't provide categories for open markets,
+ * we use keyword matching to categorize markets.
+ */
+const CATEGORY_KEYWORDS: Record<string, string[]> = {
+  'Crypto': [
+    'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana', 'sol',
+    'dogecoin', 'doge', 'xrp', 'ripple', 'cardano', 'ada', 'polkadot',
+    'avalanche', 'polygon', 'matic', 'chainlink', 'link', 'uniswap',
+    'binance', 'coinbase', 'kraken', 'defi', 'nft', 'blockchain',
+    'altcoin', 'stablecoin', 'usdc', 'usdt', 'tether', 'microstrategy',
+  ],
+  'Weather': [
+    'weather', 'temperature', 'hurricane', 'tornado', 'storm',
+    'rain', 'snow', 'flood', 'drought', 'heatwave', 'cold wave',
+    'climate', 'wildfire', 'el nino', 'la nina',
+  ],
+  'Entertainment': [
+    'movie', 'film', 'oscar', 'grammy', 'emmy', 'golden globe',
+    'box office', 'netflix', 'spotify', 'taylor swift', 'beyonce',
+    'album', 'song', 'concert', 'tour', 'celebrity', 'kardashian',
+    'super bowl halftime', 'streaming', 'disney', 'marvel', 'dc',
+  ],
+  'Finance': [
+    'stock', 's&p', 'dow', 'nasdaq', 'fed', 'interest rate',
+    'inflation', 'gdp', 'unemployment', 'recession', 'ipo',
+    'earnings', 'revenue', 'market cap', 'treasury', 'bond',
+    'forex', 'gold price', 'oil price', 'commodity',
+  ],
+  'Tech': [
+    'apple', 'google', 'microsoft', 'meta', 'amazon', 'nvidia',
+    'tesla', 'openai', 'chatgpt', 'ai ', 'artificial intelligence',
+    'spacex', 'starship', 'rocket', 'launch', 'iphone', 'android',
+    'tiktok', 'twitter', 'x.com', 'elon musk', 'zuckerberg',
+  ],
+};
+
+/**
+ * Detect category from market question using keyword matching.
+ */
+export function detectCategoryFromQuestion(question: string): string | null {
+  const q = question.toLowerCase();
+  for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    if (keywords.some(kw => q.includes(kw))) return category;
+  }
+  return null;
 }

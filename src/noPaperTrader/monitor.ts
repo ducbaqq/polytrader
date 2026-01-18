@@ -6,7 +6,7 @@
  * - Market resolution
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import axios from 'axios';
 import { PolymarketClient } from '../apiClient';
 import { StrategyConfig } from './config';
@@ -226,7 +226,7 @@ export class PositionMonitor {
     const exitReason = marketInfo.winningOutcome === 'NO' ? 'Resolution (No Won)' : 'Resolution (Yes Won)';
 
     // Create exit trade
-    const tradeId = uuidv4();
+    const tradeId = randomUUID();
     const trade: Trade = {
       id: tradeId,
       positionId: position.id,
@@ -286,7 +286,7 @@ export class PositionMonitor {
     const isWin = pnl > 0;
 
     // Create exit trade
-    const tradeId = uuidv4();
+    const tradeId = randomUUID();
     const trade: Trade = {
       id: tradeId,
       positionId: position.id,

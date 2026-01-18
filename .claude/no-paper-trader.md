@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Simulated trading system that bets **No** on Entertainment and Weather markets to validate a strategy hypothesis:
+Simulated trading system that bets **No** on high win-rate categories based on alpha analysis:
 
-> Entertainment and Weather markets show historically high No win rates (85.8% and 83.1% respectively) due to retail bettors emotionally overbuying Yes on exciting/fearful outcomes. If No is priced below its historical win rate, there may be edge.
+> Crypto, Entertainment, Finance, Weather, and Tech markets show historically high No win rates (98-100%) due to retail bettors emotionally overbuying Yes on exciting/fearful outcomes. If No is priced below its historical win rate, there may be edge.
 
 ---
 
@@ -18,10 +18,10 @@ Simulated trading system that bets **No** on Entertainment and Weather markets t
 
 | File | Purpose |
 |------|---------|
-| `src/noPaperTrader/config.ts` | Strategy configuration (capital, edge thresholds, TP/SL) |
+| `src/noPaperTrader/config.ts` | Strategy config + keyword-based category detection |
 | `src/noPaperTrader/types.ts` | Type definitions (Position, Trade, Portfolio, etc.) |
 | `src/noPaperTrader/repository.ts` | Database operations for positions, trades, portfolio |
-| `src/noPaperTrader/scanner.ts` | Market scanner to find eligible markets |
+| `src/noPaperTrader/scanner.ts` | Market scanner with price history checks |
 | `src/noPaperTrader/monitor.ts` | Position monitor for TP/SL and resolution |
 | `src/noPaperTrader/report.ts` | Performance report generation |
 | `src/noPaperTrader/index.ts` | Main orchestrator class |
@@ -63,21 +63,24 @@ const DEFAULT_STRATEGY_CONFIG = {
   positionSize: 50,              // $50 per position
   side: 'NO',                    // Always bet No
 
-  // Entry conditions
-  categories: ['Entertainment', 'Weather'],
-  maxMarketAgeHours: 48,         // Max 48 hours old
+  // Entry conditions (updated from alpha analysis)
+  categories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],
   minDurationDays: 1,            // Resolves in 1+ days
   maxDurationDays: 7,            // Resolves in 7 or fewer days
-  minNoPrice: 0.50,              // No price between 50-75%
-  maxNoPrice: 0.75,
-  minVolume: 200,                // Volume $200-$50,000
+  minNoPrice: 0,                 // No minimum price
+  maxNoPrice: 0.60,              // Max 60¢ (brief opportunity window)
+  minVolume: 1000,               // Min $1,000 volume
   maxVolume: 50000,
   minEdge: 0.05,                 // 5% minimum edge
+  maxTimeBelowThreshold: 0.25,   // Skip if price was ≤60¢ for >25% of lifetime
 
-  // Historical win rates
+  // Historical win rates from alpha analysis
   categoryWinRates: {
-    'Entertainment': 0.858,      // 85.8%
-    'Weather': 0.831,            // 83.1%
+    'Crypto': 1.00,              // 100%
+    'Entertainment': 1.00,       // 100%
+    'Finance': 0.986,            // 98.6%
+    'Weather': 0.985,            // 98.5%
+    'Tech': 0.982,               // 98.2%
   },
 
   // Exit conditions
@@ -95,17 +98,41 @@ const DEFAULT_STRATEGY_CONFIG = {
 
 ---
 
+## Category Detection
+
+Since the Polymarket API doesn't provide categories for open markets, we use **keyword-based detection** from the question text:
+
+| Category | Keywords |
+|----------|----------|
+| Crypto | bitcoin, btc, ethereum, eth, crypto, solana, coinbase, etc. |
+| Weather | weather, temperature, hurricane, tornado, storm, etc. |
+| Entertainment | movie, oscar, grammy, netflix, taylor swift, etc. |
+| Finance | stock, s&p, fed, interest rate, inflation, ipo, etc. |
+| Tech | apple, google, openai, chatgpt, spacex, nvidia, etc. |
+
+**Excluded**: Sports and Politics (lower win rates in alpha analysis)
+
+---
+
 ## Edge Calculation
 
 ```
 Edge = Historical Category No Win Rate - Current No Price
 
 Example:
-  Entertainment market, No priced at 65%
-  Edge = 85.8% - 65% = 20.8%
+  Finance market, No priced at 55%
+  Edge = 98.6% - 55% = 43.6%
 
   Only enter if Edge >= 5%
 ```
+
+---
+
+## Brief Opportunity Window Rule
+
+Markets are rejected if the No price has been at/below the entry threshold (60¢) for more than 25% of the market's lifetime. This filters out "stale" opportunities that everyone already knows about.
+
+Implementation: Fetches price history from CLOB API and calculates `(points below threshold) / (total points)`.
 
 ---
 
@@ -114,12 +141,13 @@ Example:
 ### Scanning Cycle
 
 1. Fetch all active markets from Polymarket Gamma API
-2. Filter to Entertainment and Weather categories
-3. For each market:
-   - Check if already scanned
-   - Check if already have position
-   - Validate entry conditions (age, duration, price, volume)
-   - Calculate edge
+2. Detect category using keyword matching on question text
+3. Filter to target categories (Crypto, Entertainment, Finance, Weather, Tech)
+4. For each market:
+   - Check if already scanned or have position
+   - Validate entry conditions (duration, price ≤60¢, volume ≥$1K)
+   - Calculate edge vs historical win rate
+   - Check brief opportunity window (price history)
    - If eligible and sufficient capital, open position
 
 ### Monitoring Cycle
@@ -164,6 +192,9 @@ NO_TRADER_MIN_EDGE=0.05
 NO_TRADER_TAKE_PROFIT=0.90
 NO_TRADER_STOP_LOSS=0.25
 NO_TRADER_SCAN_INTERVAL=60
+NO_TRADER_MAX_NO_PRICE=0.60
+NO_TRADER_MIN_VOLUME=1000
+NO_TRADER_MAX_TIME_BELOW_THRESHOLD=0.25
 ```
 
 ---
@@ -175,7 +206,7 @@ The report shows:
 - **Summary**: Period, capital, equity, total P&L
 - **Trade Statistics**: Total trades, win rate, avg P&L per trade
 - **Best/Worst Trades**: Highest and lowest P&L trades
-- **Category Performance**: Breakdown by Entertainment/Weather
+- **Category Performance**: Breakdown by category
 - **Equity Curve**: Daily equity snapshots
 - **Open Positions**: Current active positions
 
@@ -183,6 +214,6 @@ The report shows:
 
 ## Dependencies
 
-- **Internal**: `apiClient.ts`, `database/index.ts`
-- **External**: axios, uuid, cli-table3, chalk, commander
+- **Internal**: `apiClient.ts`, `database/index.ts`, `alphaAnalysis/priceHistoryFetcher.ts`
+- **External**: axios, cli-table3, chalk, commander
 - **Database**: PostgreSQL with no_* tables

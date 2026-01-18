@@ -3,10 +3,10 @@
  * Polls Polymarket API for new markets matching entry conditions.
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { PolymarketClient } from '../apiClient';
 import { GammaMarket } from '../types';
-import { StrategyConfig, checkMarketEligibility } from './config';
+import { StrategyConfig, checkMarketEligibility, detectCategoryFromQuestion } from './config';
 import { EligibleMarket, ScanResult, Position, Trade } from './types';
 import {
   getPortfolio,
@@ -17,6 +17,8 @@ import {
   insertTrade,
   updatePortfolioOnOpen,
 } from './repository';
+import { PriceHistoryFetcher } from '../alphaAnalysis/priceHistoryFetcher';
+import { DEFAULT_CONFIG as ALPHA_CONFIG } from '../alphaAnalysis/types';
 
 /**
  * Scanner for finding eligible markets.
@@ -24,10 +26,16 @@ import {
 export class MarketScanner {
   private client: PolymarketClient;
   private config: StrategyConfig;
+  private priceHistoryFetcher: PriceHistoryFetcher;
 
   constructor(client: PolymarketClient, config: StrategyConfig) {
     this.client = client;
     this.config = config;
+    this.priceHistoryFetcher = new PriceHistoryFetcher({
+      ...ALPHA_CONFIG,
+      volumeTiers: { tier1MinVolume: 0, tier2MinVolume: 0 }, // Always fetch full history
+      rateLimit: { callsPerSecond: 5, maxRetries: 3, baseDelayMs: 1000 },
+    });
   }
 
   /**
@@ -50,16 +58,27 @@ export class MarketScanner {
 
       console.log(`Scanning ${markets.length} markets...`);
 
-      // Filter by target categories first (performance optimization)
-      const categoryMarkets = markets.filter(m =>
-        this.config.categories.includes(m.category || '')
-      );
+      // Filter by target categories using keyword detection
+      // (API doesn't provide categories for open markets)
+      const categoryMarkets: Array<{ market: GammaMarket; detectedCategory: string }> = [];
+
+      for (const market of markets) {
+        // Try API category first, then keyword detection
+        let category = market.category;
+        if (!category) {
+          category = detectCategoryFromQuestion(market.question) || undefined;
+        }
+
+        if (category && this.config.categories.includes(category)) {
+          categoryMarkets.push({ market, detectedCategory: category });
+        }
+      }
 
       console.log(`Found ${categoryMarkets.length} markets in target categories: ${this.config.categories.join(', ')}`);
 
       // Check each market
-      for (const market of categoryMarkets) {
-        await this.processMarket(market, result);
+      for (const { market, detectedCategory } of categoryMarkets) {
+        await this.processMarket(market, result, detectedCategory);
       }
 
       console.log(`Scan complete: ${result.eligibleMarkets.length} eligible, ${result.positionsOpened} positions opened`);
@@ -73,7 +92,7 @@ export class MarketScanner {
   /**
    * Process a single market.
    */
-  private async processMarket(market: GammaMarket, result: ScanResult): Promise<void> {
+  private async processMarket(market: GammaMarket, result: ScanResult, detectedCategory: string): Promise<void> {
     const marketId = market.id;
 
     // Skip if already scanned
@@ -110,12 +129,11 @@ export class MarketScanner {
       return;
     }
 
-    // Check eligibility
+    // Check eligibility using the detected category
     const eligibility = checkMarketEligibility(
-      marketData.category,
+      detectedCategory,
       noPrice,
       marketData.volume24h,
-      marketData.createdAt,
       marketData.endDate,
       this.config
     );
@@ -125,6 +143,20 @@ export class MarketScanner {
       result.rejectedCount++;
       const reason = eligibility.reason?.split(' ')[0] || 'Unknown';
       result.rejectionReasons[reason] = (result.rejectionReasons[reason] || 0) + 1;
+      return;
+    }
+
+    // Brief opportunity window check - skip if price below threshold too long
+    const timeBelowRatio = await this.checkTimeBelowThreshold(
+      marketData.noToken.tokenId,
+      this.config.maxNoPrice
+    );
+
+    if (timeBelowRatio > this.config.maxTimeBelowThreshold) {
+      const reason = `Price below threshold ${(timeBelowRatio * 100).toFixed(0)}% of time (max ${(this.config.maxTimeBelowThreshold * 100).toFixed(0)}%)`;
+      await recordScannedMarket(marketId, false, reason);
+      result.rejectedCount++;
+      result.rejectionReasons['Price'] = (result.rejectionReasons['Price'] || 0) + 1;
       return;
     }
 
@@ -141,7 +173,7 @@ export class MarketScanner {
       marketId,
       tokenId: marketData.noToken.tokenId,
       question: marketData.question,
-      category: marketData.category,
+      category: detectedCategory,
       noPrice,
       volume: marketData.volume24h,
       createdAt: marketData.createdAt!,
@@ -186,8 +218,8 @@ export class MarketScanner {
     const costBasis = this.config.positionSize + slippageCost;
     const quantity = this.config.positionSize / entryPriceAfterSlippage;
 
-    const positionId = uuidv4();
-    const tradeId = uuidv4();
+    const positionId = randomUUID();
+    const tradeId = randomUUID();
 
     // Create position
     const position: Position = {
@@ -239,5 +271,24 @@ export class MarketScanner {
     console.log(`   Resolves: ${market.endDate.toISOString().split('T')[0]}`);
 
     return true;
+  }
+
+  /**
+   * Calculate what % of price history had No price at/below threshold.
+   * Returns 0 on error (permissive - allows market through).
+   */
+  private async checkTimeBelowThreshold(
+    noTokenId: string,
+    priceThreshold: number
+  ): Promise<number> {
+    try {
+      const result = await this.priceHistoryFetcher.fetchFullHistory(noTokenId);
+      if (!result.success || result.history.length === 0) return 0;
+
+      const belowCount = result.history.filter(p => parseFloat(p.p) <= priceThreshold).length;
+      return belowCount / result.history.length;
+    } catch {
+      return 0;
+    }
   }
 }
