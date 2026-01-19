@@ -76,6 +76,43 @@ function formatPnl(value: number): string {
   return `${sign}$${value.toFixed(2)}`;
 }
 
+/**
+ * Format time until end date in human readable format.
+ * Shows "2d 3h" for days, "5h 30m" for hours, "Jan 21" for far future.
+ */
+function formatEndsIn(endDate: Date): string {
+  const now = Date.now();
+  const end = new Date(endDate).getTime();
+  const diffMs = end - now;
+
+  // If already ended
+  if (diffMs <= 0) return 'Ended';
+
+  const diffHours = diffMs / (1000 * 60 * 60);
+  const diffDays = diffHours / 24;
+
+  // Less than 24 hours: show hours and minutes
+  if (diffHours < 24) {
+    const hours = Math.floor(diffHours);
+    const minutes = Math.floor((diffHours - hours) * 60);
+    if (hours === 0) return `${minutes}m`;
+    return `${hours}h ${minutes}m`;
+  }
+
+  // Less than 7 days: show days and hours
+  if (diffDays < 7) {
+    const days = Math.floor(diffDays);
+    const hours = Math.floor((diffDays - days) * 24);
+    return `${days}d ${hours}h`;
+  }
+
+  // More than 7 days: show date
+  const date = new Date(endDate);
+  const month = date.toLocaleString('en-US', { month: 'short' });
+  const day = date.getDate();
+  return `${month} ${day}`;
+}
+
 const BOX_WIDTH = 78;
 
 /**
@@ -331,24 +368,25 @@ export function renderMonitorDashboard(state: MonitorDashboardState): void {
   if (state.positions.length === 0) {
     lines.push('║  ' + pad('  No open positions', BOX_WIDTH - 2) + '║');
   } else {
-    lines.push('║  ┌' + '─'.repeat(42) + '┬' + '─'.repeat(8) + '┬' + '─'.repeat(8) + '┬' + '─'.repeat(14) + '┐  ║');
-    lines.push('║  │' + pad(' Market', 42) + '│' + pad(' Entry', 8) + '│' + pad(' Now', 8) + '│' + pad(' P&L', 14) + '│  ║');
-    lines.push('║  ├' + '─'.repeat(42) + '┼' + '─'.repeat(8) + '┼' + '─'.repeat(8) + '┼' + '─'.repeat(14) + '┤  ║');
+    lines.push('║  ┌' + '─'.repeat(32) + '┬' + '─'.repeat(7) + '┬' + '─'.repeat(7) + '┬' + '─'.repeat(10) + '┬' + '─'.repeat(12) + '┐  ║');
+    lines.push('║  │' + pad(' Market', 32) + '│' + pad(' Entry', 7) + '│' + pad(' Now', 7) + '│' + pad(' Ends', 10) + '│' + pad(' P&L', 12) + '│  ║');
+    lines.push('║  ├' + '─'.repeat(32) + '┼' + '─'.repeat(7) + '┼' + '─'.repeat(7) + '┼' + '─'.repeat(10) + '┼' + '─'.repeat(12) + '┤  ║');
 
     const displayPositions = state.positions.slice(0, 8);
     for (const pos of displayPositions) {
-      const marketName = truncate(pos.question, 40);
+      const marketName = truncate(pos.question, 30);
       const entryPrice = formatPercent(pos.entryPrice);
       const currentPrice = pos.currentPrice !== undefined ? formatPercent(pos.currentPrice) : '...';
+      const endsIn = pos.endDate ? formatEndsIn(pos.endDate) : '...';
       const pnl = pos.unrealizedPnl !== undefined ? formatPnl(pos.unrealizedPnl) : '...';
-      lines.push('║  │' + pad(` ${marketName}`, 42) + '│' + pad(` ${entryPrice}`, 8) + '│' + pad(` ${currentPrice}`, 8) + '│' + pad(` ${pnl}`, 14) + '│  ║');
+      lines.push('║  │' + pad(` ${marketName}`, 32) + '│' + pad(` ${entryPrice}`, 7) + '│' + pad(` ${currentPrice}`, 7) + '│' + pad(` ${endsIn}`, 10) + '│' + pad(` ${pnl}`, 12) + '│  ║');
     }
 
     if (state.positions.length > 8) {
-      lines.push('║  │' + pad(` ... and ${state.positions.length - 8} more`, 42) + '│' + pad('', 8) + '│' + pad('', 8) + '│' + pad('', 14) + '│  ║');
+      lines.push('║  │' + pad(` ... and ${state.positions.length - 8} more`, 32) + '│' + pad('', 7) + '│' + pad('', 7) + '│' + pad('', 10) + '│' + pad('', 12) + '│  ║');
     }
 
-    lines.push('║  └' + '─'.repeat(42) + '┴' + '─'.repeat(8) + '┴' + '─'.repeat(8) + '┴' + '─'.repeat(14) + '┘  ║');
+    lines.push('║  └' + '─'.repeat(32) + '┴' + '─'.repeat(7) + '┴' + '─'.repeat(7) + '┴' + '─'.repeat(10) + '┴' + '─'.repeat(12) + '┘  ║');
   }
 
   lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
