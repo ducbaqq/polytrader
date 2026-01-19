@@ -266,13 +266,12 @@ program
         await refreshDashboard();
       };
 
-      await runScan();
-      const scanIntervalId = setInterval(runScan, config.scanIntervalSeconds * 1000);
+      let running = true;
       const dashIntervalId = useDashboard ? setInterval(refreshDashboard, 5000) : null;
 
       const shutdown = async () => {
         if (!useDashboard) console.log('\nShutting down scanner...');
-        clearInterval(scanIntervalId);
+        running = false;
         if (dashIntervalId) clearInterval(dashIntervalId);
         await closeDatabase();
         process.exit(0);
@@ -280,7 +279,13 @@ program
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
 
-      await new Promise(() => {});
+      // Run scan loop - wait interval AFTER scan completes
+      while (running) {
+        await runScan();
+        if (running) {
+          await new Promise(resolve => setTimeout(resolve, config.scanIntervalSeconds * 1000));
+        }
+      }
     } catch (error) {
       console.error('Error in scanner:', error);
       process.exit(1);
@@ -396,13 +401,12 @@ program
         await refreshDashboard();
       };
 
-      await runMonitor();
-      const monitorIntervalId = setInterval(runMonitor, config.monitorIntervalSeconds * 1000);
+      let running = true;
       const dashIntervalId = useDashboard ? setInterval(refreshDashboard, 5000) : null;
 
       const shutdown = async () => {
         if (!useDashboard) console.log('\nShutting down monitor...');
-        clearInterval(monitorIntervalId);
+        running = false;
         if (dashIntervalId) clearInterval(dashIntervalId);
         await closeDatabase();
         process.exit(0);
@@ -410,8 +414,13 @@ program
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
 
-      // Keep process alive
-      await new Promise(() => {});
+      // Run monitor loop - wait interval AFTER cycle completes
+      while (running) {
+        await runMonitor();
+        if (running) {
+          await new Promise(resolve => setTimeout(resolve, config.monitorIntervalSeconds * 1000));
+        }
+      }
     } catch (error) {
       console.error('Error in monitor:', error);
       process.exit(1);
