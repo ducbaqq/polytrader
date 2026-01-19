@@ -19,6 +19,9 @@ import {
 } from './repository';
 import { PriceHistoryFetcher } from '../alphaAnalysis/priceHistoryFetcher';
 import { DEFAULT_CONFIG as ALPHA_CONFIG } from '../alphaAnalysis/types';
+import { printProgress, clearProgress } from './dashboard';
+
+export type ProgressCallback = (current: number, total: number, rejected: number, eligible: number) => void;
 
 /**
  * Scanner for finding eligible markets.
@@ -40,8 +43,10 @@ export class MarketScanner {
 
   /**
    * Scan for eligible markets and open positions.
+   * @param onProgress - Optional callback for progress updates
+   * @param silent - If true, suppress console output (for dashboard mode)
    */
-  async scan(): Promise<ScanResult> {
+  async scan(onProgress?: ProgressCallback, silent: boolean = false): Promise<ScanResult> {
     const result: ScanResult = {
       timestamp: new Date(),
       marketsScanned: 0,
@@ -56,7 +61,7 @@ export class MarketScanner {
       const markets = await this.client.getAllMarkets(true, undefined, 0);
       result.marketsScanned = markets.length;
 
-      console.log(`Scanning ${markets.length} markets...`);
+      if (!silent) console.log(`Scanning ${markets.length} markets...`);
 
       // Filter by target categories using keyword detection
       // (API doesn't provide categories for open markets)
@@ -81,21 +86,29 @@ export class MarketScanner {
         }
       }
 
-      console.log(`Found ${categoryMarkets.length} markets in target categories: ${this.config.categories.join(', ')}`);
+      if (!silent) console.log(`Found ${categoryMarkets.length} markets in target categories: ${this.config.categories.join(', ')}`);
 
       // Check each market
       let processed = 0;
       for (const { market, detectedCategory } of categoryMarkets) {
-        await this.processMarket(market, result, detectedCategory);
+        await this.processMarket(market, result, detectedCategory, silent);
         processed++;
-        if (processed % 100 === 0) {
-          console.log(`  Progress: ${processed}/${categoryMarkets.length} (${result.rejectedCount} rejected, ${result.eligibleMarkets.length} eligible)`);
+
+        // Report progress
+        if (onProgress) {
+          onProgress(processed, categoryMarkets.length, result.rejectedCount, result.eligibleMarkets.length);
+        } else if (!silent && processed % 100 === 0) {
+          printProgress(processed, categoryMarkets.length, result.rejectedCount, result.eligibleMarkets.length);
         }
       }
 
-      console.log(`Scan complete: ${result.eligibleMarkets.length} eligible, ${result.positionsOpened} positions opened`);
+      // Clear progress line before final message
+      if (!silent && !onProgress) {
+        clearProgress();
+        console.log(`Scan complete: ${result.eligibleMarkets.length} eligible, ${result.positionsOpened} positions opened`);
+      }
     } catch (error) {
-      console.error('Error during scan:', error);
+      if (!silent) console.error('Error during scan:', error);
     }
 
     return result;
@@ -104,7 +117,7 @@ export class MarketScanner {
   /**
    * Process a single market.
    */
-  private async processMarket(market: GammaMarket, result: ScanResult, detectedCategory: string): Promise<void> {
+  private async processMarket(market: GammaMarket, result: ScanResult, detectedCategory: string, silent: boolean = false): Promise<void> {
     const marketId = market.id;
 
     // Skip if already scanned
@@ -198,7 +211,7 @@ export class MarketScanner {
     result.eligibleMarkets.push(eligibleMarket);
 
     // Try to open position
-    const opened = await this.openPosition(eligibleMarket);
+    const opened = await this.openPosition(eligibleMarket, silent);
     if (opened) {
       result.positionsOpened++;
       await recordScannedMarket(marketId, true, undefined, true);
@@ -210,16 +223,16 @@ export class MarketScanner {
   /**
    * Open a position for an eligible market.
    */
-  private async openPosition(market: EligibleMarket): Promise<boolean> {
+  private async openPosition(market: EligibleMarket, silent: boolean = false): Promise<boolean> {
     // Check if we have enough capital
     const portfolio = await getPortfolio();
     if (!portfolio) {
-      console.log('Portfolio not initialized');
+      if (!silent) console.log('Portfolio not initialized');
       return false;
     }
 
     if (portfolio.cashBalance < this.config.positionSize) {
-      console.log(`Insufficient capital: $${portfolio.cashBalance.toFixed(2)} < $${this.config.positionSize}`);
+      if (!silent) console.log(`Insufficient capital: $${portfolio.cashBalance.toFixed(2)} < $${this.config.positionSize}`);
       return false;
     }
 
@@ -273,14 +286,16 @@ export class MarketScanner {
     await insertTrade(trade);
     await updatePortfolioOnOpen(costBasis);
 
-    console.log(`\n📈 POSITION OPENED`);
-    console.log(`   Market: ${market.question.substring(0, 60)}...`);
-    console.log(`   Category: ${market.category}`);
-    console.log(`   No Price: ${(entryPrice * 100).toFixed(1)}%`);
-    console.log(`   Edge: ${(market.edge * 100).toFixed(1)}%`);
-    console.log(`   Size: $${this.config.positionSize}`);
-    console.log(`   Quantity: ${quantity.toFixed(2)} contracts`);
-    console.log(`   Resolves: ${market.endDate.toISOString().split('T')[0]}`);
+    if (!silent) {
+      console.log(`\n📈 POSITION OPENED`);
+      console.log(`   Market: ${market.question.substring(0, 60)}...`);
+      console.log(`   Category: ${market.category}`);
+      console.log(`   No Price: ${(entryPrice * 100).toFixed(1)}%`);
+      console.log(`   Edge: ${(market.edge * 100).toFixed(1)}%`);
+      console.log(`   Size: $${this.config.positionSize}`);
+      console.log(`   Quantity: ${quantity.toFixed(2)} contracts`);
+      console.log(`   Resolves: ${market.endDate.toISOString().split('T')[0]}`);
+    }
 
     return true;
   }

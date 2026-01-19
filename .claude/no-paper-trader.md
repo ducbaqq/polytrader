@@ -24,6 +24,7 @@ Simulated trading system that bets **No** on high win-rate categories based on a
 | `src/noPaperTrader/scanner.ts` | Market scanner with price history checks |
 | `src/noPaperTrader/monitor.ts` | Position monitor for TP/SL and resolution |
 | `src/noPaperTrader/report.ts` | Performance report generation |
+| `src/noPaperTrader/dashboard.ts` | Live terminal dashboard with portfolio/position display |
 | `src/noPaperTrader/index.ts` | Main orchestrator class |
 
 ---
@@ -49,7 +50,8 @@ npm run no-trader -- start \
   --take-profit 90 \
   --stop-loss 25 \
   --scan-interval 60 \
-  --monitor-interval 30
+  --monitor-interval 30 \
+  --no-dashboard          # Optional: disable live dashboard
 ```
 
 ---
@@ -210,6 +212,39 @@ The report shows:
 - **Category Performance**: Breakdown by category
 - **Equity Curve**: Daily equity snapshots
 - **Open Positions**: Current active positions
+
+---
+
+## Live Dashboard
+
+When running `npm run no-trader -- start`, a live terminal dashboard displays:
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  NO PAPER TRADER                                                             ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  🔍 Scanning: 342/2613                   Runtime: 18s  10:19:23 PM           ║
+║  Scans: 0  Opened: 0  Closed: 0                                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  PORTFOLIO                                                                   ║
+║  ├─ Initial Capital:   $2500.00                                              ║
+║  ├─ Cash Balance:      $2449.75                                              ║
+║  ├─ Position Value:    $84.92                                                ║
+║  ├─ Total Equity:      $2534.67                                              ║
+║  ├─ Unrealized P&L:    +$34.67                                               ║
+║  └─ Total P&L:         +$34.67                                               ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  OPEN POSITIONS (1)                                                          ║
+║  │ Will the price of Bitcoin be above $9... │ 58.0%  │ 99.0%  │ +$34.67      │
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+- **Status**: Shows scanning progress (e.g., `342/2613`), monitoring, or idle
+- **Portfolio**: Initial capital, cash, position value, equity, unrealized/total P&L
+- **Positions**: Entry price, current price, unrealized P&L per position
+- **Refresh**: Updates every 5 seconds + on scan progress
+
+Use `--no-dashboard` for plain text output mode.
 
 ---
 

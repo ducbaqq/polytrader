@@ -43,6 +43,7 @@ program
   .option('--stop-loss <percent>', 'Stop loss threshold (default: 25%)', '25')
   .option('--scan-interval <seconds>', 'Scan interval in seconds (default: 60)', '60')
   .option('--monitor-interval <seconds>', 'Monitor interval in seconds (default: 30)', '30')
+  .option('--no-dashboard', 'Disable live dashboard (use plain text output)')
   .action(async (options) => {
     try {
       const config = loadConfig();
@@ -56,11 +57,12 @@ program
       if (options.scanInterval) config.scanIntervalSeconds = parseInt(options.scanInterval);
       if (options.monitorInterval) config.monitorIntervalSeconds = parseInt(options.monitorInterval);
 
-      const trader = new NoPaperTrader(config);
+      const useDashboard = options.dashboard !== false;
+      const trader = new NoPaperTrader(config, useDashboard);
 
       // Handle graceful shutdown
       const shutdown = async (signal: string) => {
-        console.log(`\nReceived ${signal}, shutting down...`);
+        if (!useDashboard) console.log(`\nReceived ${signal}, shutting down...`);
         await trader.stop();
         await closeDatabase();
         process.exit(0);

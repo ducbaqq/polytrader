@@ -16,8 +16,10 @@ import {
   initializeTables,
   initializePortfolio,
   getPortfolio,
+  getOpenPositions,
   recordDailySnapshot,
 } from './repository';
+import { DashboardState, PositionWithPrice, renderDashboard } from './dashboard';
 
 export interface PaperTraderStats {
   isRunning: boolean;
@@ -43,13 +45,17 @@ export class NoPaperTrader {
   private scanIntervalId: NodeJS.Timeout | null = null;
   private monitorIntervalId: NodeJS.Timeout | null = null;
   private snapshotIntervalId: NodeJS.Timeout | null = null;
+  private dashboardIntervalId: NodeJS.Timeout | null = null;
   private currentDate: string = '';
+  private dashboardState: DashboardState;
+  private useDashboard: boolean = true;
 
-  constructor(config?: StrategyConfig) {
+  constructor(config?: StrategyConfig, useDashboard: boolean = true) {
     this.config = config || loadConfig();
     this.client = new PolymarketClient();
     this.scanner = new MarketScanner(this.client, this.config);
     this.monitor = new PositionMonitor(this.client, this.config);
+    this.useDashboard = useDashboard;
     this.stats = {
       isRunning: false,
       startTime: null,
@@ -60,20 +66,32 @@ export class NoPaperTrader {
       lastScanTime: null,
       lastMonitorTime: null,
     };
+    this.dashboardState = {
+      status: 'idle',
+      portfolio: null,
+      positions: [],
+      lastUpdate: new Date(),
+      runtime: 0,
+      totalScans: 0,
+      positionsOpened: 0,
+      positionsClosed: 0,
+    };
   }
 
   /**
    * Initialize the paper trader.
    */
   async initialize(): Promise<void> {
-    console.log('Initializing No Paper Trader...');
-    console.log(`  Categories: ${this.config.categories.join(', ')}`);
-    console.log(`  Position Size: $${this.config.positionSize}`);
-    console.log(`  Min Edge: ${(this.config.minEdge * 100).toFixed(1)}%`);
-    console.log(`  Take Profit: ${(this.config.takeProfitThreshold * 100).toFixed(0)}%`);
-    console.log(`  Stop Loss: ${(this.config.stopLossThreshold * 100).toFixed(0)}%`);
-    console.log(`  Scan Interval: ${this.config.scanIntervalSeconds}s`);
-    console.log(`  Monitor Interval: ${this.config.monitorIntervalSeconds}s`);
+    if (!this.useDashboard) {
+      console.log('Initializing No Paper Trader...');
+      console.log(`  Categories: ${this.config.categories.join(', ')}`);
+      console.log(`  Position Size: $${this.config.positionSize}`);
+      console.log(`  Min Edge: ${(this.config.minEdge * 100).toFixed(1)}%`);
+      console.log(`  Take Profit: ${(this.config.takeProfitThreshold * 100).toFixed(0)}%`);
+      console.log(`  Stop Loss: ${(this.config.stopLossThreshold * 100).toFixed(0)}%`);
+      console.log(`  Scan Interval: ${this.config.scanIntervalSeconds}s`);
+      console.log(`  Monitor Interval: ${this.config.monitorIntervalSeconds}s`);
+    }
 
     // Initialize database
     initDatabase();
@@ -82,9 +100,12 @@ export class NoPaperTrader {
 
     const portfolio = await getPortfolio();
     if (portfolio) {
-      console.log(`\nPortfolio initialized:`);
-      console.log(`  Cash Balance: $${portfolio.cashBalance.toFixed(2)}`);
-      console.log(`  Open Positions: ${portfolio.openPositionCount}`);
+      this.dashboardState.portfolio = portfolio;
+      if (!this.useDashboard) {
+        console.log(`\nPortfolio initialized:`);
+        console.log(`  Cash Balance: $${portfolio.cashBalance.toFixed(2)}`);
+        console.log(`  Open Positions: ${portfolio.openPositionCount}`);
+      }
     }
   }
 
@@ -93,10 +114,11 @@ export class NoPaperTrader {
    */
   async start(): Promise<void> {
     if (this.running) {
-      console.log('Paper trader is already running');
+      if (!this.useDashboard) console.log('Paper trader is already running');
       return;
     }
 
+    this.dashboardState.status = 'starting';
     await this.initialize();
 
     this.running = true;
@@ -104,8 +126,13 @@ export class NoPaperTrader {
     this.stats.startTime = new Date();
     this.currentDate = this.getTodayDate();
 
-    console.log('\n🚀 Starting No Paper Trader...');
-    console.log('─'.repeat(60));
+    if (!this.useDashboard) {
+      console.log('\n🚀 Starting No Paper Trader...');
+      console.log('─'.repeat(60));
+    }
+
+    // Load initial positions
+    await this.updatePositionsWithPrices();
 
     // Run initial scan
     await this.runScan();
@@ -128,7 +155,16 @@ export class NoPaperTrader {
       60000 // Check every minute
     );
 
-    console.log('Paper trader started. Press Ctrl+C to stop.');
+    // Dashboard refresh every 5 seconds
+    if (this.useDashboard) {
+      this.dashboardIntervalId = setInterval(
+        () => this.refreshDashboard(),
+        5000
+      );
+      this.refreshDashboard();
+    } else {
+      console.log('Paper trader started. Press Ctrl+C to stop.');
+    }
   }
 
   /**
@@ -137,22 +173,23 @@ export class NoPaperTrader {
   async stop(): Promise<void> {
     if (!this.running) return;
 
-    console.log('\nStopping No Paper Trader...');
+    if (!this.useDashboard) console.log('\nStopping No Paper Trader...');
 
     this.running = false;
     this.stats.isRunning = false;
 
     // Clear all intervals
-    const intervals = [this.scanIntervalId, this.monitorIntervalId, this.snapshotIntervalId];
+    const intervals = [this.scanIntervalId, this.monitorIntervalId, this.snapshotIntervalId, this.dashboardIntervalId];
     for (const interval of intervals) {
       if (interval) clearInterval(interval);
     }
     this.scanIntervalId = null;
     this.monitorIntervalId = null;
     this.snapshotIntervalId = null;
+    this.dashboardIntervalId = null;
 
     await this.recordSnapshot();
-    console.log('Paper trader stopped.');
+    if (!this.useDashboard) console.log('Paper trader stopped.');
   }
 
   /**
@@ -162,18 +199,42 @@ export class NoPaperTrader {
     if (!this.running) return;
 
     try {
-      console.log(`\n[${new Date().toISOString()}] Running market scan...`);
-      const result = await this.scanner.scan();
+      this.dashboardState.status = 'scanning';
+      if (this.useDashboard) this.refreshDashboard();
+
+      if (!this.useDashboard) {
+        console.log(`\n[${new Date().toISOString()}] Running market scan...`);
+      }
+
+      // Progress callback for dashboard
+      const onProgress = this.useDashboard
+        ? (current: number, total: number) => {
+            this.dashboardState.scanProgress = { current, total };
+            this.refreshDashboard();
+          }
+        : undefined;
+
+      const result = await this.scanner.scan(onProgress, this.useDashboard);
 
       this.stats.totalScans++;
       this.stats.positionsOpened += result.positionsOpened;
       this.stats.lastScanTime = new Date();
 
-      if (result.eligibleMarkets.length > 0 || result.positionsOpened > 0) {
+      // Update dashboard state
+      this.dashboardState.totalScans = this.stats.totalScans;
+      this.dashboardState.positionsOpened = this.stats.positionsOpened;
+      this.dashboardState.scanProgress = undefined;
+      this.dashboardState.status = 'idle';
+
+      // Refresh positions after scan
+      await this.updatePositionsWithPrices();
+
+      if (!this.useDashboard && (result.eligibleMarkets.length > 0 || result.positionsOpened > 0)) {
         console.log(`Scan result: ${result.eligibleMarkets.length} eligible, ${result.positionsOpened} opened`);
       }
     } catch (error) {
-      console.error('Error during scan:', error);
+      if (!this.useDashboard) console.error('Error during scan:', error);
+      this.dashboardState.status = 'idle';
     }
   }
 
@@ -184,13 +245,23 @@ export class NoPaperTrader {
     if (!this.running) return;
 
     try {
+      this.dashboardState.status = 'monitoring';
+
       const result = await this.monitor.monitor();
 
       this.stats.totalMonitorCycles++;
       this.stats.positionsClosed += result.takeProfitTriggered + result.stopLossTriggered + result.resolved;
       this.stats.lastMonitorTime = new Date();
+
+      // Update dashboard state
+      this.dashboardState.positionsClosed = this.stats.positionsClosed;
+      this.dashboardState.status = 'idle';
+
+      // Refresh positions after monitor
+      await this.updatePositionsWithPrices();
     } catch (error) {
-      console.error('Error during monitor:', error);
+      if (!this.useDashboard) console.error('Error during monitor:', error);
+      this.dashboardState.status = 'idle';
     }
   }
 
@@ -248,13 +319,73 @@ export class NoPaperTrader {
   getConfig(): StrategyConfig {
     return { ...this.config };
   }
+
+  /**
+   * Update positions with current market prices.
+   */
+  private async updatePositionsWithPrices(): Promise<void> {
+    try {
+      const positions = await getOpenPositions();
+      const portfolio = await getPortfolio();
+
+      this.dashboardState.portfolio = portfolio;
+
+      // Fetch current prices for each position
+      const positionsWithPrices: PositionWithPrice[] = [];
+
+      for (const pos of positions) {
+        const posWithPrice: PositionWithPrice = { ...pos };
+
+        try {
+          // Fetch current No price from order book
+          const orderBook = await this.client.getOrderBook(pos.tokenId);
+          if (orderBook && orderBook.asks && orderBook.asks.length > 0) {
+            posWithPrice.currentPrice = parseFloat(String(orderBook.asks[0].price));
+          } else if (orderBook && orderBook.bids && orderBook.bids.length > 0) {
+            posWithPrice.currentPrice = parseFloat(String(orderBook.bids[0].price));
+          }
+
+          // Calculate unrealized P&L
+          if (posWithPrice.currentPrice !== undefined) {
+            const currentValue = pos.quantity * posWithPrice.currentPrice;
+            posWithPrice.unrealizedPnl = currentValue - pos.costBasis;
+            posWithPrice.unrealizedPnlPercent = posWithPrice.unrealizedPnl / pos.costBasis;
+          }
+        } catch {
+          // Ignore price fetch errors
+        }
+
+        positionsWithPrices.push(posWithPrice);
+      }
+
+      this.dashboardState.positions = positionsWithPrices;
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  /**
+   * Refresh the dashboard display.
+   */
+  private refreshDashboard(): void {
+    if (!this.useDashboard) return;
+
+    // Update runtime
+    if (this.stats.startTime) {
+      this.dashboardState.runtime = Date.now() - this.stats.startTime.getTime();
+    }
+    this.dashboardState.lastUpdate = new Date();
+
+    renderDashboard(this.dashboardState);
+  }
 }
 
 // Re-export everything
 export { StrategyConfig, loadConfig, DEFAULT_STRATEGY_CONFIG } from './config';
-export { MarketScanner } from './scanner';
+export { MarketScanner, ProgressCallback } from './scanner';
 export { PositionMonitor } from './monitor';
 export { generateReport, printReport, printStatus } from './report';
+export { DashboardState, PositionWithPrice, renderDashboard, printProgress, clearProgress } from './dashboard';
 export {
   initializeTables,
   initializePortfolio,
