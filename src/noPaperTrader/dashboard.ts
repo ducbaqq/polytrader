@@ -204,3 +204,156 @@ export function printProgress(current: number, total: number, rejected: number, 
 export function clearProgress(): void {
   process.stdout.write('\r' + ' '.repeat(80) + '\r');
 }
+
+// ============================================================================
+// Scanner Dashboard
+// ============================================================================
+
+export interface ScannerDashboardState {
+  status: 'idle' | 'scanning';
+  scanProgress?: { current: number; total: number };
+  runtime: number;
+  totalScans: number;
+  positionsOpened: number;
+  cashBalance: number;
+  openPositionCount: number;
+  lastUpdate: Date;
+  recentOpened: Array<{ question: string; price: number; edge: number }>;
+}
+
+export function renderScannerDashboard(state: ScannerDashboardState): void {
+  process.stdout.write('\x1B[2J\x1B[0f');
+  const lines: string[] = [];
+
+  lines.push('╔' + '═'.repeat(BOX_WIDTH) + '╗');
+  lines.push('║' + pad('  🔍 SCANNER', BOX_WIDTH) + '║');
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+
+  // Status
+  let statusText = '⏸️  Idle - waiting for next scan';
+  if (state.status === 'scanning' && state.scanProgress) {
+    const pct = ((state.scanProgress.current / state.scanProgress.total) * 100).toFixed(0);
+    statusText = `🔍 Scanning: ${state.scanProgress.current}/${state.scanProgress.total} (${pct}%)`;
+  }
+  const timeText = `Runtime: ${formatDuration(state.runtime)}  ${state.lastUpdate.toLocaleTimeString()}`;
+  lines.push('║  ' + pad(statusText, 45) + pad(timeText, BOX_WIDTH - 47) + '║');
+
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+
+  // Stats
+  lines.push('║  ' + pad('STATS', BOX_WIDTH - 2) + '║');
+  lines.push('║  ' + pad(`├─ Total Scans:       ${state.totalScans}`, BOX_WIDTH - 2) + '║');
+  lines.push('║  ' + pad(`├─ Positions Opened:  ${state.positionsOpened}`, BOX_WIDTH - 2) + '║');
+  lines.push('║  ' + pad(`├─ Cash Balance:      ${formatCurrency(state.cashBalance)}`, BOX_WIDTH - 2) + '║');
+  lines.push('║  ' + pad(`└─ Open Positions:    ${state.openPositionCount}`, BOX_WIDTH - 2) + '║');
+
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+
+  // Recent opened
+  lines.push('║  ' + pad('RECENTLY OPENED', BOX_WIDTH - 2) + '║');
+  if (state.recentOpened.length === 0) {
+    lines.push('║  ' + pad('  No positions opened yet', BOX_WIDTH - 2) + '║');
+  } else {
+    for (const pos of state.recentOpened.slice(0, 5)) {
+      const text = `  ${truncate(pos.question, 50)} @ ${formatPercent(pos.price)} (edge: ${formatPercent(pos.edge)})`;
+      lines.push('║  ' + pad(text, BOX_WIDTH - 2) + '║');
+    }
+  }
+
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+  lines.push('║  ' + pad('Press Ctrl+C to stop', BOX_WIDTH - 2) + '║');
+  lines.push('╚' + '═'.repeat(BOX_WIDTH) + '╝');
+
+  console.log(lines.join('\n'));
+}
+
+// ============================================================================
+// Monitor Dashboard
+// ============================================================================
+
+export interface MonitorDashboardState {
+  status: 'idle' | 'checking';
+  runtime: number;
+  totalCycles: number;
+  takeProfitCount: number;
+  stopLossCount: number;
+  resolvedCount: number;
+  positions: PositionWithPrice[];
+  portfolio: Portfolio | null;
+  lastUpdate: Date;
+}
+
+export function renderMonitorDashboard(state: MonitorDashboardState): void {
+  process.stdout.write('\x1B[2J\x1B[0f');
+  const lines: string[] = [];
+
+  lines.push('╔' + '═'.repeat(BOX_WIDTH) + '╗');
+  lines.push('║' + pad('  👁️  MONITOR', BOX_WIDTH) + '║');
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+
+  // Status
+  const statusText = state.status === 'checking' ? '🔄 Checking positions...' : '⏸️  Idle - waiting for next check';
+  const timeText = `Runtime: ${formatDuration(state.runtime)}  ${state.lastUpdate.toLocaleTimeString()}`;
+  lines.push('║  ' + pad(statusText, 45) + pad(timeText, BOX_WIDTH - 47) + '║');
+
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+
+  // Stats
+  lines.push('║  ' + pad('STATS', BOX_WIDTH - 2) + '║');
+  lines.push('║  ' + pad(`├─ Monitor Cycles:    ${state.totalCycles}`, BOX_WIDTH - 2) + '║');
+  lines.push('║  ' + pad(`├─ Take Profits:      ${state.takeProfitCount}`, BOX_WIDTH - 2) + '║');
+  lines.push('║  ' + pad(`├─ Stop Losses:       ${state.stopLossCount}`, BOX_WIDTH - 2) + '║');
+  lines.push('║  ' + pad(`└─ Resolved:          ${state.resolvedCount}`, BOX_WIDTH - 2) + '║');
+
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+
+  // Portfolio
+  if (state.portfolio) {
+    const p = state.portfolio;
+    const totalUnrealized = state.positions.reduce((sum, pos) => sum + (pos.unrealizedPnl || 0), 0);
+    const positionValue = state.positions.reduce((sum, pos) => {
+      if (pos.currentPrice !== undefined) return sum + pos.quantity * pos.currentPrice;
+      return sum + pos.costBasis;
+    }, 0);
+    const totalEquity = p.cashBalance + positionValue;
+    const totalPnl = totalEquity - p.initialCapital;
+
+    lines.push('║  ' + pad('PORTFOLIO', BOX_WIDTH - 2) + '║');
+    lines.push('║  ' + pad(`├─ Cash: ${formatCurrency(p.cashBalance)}  Positions: ${formatCurrency(positionValue)}  Equity: ${formatCurrency(totalEquity)}`, BOX_WIDTH - 2) + '║');
+    lines.push('║  ' + pad(`└─ Unrealized: ${formatPnl(totalUnrealized)}  Total P&L: ${formatPnl(totalPnl)}`, BOX_WIDTH - 2) + '║');
+  }
+
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+
+  // Positions table
+  lines.push('║  ' + pad(`OPEN POSITIONS (${state.positions.length})`, BOX_WIDTH - 2) + '║');
+
+  if (state.positions.length === 0) {
+    lines.push('║  ' + pad('  No open positions', BOX_WIDTH - 2) + '║');
+  } else {
+    lines.push('║  ┌' + '─'.repeat(42) + '┬' + '─'.repeat(8) + '┬' + '─'.repeat(8) + '┬' + '─'.repeat(14) + '┐  ║');
+    lines.push('║  │' + pad(' Market', 42) + '│' + pad(' Entry', 8) + '│' + pad(' Now', 8) + '│' + pad(' P&L', 14) + '│  ║');
+    lines.push('║  ├' + '─'.repeat(42) + '┼' + '─'.repeat(8) + '┼' + '─'.repeat(8) + '┼' + '─'.repeat(14) + '┤  ║');
+
+    const displayPositions = state.positions.slice(0, 8);
+    for (const pos of displayPositions) {
+      const marketName = truncate(pos.question, 40);
+      const entryPrice = formatPercent(pos.entryPrice);
+      const currentPrice = pos.currentPrice !== undefined ? formatPercent(pos.currentPrice) : '...';
+      const pnl = pos.unrealizedPnl !== undefined ? formatPnl(pos.unrealizedPnl) : '...';
+      lines.push('║  │' + pad(` ${marketName}`, 42) + '│' + pad(` ${entryPrice}`, 8) + '│' + pad(` ${currentPrice}`, 8) + '│' + pad(` ${pnl}`, 14) + '│  ║');
+    }
+
+    if (state.positions.length > 8) {
+      lines.push('║  │' + pad(` ... and ${state.positions.length - 8} more`, 42) + '│' + pad('', 8) + '│' + pad('', 8) + '│' + pad('', 14) + '│  ║');
+    }
+
+    lines.push('║  └' + '─'.repeat(42) + '┴' + '─'.repeat(8) + '┴' + '─'.repeat(8) + '┴' + '─'.repeat(14) + '┘  ║');
+  }
+
+  lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
+  lines.push('║  ' + pad('Press Ctrl+C to stop', BOX_WIDTH - 2) + '║');
+  lines.push('╚' + '═'.repeat(BOX_WIDTH) + '╝');
+
+  console.log(lines.join('\n'));
+}
