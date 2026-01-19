@@ -33,14 +33,31 @@ Simulated trading system that bets **No** on high win-rate categories based on a
 
 | Command | Description |
 |---------|-------------|
-| `npm run no-trader:start` | Start paper trader (runs continuously) |
+| `npm run no-trader:start` | Start paper trader with dashboard (scanner + monitor together) |
+| `npm run no-trader:scan` | Run scanner continuously (independent process) |
+| `npm run no-trader:monitor` | Run monitor continuously (independent process) |
 | `npm run no-trader:status` | Check current portfolio status |
 | `npm run no-trader:report` | Generate full performance report |
 | `npm run no-trader:reset` | Reset all paper trading data |
-| `npm run no-trader:scan` | Run single market scan |
-| `npm run no-trader:monitor` | Run single monitor cycle |
+| `npm run no-trader:scan-once` | Run single market scan |
+| `npm run no-trader:monitor-once` | Run single monitor cycle |
 
-### Start Options
+### Separate Processes Mode
+
+Run scanner and monitor as independent processes (they share the database):
+
+```bash
+# Terminal 1 - Scanner finds and opens positions
+npm run no-trader:scan -- --interval 60 --concurrency 20
+
+# Terminal 2 - Monitor manages TP/SL/resolution
+npm run no-trader:monitor -- --interval 30
+```
+
+Scanner options: `--interval`, `--capital`, `--size`, `--concurrency`
+Monitor options: `--interval`, `--take-profit`, `--stop-loss`
+
+### Start Options (Combined Mode)
 
 ```bash
 npm run no-trader -- start \
@@ -95,6 +112,9 @@ const DEFAULT_STRATEGY_CONFIG = {
   // Polling
   scanIntervalSeconds: 60,
   monitorIntervalSeconds: 30,
+
+  // Performance
+  scanConcurrency: 20,           // Process 20 markets in parallel
 };
 ```
 
@@ -198,6 +218,7 @@ NO_TRADER_MAX_NO_PRICE=0.60
 NO_TRADER_MIN_VOLUME=1000
 NO_TRADER_MAX_VOLUME=<infinity>           # Optional, defaults to no cap
 NO_TRADER_MAX_TIME_BELOW_THRESHOLD=0.75
+NO_TRADER_SCAN_CONCURRENCY=20
 ```
 
 ---

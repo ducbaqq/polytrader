@@ -157,24 +157,151 @@ program
   });
 
 /**
- * Scan-once command - runs a single scan without starting the full trader.
+ * Scan command - runs scanner continuously as independent process.
  */
 program
-  .command('scan-once')
-  .description('Run a single market scan without starting the full trader')
-  .action(async () => {
+  .command('scan')
+  .description('Run scanner continuously (independent process, shares DB with monitor)')
+  .option('--interval <seconds>', 'Scan interval in seconds (default: 60)', '60')
+  .option('--capital <amount>', 'Initial capital (default: $2500)', '2500')
+  .option('--size <amount>', 'Position size per trade (default: $50)', '50')
+  .option('--concurrency <num>', 'Number of markets to process in parallel (default: 20)', '20')
+  .action(async (options) => {
     try {
       initDatabase();
       await initializeTables();
 
       const config = loadConfig();
+      if (options.interval) config.scanIntervalSeconds = parseInt(options.interval);
+      if (options.capital) config.initialCapital = parseFloat(options.capital);
+      if (options.size) config.positionSize = parseFloat(options.size);
+      if (options.concurrency) config.scanConcurrency = parseInt(options.concurrency);
+
       const { PolymarketClient } = await import('./apiClient');
       const { MarketScanner } = await import('./noPaperTrader/scanner');
 
       await initializePortfolio(config.initialCapital);
 
       const client = new PolymarketClient();
-      const scanner = new MarketScanner(client, config);
+      const scanner = new MarketScanner(client, config, config.scanConcurrency);
+      let scanCount = 0;
+
+      console.log(`🔍 Scanner started (interval: ${config.scanIntervalSeconds}s, concurrency: ${config.scanConcurrency})`);
+      console.log(`   Categories: ${config.categories.join(', ')}`);
+      console.log(`   Position size: $${config.positionSize}`);
+      console.log('   Press Ctrl+C to stop\n');
+
+      const runScan = async () => {
+        scanCount++;
+        console.log(`[${new Date().toISOString()}] Scan #${scanCount} starting...`);
+        const result = await scanner.scan();
+        console.log(`   Scanned: ${result.marketsScanned}, Eligible: ${result.eligibleMarkets.length}, Opened: ${result.positionsOpened}`);
+      };
+
+      await runScan();
+      const intervalId = setInterval(runScan, config.scanIntervalSeconds * 1000);
+
+      // Graceful shutdown
+      const shutdown = async () => {
+        console.log('\nShutting down scanner...');
+        clearInterval(intervalId);
+        await closeDatabase();
+        process.exit(0);
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+
+      // Keep process alive
+      await new Promise(() => {});
+    } catch (error) {
+      console.error('Error in scanner:', error);
+      process.exit(1);
+    }
+  });
+
+/**
+ * Monitor command - runs monitor continuously as independent process.
+ */
+program
+  .command('monitor')
+  .description('Run monitor continuously (independent process, shares DB with scanner)')
+  .option('--interval <seconds>', 'Monitor interval in seconds (default: 30)', '30')
+  .option('--take-profit <percent>', 'Take profit threshold (default: 90%)', '90')
+  .option('--stop-loss <percent>', 'Stop loss threshold (default: 25%)', '25')
+  .action(async (options) => {
+    try {
+      initDatabase();
+      await initializeTables();
+
+      const config = loadConfig();
+      if (options.interval) config.monitorIntervalSeconds = parseInt(options.interval);
+      if (options.takeProfit) config.takeProfitThreshold = parseFloat(options.takeProfit) / 100;
+      if (options.stopLoss) config.stopLossThreshold = parseFloat(options.stopLoss) / 100;
+
+      const { PolymarketClient } = await import('./apiClient');
+      const { PositionMonitor } = await import('./noPaperTrader/monitor');
+
+      const client = new PolymarketClient();
+      const monitor = new PositionMonitor(client, config);
+      let cycleCount = 0;
+
+      console.log(`👁️  Monitor started (interval: ${config.monitorIntervalSeconds}s)`);
+      console.log(`   Take profit: ${(config.takeProfitThreshold * 100).toFixed(0)}%`);
+      console.log(`   Stop loss: ${(config.stopLossThreshold * 100).toFixed(0)}%`);
+      console.log('   Press Ctrl+C to stop\n');
+
+      const runMonitor = async () => {
+        cycleCount++;
+        const result = await monitor.monitor();
+        const actions = result.takeProfitTriggered + result.stopLossTriggered + result.resolved;
+        if (actions > 0 || cycleCount % 10 === 1) {
+          console.log(`[${new Date().toISOString()}] Cycle #${cycleCount}: ${result.positionsChecked} positions, TP:${result.takeProfitTriggered} SL:${result.stopLossTriggered} Resolved:${result.resolved}`);
+        }
+      };
+
+      await runMonitor();
+      const intervalId = setInterval(runMonitor, config.monitorIntervalSeconds * 1000);
+
+      // Graceful shutdown
+      const shutdown = async () => {
+        console.log('\nShutting down monitor...');
+        clearInterval(intervalId);
+        await closeDatabase();
+        process.exit(0);
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+
+      // Keep process alive
+      await new Promise(() => {});
+    } catch (error) {
+      console.error('Error in monitor:', error);
+      process.exit(1);
+    }
+  });
+
+/**
+ * Scan-once command - runs a single scan without starting the full trader.
+ */
+program
+  .command('scan-once')
+  .description('Run a single market scan without starting the full trader')
+  .option('--concurrency <num>', 'Number of markets to process in parallel (default: 20)', '20')
+  .action(async (options) => {
+    try {
+      initDatabase();
+      await initializeTables();
+
+      const config = loadConfig();
+      if (options.concurrency) config.scanConcurrency = parseInt(options.concurrency);
+
+      const { PolymarketClient } = await import('./apiClient');
+      const { MarketScanner } = await import('./noPaperTrader/scanner');
+
+      await initializePortfolio(config.initialCapital);
+
+      const client = new PolymarketClient();
+      const scanner = new MarketScanner(client, config, config.scanConcurrency);
 
       console.log('Running single scan...');
       const result = await scanner.scan();

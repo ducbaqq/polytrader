@@ -24,20 +24,47 @@ import { printProgress, clearProgress } from './dashboard';
 export type ProgressCallback = (current: number, total: number, rejected: number, eligible: number) => void;
 
 /**
+ * Simple semaphore for concurrency control.
+ */
+class Semaphore {
+  private running = 0;
+  private queue: (() => void)[] = [];
+
+  constructor(private limit: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.running < this.limit) {
+      this.running++;
+      return;
+    }
+    await new Promise<void>(resolve => this.queue.push(resolve));
+    this.running++;
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+/**
  * Scanner for finding eligible markets.
  */
 export class MarketScanner {
   private client: PolymarketClient;
   private config: StrategyConfig;
   private priceHistoryFetcher: PriceHistoryFetcher;
+  private concurrency: number;
 
-  constructor(client: PolymarketClient, config: StrategyConfig) {
+  constructor(client: PolymarketClient, config: StrategyConfig, concurrency: number = 10) {
     this.client = client;
     this.config = config;
+    this.concurrency = concurrency;
     this.priceHistoryFetcher = new PriceHistoryFetcher({
       ...ALPHA_CONFIG,
       volumeTiers: { tier1MinVolume: 0, tier2MinVolume: 0 }, // Always fetch full history
-      rateLimit: { callsPerSecond: 5, maxRetries: 3, baseDelayMs: 1000 },
+      rateLimit: { callsPerSecond: 10, maxRetries: 3, baseDelayMs: 500 },
     });
   }
 
@@ -86,21 +113,35 @@ export class MarketScanner {
         }
       }
 
-      if (!silent) console.log(`Found ${categoryMarkets.length} markets in target categories: ${this.config.categories.join(', ')}`);
+      if (!silent) console.log(`Found ${categoryMarkets.length} markets in target categories: ${this.config.categories.join(', ')} (concurrency: ${this.concurrency})`);
 
-      // Check each market
+      // Process markets concurrently with semaphore
+      const semaphore = new Semaphore(this.concurrency);
       let processed = 0;
-      for (const { market, detectedCategory } of categoryMarkets) {
-        await this.processMarket(market, result, detectedCategory, silent);
-        processed++;
 
-        // Report progress
-        if (onProgress) {
-          onProgress(processed, categoryMarkets.length, result.rejectedCount, result.eligibleMarkets.length);
-        } else if (!silent && processed % 100 === 0) {
-          printProgress(processed, categoryMarkets.length, result.rejectedCount, result.eligibleMarkets.length);
+      const processWithSemaphore = async (market: GammaMarket, detectedCategory: string) => {
+        await semaphore.acquire();
+        try {
+          await this.processMarket(market, result, detectedCategory, silent);
+        } finally {
+          semaphore.release();
+          processed++;
+
+          // Report progress
+          if (onProgress) {
+            onProgress(processed, categoryMarkets.length, result.rejectedCount, result.eligibleMarkets.length);
+          } else if (!silent && processed % 50 === 0) {
+            printProgress(processed, categoryMarkets.length, result.rejectedCount, result.eligibleMarkets.length);
+          }
         }
-      }
+      };
+
+      // Launch all tasks concurrently (semaphore controls actual parallelism)
+      await Promise.all(
+        categoryMarkets.map(({ market, detectedCategory }) =>
+          processWithSemaphore(market, detectedCategory)
+        )
+      );
 
       // Clear progress line before final message
       if (!silent && !onProgress) {

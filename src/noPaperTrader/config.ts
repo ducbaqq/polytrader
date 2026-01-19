@@ -36,6 +36,9 @@ export interface StrategyConfig {
   // Polling
   scanIntervalSeconds: number;     // How often to scan for new markets
   monitorIntervalSeconds: number;  // How often to check positions
+
+  // Performance
+  scanConcurrency: number;         // Number of markets to process in parallel
 }
 
 /**
@@ -85,6 +88,9 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   // Polling
   scanIntervalSeconds: 60,    // Check for new markets every minute
   monitorIntervalSeconds: 30, // Monitor positions every 30 seconds
+
+  // Performance
+  scanConcurrency: 20,        // Process 20 markets in parallel
 };
 
 /**
@@ -115,6 +121,10 @@ export function loadConfig(): StrategyConfig {
 
   if (env.NO_TRADER_SCAN_INTERVAL) {
     config.scanIntervalSeconds = parseInt(env.NO_TRADER_SCAN_INTERVAL);
+  }
+
+  if (env.NO_TRADER_SCAN_CONCURRENCY) {
+    config.scanConcurrency = parseInt(env.NO_TRADER_SCAN_CONCURRENCY);
   }
 
   return config;

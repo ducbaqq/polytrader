@@ -53,7 +53,7 @@ export class NoPaperTrader {
   constructor(config?: StrategyConfig, useDashboard: boolean = true) {
     this.config = config || loadConfig();
     this.client = new PolymarketClient();
-    this.scanner = new MarketScanner(this.client, this.config);
+    this.scanner = new MarketScanner(this.client, this.config, this.config.scanConcurrency);
     this.monitor = new PositionMonitor(this.client, this.config);
     this.useDashboard = useDashboard;
     this.stats = {
