@@ -338,11 +338,17 @@ export class NoPaperTrader {
 
         try {
           // Fetch current No price from order book
+          // Note: bids are sorted ascending (best bid is LAST), asks descending (best ask is LAST)
           const orderBook = await this.client.getOrderBook(pos.tokenId);
-          if (orderBook && orderBook.asks && orderBook.asks.length > 0) {
-            posWithPrice.currentPrice = parseFloat(String(orderBook.asks[0].price));
-          } else if (orderBook && orderBook.bids && orderBook.bids.length > 0) {
-            posWithPrice.currentPrice = parseFloat(String(orderBook.bids[0].price));
+
+          // Use best bid (what we could sell for) for current value
+          if (orderBook && orderBook.bids && orderBook.bids.length > 0) {
+            const bestBid = orderBook.bids[orderBook.bids.length - 1];
+            posWithPrice.currentPrice = parseFloat(String(bestBid.price));
+          } else if (orderBook && orderBook.asks && orderBook.asks.length > 0) {
+            // Fallback to best ask if no bids
+            const bestAsk = orderBook.asks[orderBook.asks.length - 1];
+            posWithPrice.currentPrice = parseFloat(String(bestAsk.price));
           }
 
           // Calculate unrealized P&L
