@@ -58,12 +58,12 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   categories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],
   minDurationDays: 1,
   maxDurationDays: 7,
-  minNoPrice: 0,           // No minimum price
-  maxNoPrice: 0.60,        // Max 60¢ (was 75¢)
-  minVolume: 1000,         // Min $1,000 (was $200)
-  maxVolume: 50000,
-  minEdge: 0.05,           // 5% edge required
-  maxTimeBelowThreshold: 0.25,  // Skip if No price was ≤60¢ for >25% of market lifetime
+  minNoPrice: 0,
+  maxNoPrice: 0.60,              // Max 60¢ - looking for underpriced No
+  minVolume: 1000,               // Min $1K volume
+  maxVolume: Infinity,           // No max cap
+  minEdge: 0.02,                 // 2% minimum edge
+  maxTimeBelowThreshold: 0.75,   // Skip if price was low >75% of lifetime
 
   // Historical win rates from alpha analysis
   categoryWinRates: {
@@ -103,6 +103,7 @@ export function loadConfig(): StrategyConfig {
     ['NO_TRADER_STOP_LOSS', 'stopLossThreshold'],
     ['NO_TRADER_MAX_NO_PRICE', 'maxNoPrice'],
     ['NO_TRADER_MIN_VOLUME', 'minVolume'],
+    ['NO_TRADER_MAX_VOLUME', 'maxVolume'],
     ['NO_TRADER_MAX_TIME_BELOW_THRESHOLD', 'maxTimeBelowThreshold'],
   ];
 

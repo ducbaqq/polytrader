@@ -63,16 +63,16 @@ const DEFAULT_STRATEGY_CONFIG = {
   positionSize: 50,              // $50 per position
   side: 'NO',                    // Always bet No
 
-  // Entry conditions (updated from alpha analysis)
+  // Entry conditions
   categories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],
   minDurationDays: 1,            // Resolves in 1+ days
   maxDurationDays: 7,            // Resolves in 7 or fewer days
   minNoPrice: 0,                 // No minimum price
-  maxNoPrice: 0.60,              // Max 60¢ (brief opportunity window)
-  minVolume: 1000,               // Min $1,000 volume
-  maxVolume: 50000,
-  minEdge: 0.05,                 // 5% minimum edge
-  maxTimeBelowThreshold: 0.25,   // Skip if price was ≤60¢ for >25% of lifetime
+  maxNoPrice: 0.60,              // Max 60¢ (looking for underpriced No)
+  minVolume: 1000,               // Min $1K volume
+  maxVolume: Infinity,           // No max cap (was $50K)
+  minEdge: 0.02,                 // 2% minimum edge (was 5%)
+  maxTimeBelowThreshold: 0.75,   // Skip if price low >75% of lifetime (was 25%)
 
   // Historical win rates from alpha analysis
   categoryWinRates: {
@@ -123,14 +123,14 @@ Example:
   Finance market, No priced at 55%
   Edge = 98.6% - 55% = 43.6%
 
-  Only enter if Edge >= 5%
+  Only enter if Edge >= 2%
 ```
 
 ---
 
 ## Brief Opportunity Window Rule
 
-Markets are rejected if the No price has been at/below the entry threshold (60¢) for more than 25% of the market's lifetime. This filters out "stale" opportunities that everyone already knows about.
+Markets are rejected if the No price has been at/below the entry threshold (60¢) for more than 75% of the market's lifetime. This filters out "stale" opportunities that everyone already knows about.
 
 Implementation: Fetches price history from CLOB API and calculates `(points below threshold) / (total points)`.
 
@@ -188,13 +188,14 @@ OPEN → CLOSED_TP (take profit)
 # Optional overrides
 NO_TRADER_INITIAL_CAPITAL=2500
 NO_TRADER_POSITION_SIZE=50
-NO_TRADER_MIN_EDGE=0.05
+NO_TRADER_MIN_EDGE=0.02
 NO_TRADER_TAKE_PROFIT=0.90
 NO_TRADER_STOP_LOSS=0.25
 NO_TRADER_SCAN_INTERVAL=60
 NO_TRADER_MAX_NO_PRICE=0.60
 NO_TRADER_MIN_VOLUME=1000
-NO_TRADER_MAX_TIME_BELOW_THRESHOLD=0.25
+NO_TRADER_MAX_VOLUME=<infinity>           # Optional, defaults to no cap
+NO_TRADER_MAX_TIME_BELOW_THRESHOLD=0.75
 ```
 
 ---
