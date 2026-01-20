@@ -24,6 +24,25 @@ import { printProgress, clearProgress } from './dashboard';
 export type ProgressCallback = (current: number, total: number, rejected: number, eligible: number) => void;
 
 /**
+ * Check if a rejection reason is permanent (market won't become eligible).
+ * Permanent rejections should be recorded to avoid re-scanning.
+ * Temporary rejections (price, time, volume, edge) should NOT be recorded
+ * so markets get re-evaluated when conditions change.
+ */
+function isPermanentRejection(reason: string | undefined): boolean {
+  if (!reason) return false;
+
+  // Permanent: structural issues that won't change
+  const permanentPatterns = [
+    'No market data',
+    'No token',
+    'Category',  // Wrong category won't change
+  ];
+
+  return permanentPatterns.some(pattern => reason.includes(pattern));
+}
+
+/**
  * Simple semaphore for concurrency control.
  */
 class Semaphore {
@@ -174,6 +193,7 @@ export class MarketScanner {
     // Get market details
     const marketData = await this.client.buildMarketData(market);
     if (!marketData || !marketData.noToken) {
+      // Permanent rejection - record to avoid re-scanning
       await recordScannedMarket(marketId, false, 'No market data or No token');
       result.rejectedCount++;
       result.rejectionReasons['No market data'] = (result.rejectionReasons['No market data'] || 0) + 1;
@@ -189,7 +209,7 @@ export class MarketScanner {
     }
 
     if (noPrice === 0) {
-      await recordScannedMarket(marketId, false, 'No price available');
+      // Temporary rejection - don't persist, liquidity could appear
       result.rejectedCount++;
       result.rejectionReasons['No price'] = (result.rejectionReasons['No price'] || 0) + 1;
       return;
@@ -205,7 +225,11 @@ export class MarketScanner {
     );
 
     if (!eligibility.eligible) {
-      await recordScannedMarket(marketId, false, eligibility.reason);
+      // Only persist permanent rejections (category mismatch)
+      // Price, time, volume, and edge rejections are temporary - conditions can change
+      if (isPermanentRejection(eligibility.reason)) {
+        await recordScannedMarket(marketId, false, eligibility.reason);
+      }
       result.rejectedCount++;
       const reason = eligibility.reason?.split(' ')[0] || 'Unknown';
       result.rejectionReasons[reason] = (result.rejectionReasons[reason] || 0) + 1;
@@ -219,8 +243,7 @@ export class MarketScanner {
     );
 
     if (timeBelowRatio > this.config.maxTimeBelowThreshold) {
-      const reason = `Price below threshold ${(timeBelowRatio * 100).toFixed(0)}% of time (max ${(this.config.maxTimeBelowThreshold * 100).toFixed(0)}%)`;
-      await recordScannedMarket(marketId, false, reason);
+      // Temporary rejection - historical data could look different as time passes
       result.rejectedCount++;
       result.rejectionReasons['Price'] = (result.rejectionReasons['Price'] || 0) + 1;
       return;

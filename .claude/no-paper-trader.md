@@ -274,3 +274,24 @@ Use `--no-dashboard` for plain text output mode.
 - **Internal**: `apiClient.ts`, `database/index.ts`, `alphaAnalysis/priceHistoryFetcher.ts`
 - **External**: axios, cli-table3, chalk, commander
 - **Database**: PostgreSQL with no_* tables
+
+---
+
+## Market Re-scanning Behavior
+
+The scanner tracks markets in `no_scanned_markets` to avoid redundant processing. However, **only permanent rejections are persisted**:
+
+| Rejection Type | Persisted? | Reason |
+|----------------|------------|--------|
+| No market data / No token | ✅ Yes | Structural issue, won't change |
+| No end date specified | ✅ Yes | Market structure |
+| Category not in target | ✅ Yes | Category won't change |
+| Price above max | ❌ No | Prices change constantly |
+| Duration out of range | ❌ No | Time passes |
+| Volume below min | ❌ No | Volume can increase |
+| Edge below min | ❌ No | Depends on price |
+| No liquidity | ❌ No | Liquidity could appear |
+
+**Why this matters**: Markets rejected for temporary reasons (price, time, volume) will be re-evaluated on each scan cycle. This allows the scanner to catch opportunities when conditions change (e.g., a market's NO price drops from 65¢ to 55¢).
+
+Implementation: `isPermanentRejection()` in `scanner.ts` (lines 26-43).
