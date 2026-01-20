@@ -401,6 +401,7 @@ export {
   getAllPositions,
   getTrades,
   getDailySnapshots,
+  getLifetimeExitStats,
   resetPaperTrading,
 } from './repository';
 export * from './types';

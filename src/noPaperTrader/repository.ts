@@ -450,6 +450,29 @@ export async function getDailySnapshots(): Promise<DailySummary[]> {
 }
 
 /**
+ * Get lifetime exit statistics (all-time, not just session).
+ */
+export async function getLifetimeExitStats(): Promise<{
+  takeProfitCount: number;
+  stopLossCount: number;
+  resolvedCount: number;
+}> {
+  const row = await queryOne<any>(`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'CLOSED_TP') as tp_count,
+      COUNT(*) FILTER (WHERE status = 'CLOSED_SL') as sl_count,
+      COUNT(*) FILTER (WHERE status = 'CLOSED_RESOLVED') as resolved_count
+    FROM no_positions
+  `);
+
+  return {
+    takeProfitCount: parseInt(String(row?.tp_count || 0)),
+    stopLossCount: parseInt(String(row?.sl_count || 0)),
+    resolvedCount: parseInt(String(row?.resolved_count || 0)),
+  };
+}
+
+/**
  * Reset all paper trading data.
  */
 export async function resetPaperTrading(): Promise<void> {

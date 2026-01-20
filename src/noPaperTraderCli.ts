@@ -22,6 +22,7 @@ import {
   initializePortfolio,
   getPortfolio,
   getOpenPositions,
+  getLifetimeExitStats,
 } from './noPaperTrader/index';
 import { initDatabase, closeDatabase } from './database/index';
 import {
@@ -318,15 +319,10 @@ program
       const monitor = new PositionMonitor(client, config);
 
       const startTime = Date.now();
-      let cycleCount = 0;
-      let totalTP = 0;
-      let totalSL = 0;
-      let totalResolved = 0;
 
       const dashState: MonitorDashboardState = {
         status: 'idle',
         runtime: 0,
-        totalCycles: 0,
         takeProfitCount: 0,
         stopLossCount: 0,
         resolvedCount: 0,
@@ -365,6 +361,11 @@ program
         dashState.runtime = Date.now() - startTime;
         dashState.portfolio = await getPortfolio();
         dashState.positions = await updatePositionsWithPrices();
+        // Fetch lifetime stats from database (not session stats)
+        const lifetimeStats = await getLifetimeExitStats();
+        dashState.takeProfitCount = lifetimeStats.takeProfitCount;
+        dashState.stopLossCount = lifetimeStats.stopLossCount;
+        dashState.resolvedCount = lifetimeStats.resolvedCount;
         dashState.lastUpdate = new Date();
         renderMonitorDashboard(dashState);
       };
@@ -376,26 +377,18 @@ program
         console.log('   Press Ctrl+C to stop\n');
       }
 
+      let cycleCount = 0;
       const runMonitor = async () => {
         cycleCount++;
         dashState.status = 'checking';
-        dashState.totalCycles = cycleCount;
         if (useDashboard) await refreshDashboard();
 
         const result = await monitor.monitor();
-
-        totalTP += result.takeProfitTriggered;
-        totalSL += result.stopLossTriggered;
-        totalResolved += result.resolved;
-
-        dashState.takeProfitCount = totalTP;
-        dashState.stopLossCount = totalSL;
-        dashState.resolvedCount = totalResolved;
         dashState.status = 'idle';
 
         const actions = result.takeProfitTriggered + result.stopLossTriggered + result.resolved;
         if (!useDashboard && (actions > 0 || cycleCount % 10 === 1)) {
-          console.log(`[${new Date().toISOString()}] Cycle #${cycleCount}: ${result.positionsChecked} positions, TP:${result.takeProfitTriggered} SL:${result.stopLossTriggered} Resolved:${result.resolved}`);
+          console.log(`[${new Date().toISOString()}] ${result.positionsChecked} positions, TP:${result.takeProfitTriggered} SL:${result.stopLossTriggered} Resolved:${result.resolved}`);
         }
 
         await refreshDashboard();

@@ -311,7 +311,6 @@ export function renderScannerDashboard(state: ScannerDashboardState): void {
 export interface MonitorDashboardState {
   status: 'idle' | 'checking';
   runtime: number;
-  totalCycles: number;
   takeProfitCount: number;
   stopLossCount: number;
   resolvedCount: number;
@@ -335,9 +334,8 @@ export function renderMonitorDashboard(state: MonitorDashboardState): void {
 
   lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
 
-  // Stats
-  lines.push('║  ' + pad('STATS', BOX_WIDTH - 2) + '║');
-  lines.push('║  ' + pad(`├─ Monitor Cycles:    ${state.totalCycles}`, BOX_WIDTH - 2) + '║');
+  // Stats (lifetime, from database)
+  lines.push('║  ' + pad('EXITS (ALL TIME)', BOX_WIDTH - 2) + '║');
   lines.push('║  ' + pad(`├─ Take Profits:      ${state.takeProfitCount}`, BOX_WIDTH - 2) + '║');
   lines.push('║  ' + pad(`├─ Stop Losses:       ${state.stopLossCount}`, BOX_WIDTH - 2) + '║');
   lines.push('║  ' + pad(`└─ Resolved:          ${state.resolvedCount}`, BOX_WIDTH - 2) + '║');
@@ -356,8 +354,11 @@ export function renderMonitorDashboard(state: MonitorDashboardState): void {
     const totalPnl = totalEquity - p.initialCapital;
 
     lines.push('║  ' + pad('PORTFOLIO', BOX_WIDTH - 2) + '║');
-    lines.push('║  ' + pad(`├─ Cash: ${formatCurrency(p.cashBalance)}  Positions: ${formatCurrency(positionValue)}  Equity: ${formatCurrency(totalEquity)}`, BOX_WIDTH - 2) + '║');
-    lines.push('║  ' + pad(`└─ Unrealized: ${formatPnl(totalUnrealized)}  Total P&L: ${formatPnl(totalPnl)}`, BOX_WIDTH - 2) + '║');
+    lines.push('║  ' + pad(`├─ Cash:              ${formatCurrency(p.cashBalance)}`, BOX_WIDTH - 2) + '║');
+    lines.push('║  ' + pad(`├─ Positions:         ${formatCurrency(positionValue)}`, BOX_WIDTH - 2) + '║');
+    lines.push('║  ' + pad(`├─ Equity:            ${formatCurrency(totalEquity)}`, BOX_WIDTH - 2) + '║');
+    lines.push('║  ' + pad(`├─ Unrealized P&L:    ${formatPnl(totalUnrealized)}`, BOX_WIDTH - 2) + '║');
+    lines.push('║  ' + pad(`└─ Total P&L:         ${formatPnl(totalPnl)}`, BOX_WIDTH - 2) + '║');
   }
 
   lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
