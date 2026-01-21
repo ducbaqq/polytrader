@@ -69,7 +69,7 @@ program
   .command('scan')
   .description('Run scanner continuously (direction-agnostic, shared by monitors)')
   .option('--interval <seconds>', 'Scan interval in seconds (default: 60)', '60')
-  .option('--concurrency <num>', 'Number of markets to process in parallel (default: 20)', '20')
+  .option('--concurrency <num>', 'Number of markets to process in parallel (default: 10)', '10')
   .option('--no-dashboard', 'Disable live dashboard')
   .action(async (options) => {
     try {
@@ -437,7 +437,7 @@ program
 program
   .command('scan-once')
   .description('Run a single market scan (direction-agnostic)')
-  .option('--concurrency <num>', 'Number of markets to process in parallel (default: 20)', '20')
+  .option('--concurrency <num>', 'Number of markets to process in parallel (default: 10)', '10')
   .action(async (options) => {
     try {
       initDatabase();

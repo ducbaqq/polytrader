@@ -9,7 +9,7 @@
 import { PolymarketClient } from '../apiClient';
 import { GammaMarket } from '../types';
 import { StrategyConfig, detectCategoryFromQuestion } from './config';
-import { ScannedMarket, ScanResult, EligibleMarket } from './types';
+import { ScannedMarket, ScanResult } from './types';
 import {
   wasMarketScanned,
   recordScannedMarket,
@@ -17,25 +17,6 @@ import {
 import { printProgress, clearProgress } from './dashboard';
 
 export type ProgressCallback = (current: number, total: number, rejected: number, eligible: number) => void;
-
-/**
- * Check if a rejection reason is permanent (market won't become eligible).
- * Permanent rejections should be recorded to avoid re-scanning.
- * Temporary rejections (price, time, volume, edge) should NOT be recorded
- * so markets get re-evaluated when conditions change.
- */
-function isPermanentRejection(reason: string | undefined): boolean {
-  if (!reason) return false;
-
-  // Permanent: structural issues that won't change
-  const permanentPatterns = [
-    'No market data',
-    'No token',
-    'Category',  // Wrong category won't change
-  ];
-
-  return permanentPatterns.some(pattern => reason.includes(pattern));
-}
 
 /**
  * Simple semaphore for concurrency control.
@@ -90,7 +71,6 @@ export class MarketScanner {
       timestamp: new Date(),
       marketsScanned: 0,
       scannedMarkets: [],
-      eligibleMarkets: [], // Legacy - kept for compatibility
       rejectedCount: 0,
       rejectionReasons: {},
     };

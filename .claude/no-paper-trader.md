@@ -270,7 +270,26 @@ NO_TRADER_STOP_LOSS=0.25
 NO_TRADER_SCAN_INTERVAL=60
 NO_TRADER_MAX_PRICE=0.60
 NO_TRADER_MIN_VOLUME=1000
-NO_TRADER_SCAN_CONCURRENCY=20
+NO_TRADER_SCAN_CONCURRENCY=10
+```
+
+---
+
+## Rate Limiting
+
+To prevent 429 errors from Polymarket API:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Scan concurrency | 10 | Markets processed in parallel per scan |
+| API rate limit | 3/sec | Requests per second (in apiClient.ts) |
+| Monitor scan interval | 120s | How often monitor rescans for new markets |
+| Scanner interval | 60s | How often standalone scanner runs |
+
+Override via CLI:
+```bash
+npm run no-trader -- monitor --strategy=no-buyer --scan-interval 180
+npm run no-trader -- scan --concurrency 5
 ```
 
 ---

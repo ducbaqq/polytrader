@@ -138,21 +138,6 @@ export interface PerformanceReport {
   openPositions: Position[];
 }
 
-export interface EligibleMarket {
-  marketId: string;
-  tokenId: string;
-  tokenSide: TokenSide;
-  question: string;
-  category: string;
-  price: number;         // Entry price for the token side we're buying
-  volume: number;
-  createdAt: Date;
-  endDate: Date;
-  edge: number;
-  ageHours: number;
-  daysToResolution: number;
-}
-
 /**
  * Direction-agnostic scanned market with both YES and NO prices.
  * Monitors decide which side to trade based on their strategy.
@@ -175,8 +160,7 @@ export interface ScannedMarket {
 export interface ScanResult {
   timestamp: Date;
   marketsScanned: number;
-  scannedMarkets: ScannedMarket[];  // Direction-agnostic markets for monitors
-  eligibleMarkets: EligibleMarket[]; // Legacy - kept for compatibility
+  scannedMarkets: ScannedMarket[];
   rejectedCount: number;
   rejectionReasons: Record<string, number>;
 }
