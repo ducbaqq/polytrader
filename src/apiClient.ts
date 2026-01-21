@@ -91,7 +91,7 @@ export class PolymarketClient {
 
   constructor(config: PolymarketClientConfig = {}) {
     this.config = config;
-    this.rateLimiter = new RateLimiter(config.callsPerSecond || 5.0);
+    this.rateLimiter = new RateLimiter(config.callsPerSecond || 3.0);
 
     this.axiosInstance = axios.create({
       timeout: 30000,

@@ -169,7 +169,7 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   monitorIntervalSeconds: 30, // Monitor positions every 30 seconds
 
   // Performance
-  scanConcurrency: 20,        // Process 20 markets in parallel
+  scanConcurrency: 10,        // Process 10 markets in parallel (conservative to avoid rate limits)
 };
 
 /**
