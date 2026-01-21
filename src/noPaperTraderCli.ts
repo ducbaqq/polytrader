@@ -3,16 +3,16 @@
  * CLI entry point for the No-betting Paper Trading System.
  *
  * Commands:
- *   no-trader start   - Start the paper trader (runs continuously)
- *   no-trader status  - Check current portfolio status
- *   no-trader report  - Generate full performance report
- *   no-trader reset   - Reset all paper trading data
+ *   no-trader scan      - Run scanner (direction-agnostic, shared by all strategies)
+ *   no-trader monitor   - Run monitor for a specific strategy (--strategy required)
+ *   no-trader status    - Check current portfolio status for a strategy
+ *   no-trader report    - Generate full performance report for a strategy
+ *   no-trader reset     - Reset all paper trading data
  */
 
 import 'dotenv/config';
 import { Command } from 'commander';
 import {
-  NoPaperTrader,
   loadConfig,
   printStatus,
   generateReport,
@@ -23,7 +23,12 @@ import {
   getPortfolio,
   getOpenPositions,
   getLifetimeExitStats,
+  getStrategy,
+  getAvailableStrategies,
+  isValidStrategy,
+  STRATEGY_REGISTRY,
 } from './noPaperTrader/index';
+import { StrategyId } from './noPaperTrader/types';
 import { initDatabase, closeDatabase } from './database/index';
 import {
   ScannerDashboardState,
@@ -40,144 +45,30 @@ const program = new Command();
 
 program
   .name('no-trader')
-  .description('No-betting paper trading system for Polymarket')
-  .version('1.0.0');
+  .description('Multi-strategy paper trading system for Polymarket')
+  .version('2.0.0');
 
 /**
- * Start command - runs the paper trader continuously.
+ * Validate and return a strategy ID.
+ * Exits with error if strategy is invalid.
  */
-program
-  .command('start')
-  .description('Start the paper trader (runs scanner and monitor continuously)')
-  .option('--capital <amount>', 'Initial capital (default: $2500)', '2500')
-  .option('--size <amount>', 'Position size per trade (default: $50)', '50')
-  .option('--min-edge <percent>', 'Minimum edge required (default: 5%)', '5')
-  .option('--take-profit <percent>', 'Take profit threshold (default: 90%)', '90')
-  .option('--stop-loss <percent>', 'Stop loss threshold (default: 25%)', '25')
-  .option('--scan-interval <seconds>', 'Scan interval in seconds (default: 60)', '60')
-  .option('--monitor-interval <seconds>', 'Monitor interval in seconds (default: 30)', '30')
-  .option('--no-dashboard', 'Disable live dashboard (use plain text output)')
-  .action(async (options) => {
-    try {
-      const config = loadConfig();
-
-      // Override config from CLI options
-      if (options.capital) config.initialCapital = parseFloat(options.capital);
-      if (options.size) config.positionSize = parseFloat(options.size);
-      if (options.minEdge) config.minEdge = parseFloat(options.minEdge) / 100;
-      if (options.takeProfit) config.takeProfitThreshold = parseFloat(options.takeProfit) / 100;
-      if (options.stopLoss) config.stopLossThreshold = parseFloat(options.stopLoss) / 100;
-      if (options.scanInterval) config.scanIntervalSeconds = parseInt(options.scanInterval);
-      if (options.monitorInterval) config.monitorIntervalSeconds = parseInt(options.monitorInterval);
-
-      const useDashboard = options.dashboard !== false;
-      const trader = new NoPaperTrader(config, useDashboard);
-
-      // Handle graceful shutdown
-      const shutdown = async (signal: string) => {
-        if (!useDashboard) console.log(`\nReceived ${signal}, shutting down...`);
-        await trader.stop();
-        await closeDatabase();
-        process.exit(0);
-      };
-      process.on('SIGINT', () => shutdown('SIGINT'));
-      process.on('SIGTERM', () => shutdown('SIGTERM'));
-
-      await trader.start();
-
-      // Keep the process running
-      await new Promise(() => {});
-    } catch (error) {
-      console.error('Error starting paper trader:', error);
-      process.exit(1);
-    }
-  });
+function validateStrategy(name: string): StrategyId {
+  if (!isValidStrategy(name)) {
+    console.error(`Error: Strategy '${name}' not found.`);
+    console.error(`Available strategies: ${getAvailableStrategies().join(', ')}`);
+    process.exit(1);
+  }
+  return name as StrategyId;
+}
 
 /**
- * Status command - shows current portfolio status.
- */
-program
-  .command('status')
-  .description('Check current portfolio status')
-  .action(async () => {
-    try {
-      initDatabase();
-      await initializeTables();
-      await printStatus();
-      await closeDatabase();
-    } catch (error) {
-      console.error('Error getting status:', error);
-      process.exit(1);
-    }
-  });
-
-/**
- * Report command - generates full performance report.
- */
-program
-  .command('report')
-  .description('Generate full performance report')
-  .action(async () => {
-    try {
-      initDatabase();
-      await initializeTables();
-
-      const report = await generateReport();
-      if (report) {
-        printReport(report);
-      } else {
-        console.log('No data to report. Start the paper trader first.');
-      }
-
-      await closeDatabase();
-    } catch (error) {
-      console.error('Error generating report:', error);
-      process.exit(1);
-    }
-  });
-
-/**
- * Reset command - clears all paper trading data.
- */
-program
-  .command('reset')
-  .description('Reset all paper trading data (WARNING: This cannot be undone)')
-  .option('--force', 'Skip confirmation prompt')
-  .action(async (options) => {
-    try {
-      if (!options.force) {
-        console.log('WARNING: This will delete all paper trading data including:');
-        console.log('  - All positions (open and closed)');
-        console.log('  - All trades');
-        console.log('  - Portfolio history');
-        console.log('  - Daily snapshots');
-        console.log('  - Scanned markets log');
-        console.log('\nRun with --force to confirm.');
-        process.exit(0);
-      }
-
-      initDatabase();
-      await initializeTables();
-      await resetPaperTrading();
-
-      console.log('Paper trading data reset successfully.');
-
-      await closeDatabase();
-    } catch (error) {
-      console.error('Error resetting data:', error);
-      process.exit(1);
-    }
-  });
-
-/**
- * Scan command - runs scanner continuously as independent process.
+ * Scan command - runs scanner continuously (direction-agnostic).
+ * Scanner is shared across all strategies.
  */
 program
   .command('scan')
-  .description('Run scanner continuously (independent process, shares DB with monitor)')
+  .description('Run scanner continuously (direction-agnostic, shared by monitors)')
   .option('--interval <seconds>', 'Scan interval in seconds (default: 60)', '60')
-  .option('--capital <amount>', 'Initial capital (default: $2500)', '2500')
-  .option('--size <amount>', 'Position size per trade (default: $50)', '50')
   .option('--concurrency <num>', 'Number of markets to process in parallel (default: 20)', '20')
   .option('--no-dashboard', 'Disable live dashboard')
   .action(async (options) => {
@@ -187,21 +78,15 @@ program
 
       const config = loadConfig();
       if (options.interval) config.scanIntervalSeconds = parseInt(options.interval);
-      if (options.capital) config.initialCapital = parseFloat(options.capital);
-      if (options.size) config.positionSize = parseFloat(options.size);
       if (options.concurrency) config.scanConcurrency = parseInt(options.concurrency);
 
       const useDashboard = options.dashboard !== false;
-
-      await initializePortfolio(config.initialCapital);
 
       const client = new PolymarketClient();
       const scanner = new MarketScanner(client, config, config.scanConcurrency);
 
       const startTime = Date.now();
       let scanCount = 0;
-      let totalOpened = 0;
-      const recentOpened: Array<{ question: string; price: number; edge: number }> = [];
 
       // Dashboard state
       const dashState: ScannerDashboardState = {
@@ -217,13 +102,8 @@ program
 
       const refreshDashboard = async () => {
         if (!useDashboard) return;
-        const portfolio = await getPortfolio();
-        const positions = await getOpenPositions();
         dashState.runtime = Date.now() - startTime;
-        dashState.cashBalance = portfolio?.cashBalance || 0;
-        dashState.openPositionCount = positions.length;
         dashState.lastUpdate = new Date();
-        dashState.recentOpened = recentOpened.slice(-5);
         renderScannerDashboard(dashState);
       };
 
@@ -249,19 +129,11 @@ program
 
         const result = await scanner.scan(onProgress, useDashboard);
 
-        totalOpened += result.positionsOpened;
-        dashState.positionsOpened = totalOpened;
         dashState.status = 'idle';
         dashState.scanProgress = undefined;
 
-        // Track recently opened
-        for (const m of result.eligibleMarkets.slice(0, result.positionsOpened)) {
-          recentOpened.push({ question: m.question, price: m.price, edge: m.edge });
-          if (recentOpened.length > 10) recentOpened.shift();
-        }
-
         if (!useDashboard) {
-          console.log(`   Scanned: ${result.marketsScanned}, Eligible: ${result.eligibleMarkets.length}, Opened: ${result.positionsOpened}`);
+          console.log(`   Scanned: ${result.marketsScanned}, Found: ${result.scannedMarkets.length}`);
         }
 
         await refreshDashboard();
@@ -294,29 +166,41 @@ program
   });
 
 /**
- * Monitor command - runs monitor continuously as independent process.
+ * Monitor command - runs monitor continuously for a specific strategy.
  */
 program
   .command('monitor')
-  .description('Run monitor continuously (independent process, shares DB with scanner)')
+  .description('Run monitor continuously for a strategy (opens positions and manages exits)')
+  .requiredOption('--strategy <name>', 'Strategy to use (yes-buyer, no-buyer)')
   .option('--interval <seconds>', 'Monitor interval in seconds (default: 30)', '30')
+  .option('--capital <amount>', 'Initial capital (default: $2500)', '2500')
+  .option('--size <amount>', 'Position size per trade (default: $50)', '50')
   .option('--take-profit <percent>', 'Take profit threshold (default: 90%)', '90')
   .option('--stop-loss <percent>', 'Stop loss threshold (default: 25%)', '25')
   .option('--no-dashboard', 'Disable live dashboard')
   .action(async (options) => {
     try {
+      const strategyId = validateStrategy(options.strategy);
+      const strategy = getStrategy(strategyId);
+
       initDatabase();
       await initializeTables();
 
       const config = loadConfig();
       if (options.interval) config.monitorIntervalSeconds = parseInt(options.interval);
+      if (options.capital) config.initialCapital = parseFloat(options.capital);
+      if (options.size) config.positionSize = parseFloat(options.size);
       if (options.takeProfit) config.takeProfitThreshold = parseFloat(options.takeProfit) / 100;
       if (options.stopLoss) config.stopLossThreshold = parseFloat(options.stopLoss) / 100;
 
       const useDashboard = options.dashboard !== false;
 
+      // Initialize portfolio for this strategy
+      await initializePortfolio(config.initialCapital, strategyId);
+
       const client = new PolymarketClient();
-      const monitor = new PositionMonitor(client, config);
+      const scanner = new MarketScanner(client, config, config.scanConcurrency);
+      const monitor = new PositionMonitor(client, config, strategyId);
 
       const startTime = Date.now();
 
@@ -332,7 +216,7 @@ program
       };
 
       const updatePositionsWithPrices = async (): Promise<PositionWithPrice[]> => {
-        const positions = await getOpenPositions();
+        const positions = await getOpenPositions(strategyId);
         const result: PositionWithPrice[] = [];
 
         for (const pos of positions) {
@@ -359,19 +243,20 @@ program
       const refreshDashboard = async () => {
         if (!useDashboard) return;
         dashState.runtime = Date.now() - startTime;
-        dashState.portfolio = await getPortfolio();
+        dashState.portfolio = await getPortfolio(strategyId);
         dashState.positions = await updatePositionsWithPrices();
         // Fetch lifetime stats from database (not session stats)
-        const lifetimeStats = await getLifetimeExitStats();
+        const lifetimeStats = await getLifetimeExitStats(strategyId);
         dashState.takeProfitCount = lifetimeStats.takeProfitCount;
         dashState.stopLossCount = lifetimeStats.stopLossCount;
         dashState.resolvedCount = lifetimeStats.resolvedCount;
         dashState.lastUpdate = new Date();
-        renderMonitorDashboard(dashState);
+        renderMonitorDashboard(dashState, strategy.name);
       };
 
       if (!useDashboard) {
-        console.log(`👁️  Monitor started (interval: ${config.monitorIntervalSeconds}s)`);
+        console.log(`👁️  Monitor started for ${strategy.name} (interval: ${config.monitorIntervalSeconds}s)`);
+        console.log(`   Side: ${strategy.side}`);
         console.log(`   Take profit: ${(config.takeProfitThreshold * 100).toFixed(0)}%`);
         console.log(`   Stop loss: ${(config.stopLossThreshold * 100).toFixed(0)}%`);
         console.log('   Press Ctrl+C to stop\n');
@@ -383,12 +268,16 @@ program
         dashState.status = 'checking';
         if (useDashboard) await refreshDashboard();
 
-        const result = await monitor.monitor();
+        // First scan for new markets
+        const scanResult = await scanner.scan(undefined, true);
+
+        // Then monitor - pass scanned markets for entry evaluation
+        const result = await monitor.monitor(scanResult.scannedMarkets);
         dashState.status = 'idle';
 
-        const actions = result.takeProfitTriggered + result.stopLossTriggered + result.resolved;
+        const actions = result.positionsOpened + result.takeProfitTriggered + result.stopLossTriggered + result.resolved;
         if (!useDashboard && (actions > 0 || cycleCount % 10 === 1)) {
-          console.log(`[${new Date().toISOString()}] ${result.positionsChecked} positions, TP:${result.takeProfitTriggered} SL:${result.stopLossTriggered} Resolved:${result.resolved}`);
+          console.log(`[${new Date().toISOString()}] [${strategy.name}] ${result.positionsChecked} positions, Opened:${result.positionsOpened} TP:${result.takeProfitTriggered} SL:${result.stopLossTriggered} Resolved:${result.resolved}`);
         }
 
         await refreshDashboard();
@@ -398,7 +287,7 @@ program
       const dashIntervalId = useDashboard ? setInterval(refreshDashboard, 5000) : null;
 
       const shutdown = async () => {
-        if (!useDashboard) console.log('\nShutting down monitor...');
+        if (!useDashboard) console.log(`\nShutting down ${strategy.name} monitor...`);
         running = false;
         if (dashIntervalId) clearInterval(dashIntervalId);
         await closeDatabase();
@@ -421,11 +310,113 @@ program
   });
 
 /**
+ * Status command - shows current portfolio status for a strategy.
+ */
+program
+  .command('status')
+  .description('Check current portfolio status for a strategy')
+  .requiredOption('--strategy <name>', 'Strategy to check (yes-buyer, no-buyer)')
+  .action(async (options) => {
+    try {
+      const strategyId = validateStrategy(options.strategy);
+
+      initDatabase();
+      await initializeTables();
+      await printStatus(strategyId);
+      await closeDatabase();
+    } catch (error) {
+      console.error('Error getting status:', error);
+      process.exit(1);
+    }
+  });
+
+/**
+ * Report command - generates full performance report for a strategy.
+ */
+program
+  .command('report')
+  .description('Generate full performance report for a strategy')
+  .requiredOption('--strategy <name>', 'Strategy to report on (yes-buyer, no-buyer)')
+  .action(async (options) => {
+    try {
+      const strategyId = validateStrategy(options.strategy);
+
+      initDatabase();
+      await initializeTables();
+
+      const report = await generateReport(strategyId);
+      if (report) {
+        printReport(report, strategyId);
+      } else {
+        console.log('No data to report. Start the paper trader first.');
+      }
+
+      await closeDatabase();
+    } catch (error) {
+      console.error('Error generating report:', error);
+      process.exit(1);
+    }
+  });
+
+/**
+ * Reset command - clears all paper trading data.
+ */
+program
+  .command('reset')
+  .description('Reset all paper trading data (WARNING: This cannot be undone)')
+  .option('--force', 'Skip confirmation prompt')
+  .action(async (options) => {
+    try {
+      if (!options.force) {
+        console.log('WARNING: This will delete all paper trading data including:');
+        console.log('  - All positions (open and closed) for ALL strategies');
+        console.log('  - All trades');
+        console.log('  - Portfolio history');
+        console.log('  - Daily snapshots');
+        console.log('  - Scanned markets log');
+        console.log('\nRun with --force to confirm.');
+        process.exit(0);
+      }
+
+      initDatabase();
+      await initializeTables();
+      await resetPaperTrading();
+
+      console.log('Paper trading data reset successfully.');
+
+      await closeDatabase();
+    } catch (error) {
+      console.error('Error resetting data:', error);
+      process.exit(1);
+    }
+  });
+
+/**
+ * List strategies command - shows available strategies.
+ */
+program
+  .command('strategies')
+  .description('List available trading strategies')
+  .action(() => {
+    console.log('\nAvailable Trading Strategies:\n');
+    for (const [id, strategy] of Object.entries(STRATEGY_REGISTRY)) {
+      console.log(`  ${id}`);
+      console.log(`    Name: ${strategy.name}`);
+      console.log(`    Side: ${strategy.side}`);
+      console.log(`    Description: ${strategy.description}`);
+      console.log(`    Price Range: ${(strategy.minPrice * 100).toFixed(0)}% - ${(strategy.maxPrice * 100).toFixed(0)}%`);
+      console.log(`    Min Edge: ${(strategy.minEdge * 100).toFixed(0)}%`);
+      console.log(`    Categories: ${Object.keys(strategy.categoryWinRates).join(', ')}`);
+      console.log('');
+    }
+  });
+
+/**
  * Scan-once command - runs a single scan without starting the full trader.
  */
 program
   .command('scan-once')
-  .description('Run a single market scan without starting the full trader')
+  .description('Run a single market scan (direction-agnostic)')
   .option('--concurrency <num>', 'Number of markets to process in parallel (default: 20)', '20')
   .action(async (options) => {
     try {
@@ -435,11 +426,6 @@ program
       const config = loadConfig();
       if (options.concurrency) config.scanConcurrency = parseInt(options.concurrency);
 
-      const { PolymarketClient } = await import('./apiClient');
-      const { MarketScanner } = await import('./noPaperTrader/scanner');
-
-      await initializePortfolio(config.initialCapital);
-
       const client = new PolymarketClient();
       const scanner = new MarketScanner(client, config, config.scanConcurrency);
 
@@ -448,15 +434,18 @@ program
 
       console.log('\nScan Results:');
       console.log(`  Markets scanned: ${result.marketsScanned}`);
-      console.log(`  Eligible markets: ${result.eligibleMarkets.length}`);
-      console.log(`  Positions opened: ${result.positionsOpened}`);
+      console.log(`  Markets found: ${result.scannedMarkets.length}`);
       console.log(`  Rejected: ${result.rejectedCount}`);
 
-      if (result.eligibleMarkets.length > 0) {
-        console.log('\nEligible Markets:');
-        for (const market of result.eligibleMarkets) {
+      if (result.scannedMarkets.length > 0) {
+        console.log('\nScanned Markets (with both YES and NO prices):');
+        for (const market of result.scannedMarkets.slice(0, 10)) {
           console.log(`  - ${market.question.substring(0, 50)}...`);
-          console.log(`    Category: ${market.category}, Side: ${market.tokenSide}, Price: ${(market.price * 100).toFixed(1)}%, Edge: ${(market.edge * 100).toFixed(1)}%`);
+          console.log(`    Category: ${market.category}`);
+          console.log(`    YES: ${(market.yesPrice * 100).toFixed(1)}%, NO: ${(market.noPrice * 100).toFixed(1)}%`);
+        }
+        if (result.scannedMarkets.length > 10) {
+          console.log(`  ... and ${result.scannedMarkets.length - 10} more`);
         }
       }
 
@@ -475,27 +464,38 @@ program
   });
 
 /**
- * Monitor-once command - runs a single monitor cycle.
+ * Monitor-once command - runs a single monitor cycle for a strategy.
  */
 program
   .command('monitor-once')
-  .description('Run a single position monitor cycle')
-  .action(async () => {
+  .description('Run a single position monitor cycle for a strategy')
+  .requiredOption('--strategy <name>', 'Strategy to monitor (yes-buyer, no-buyer)')
+  .action(async (options) => {
     try {
+      const strategyId = validateStrategy(options.strategy);
+      const strategy = getStrategy(strategyId);
+
       initDatabase();
       await initializeTables();
 
       const config = loadConfig();
-      const { PolymarketClient } = await import('./apiClient');
-      const { PositionMonitor } = await import('./noPaperTrader/monitor');
-
       const client = new PolymarketClient();
-      const monitor = new PositionMonitor(client, config);
+      const scanner = new MarketScanner(client, config, config.scanConcurrency);
+      const monitor = new PositionMonitor(client, config, strategyId);
 
-      console.log('Running single monitor cycle...');
-      const result = await monitor.monitor();
+      // Initialize portfolio for this strategy if needed
+      await initializePortfolio(config.initialCapital, strategyId);
+
+      console.log(`Running single monitor cycle for ${strategy.name}...`);
+
+      // First scan for new markets
+      const scanResult = await scanner.scan(undefined, true);
+
+      // Then monitor
+      const result = await monitor.monitor(scanResult.scannedMarkets);
 
       console.log('\nMonitor Results:');
+      console.log(`  Positions opened: ${result.positionsOpened}`);
       console.log(`  Positions checked: ${result.positionsChecked}`);
       console.log(`  Take profit triggered: ${result.takeProfitTriggered}`);
       console.log(`  Stop loss triggered: ${result.stopLossTriggered}`);

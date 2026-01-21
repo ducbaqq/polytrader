@@ -9,7 +9,7 @@
 
 import { PolymarketClient } from '../apiClient';
 import { initDatabase } from '../database/index';
-import { StrategyConfig, loadConfig } from './config';
+import { StrategyConfig, loadConfig, getStrategy } from './config';
 import { MarketScanner } from './scanner';
 import { PositionMonitor } from './monitor';
 import {
@@ -20,6 +20,7 @@ import {
   recordDailySnapshot,
 } from './repository';
 import { DashboardState, PositionWithPrice, renderDashboard } from './dashboard';
+import { StrategyId } from './types';
 
 export interface PaperTraderStats {
   isRunning: boolean;
@@ -34,12 +35,14 @@ export interface PaperTraderStats {
 
 /**
  * Main paper trading orchestrator.
+ * Now requires a strategy ID to operate on a specific strategy.
  */
 export class NoPaperTrader {
   private config: StrategyConfig;
   private client: PolymarketClient;
   private scanner: MarketScanner;
   private monitor: PositionMonitor;
+  private strategyId: StrategyId;
   private stats: PaperTraderStats;
   private running: boolean = false;
   private scanIntervalId: NodeJS.Timeout | null = null;
@@ -50,11 +53,12 @@ export class NoPaperTrader {
   private dashboardState: DashboardState;
   private useDashboard: boolean = true;
 
-  constructor(config?: StrategyConfig, useDashboard: boolean = true) {
+  constructor(strategyId: StrategyId = 'no-buyer', config?: StrategyConfig, useDashboard: boolean = true) {
+    this.strategyId = strategyId;
     this.config = config || loadConfig();
     this.client = new PolymarketClient();
     this.scanner = new MarketScanner(this.client, this.config, this.config.scanConcurrency);
-    this.monitor = new PositionMonitor(this.client, this.config);
+    this.monitor = new PositionMonitor(this.client, this.config, strategyId);
     this.useDashboard = useDashboard;
     this.stats = {
       isRunning: false,
@@ -82,8 +86,11 @@ export class NoPaperTrader {
    * Initialize the paper trader.
    */
   async initialize(): Promise<void> {
+    const strategy = getStrategy(this.strategyId);
     if (!this.useDashboard) {
-      console.log('Initializing No Paper Trader...');
+      console.log(`Initializing Paper Trader for ${strategy.name}...`);
+      console.log(`  Strategy: ${this.strategyId}`);
+      console.log(`  Side: ${strategy.side}`);
       console.log(`  Categories: ${this.config.categories.join(', ')}`);
       console.log(`  Position Size: $${this.config.positionSize}`);
       console.log(`  Min Edge: ${(this.config.minEdge * 100).toFixed(1)}%`);
@@ -96,9 +103,9 @@ export class NoPaperTrader {
     // Initialize database
     initDatabase();
     await initializeTables();
-    await initializePortfolio(this.config.initialCapital);
+    await initializePortfolio(this.config.initialCapital, this.strategyId);
 
-    const portfolio = await getPortfolio();
+    const portfolio = await getPortfolio(this.strategyId);
     if (portfolio) {
       this.dashboardState.portfolio = portfolio;
       if (!this.useDashboard) {
@@ -193,7 +200,7 @@ export class NoPaperTrader {
   }
 
   /**
-   * Run a single scan cycle.
+   * Run a single scan cycle and monitor for entries.
    */
   private async runScan(): Promise<void> {
     if (!this.running) return;
@@ -216,8 +223,11 @@ export class NoPaperTrader {
 
       const result = await this.scanner.scan(onProgress, this.useDashboard);
 
+      // Pass scanned markets to monitor for entry evaluation
+      const monitorResult = await this.monitor.monitor(result.scannedMarkets);
+
       this.stats.totalScans++;
-      this.stats.positionsOpened += result.positionsOpened;
+      this.stats.positionsOpened += monitorResult.positionsOpened;
       this.stats.lastScanTime = new Date();
 
       // Update dashboard state
@@ -229,8 +239,8 @@ export class NoPaperTrader {
       // Refresh positions after scan
       await this.updatePositionsWithPrices();
 
-      if (!this.useDashboard && (result.eligibleMarkets.length > 0 || result.positionsOpened > 0)) {
-        console.log(`Scan result: ${result.eligibleMarkets.length} eligible, ${result.positionsOpened} opened`);
+      if (!this.useDashboard && (result.scannedMarkets.length > 0 || monitorResult.positionsOpened > 0)) {
+        console.log(`Scan result: ${result.scannedMarkets.length} markets found, ${monitorResult.positionsOpened} opened`);
       }
     } catch (error) {
       if (!this.useDashboard) console.error('Error during scan:', error);
@@ -239,7 +249,7 @@ export class NoPaperTrader {
   }
 
   /**
-   * Run a single monitor cycle.
+   * Run a single monitor cycle (just check positions, no new entries).
    */
   private async runMonitor(): Promise<void> {
     if (!this.running) return;
@@ -247,6 +257,7 @@ export class NoPaperTrader {
     try {
       this.dashboardState.status = 'monitoring';
 
+      // Monitor without passing markets - just check existing positions
       const result = await this.monitor.monitor();
 
       this.stats.totalMonitorCycles++;
@@ -282,7 +293,7 @@ export class NoPaperTrader {
    */
   private async recordSnapshot(): Promise<void> {
     try {
-      const portfolio = await getPortfolio();
+      const portfolio = await getPortfolio(this.strategyId);
       if (portfolio) {
         await recordDailySnapshot(
           this.currentDate,
@@ -291,7 +302,8 @@ export class NoPaperTrader {
           0, // Would need proper tracking
           0,
           0,
-          0
+          0,
+          this.strategyId
         );
       }
     } catch (error) {
@@ -325,8 +337,8 @@ export class NoPaperTrader {
    */
   private async updatePositionsWithPrices(): Promise<void> {
     try {
-      const positions = await getOpenPositions();
-      const portfolio = await getPortfolio();
+      const positions = await getOpenPositions(this.strategyId);
+      const portfolio = await getPortfolio(this.strategyId);
 
       this.dashboardState.portfolio = portfolio;
 
@@ -387,7 +399,15 @@ export class NoPaperTrader {
 }
 
 // Re-export everything
-export { StrategyConfig, loadConfig, DEFAULT_STRATEGY_CONFIG } from './config';
+export {
+  StrategyConfig,
+  loadConfig,
+  DEFAULT_STRATEGY_CONFIG,
+  STRATEGY_REGISTRY,
+  getStrategy,
+  getAvailableStrategies,
+  isValidStrategy,
+} from './config';
 export { MarketScanner, ProgressCallback } from './scanner';
 export { PositionMonitor } from './monitor';
 export { generateReport, printReport, printStatus } from './report';
@@ -403,5 +423,6 @@ export {
   getDailySnapshots,
   getLifetimeExitStats,
   resetPaperTrading,
+  hasPositionForMarket,
 } from './repository';
 export * from './types';

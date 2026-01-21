@@ -1,44 +1,74 @@
 /**
- * Position monitor for the No-betting paper trading strategy.
- * Watches open positions for:
- * - Take profit triggers (No reaches target)
- * - Stop loss triggers (No drops below threshold)
- * - Market resolution
+ * Position monitor for the paper trading strategy.
+ * Now strategy-aware - each monitor instance handles one strategy.
+ *
+ * Responsibilities:
+ * - Opening new positions based on strategy criteria
+ * - Watching open positions for TP/SL triggers
+ * - Handling market resolutions
  */
 
 import { randomUUID } from 'crypto';
 import axios from 'axios';
 import { PolymarketClient } from '../apiClient';
-import { StrategyConfig } from './config';
-import { Position, Trade, MonitorResult, PositionStatus, TokenSide } from './types';
+import { StrategyConfig, getStrategy } from './config';
+import { Position, Trade, MonitorResult, PositionStatus, ScannedMarket, StrategyId, StrategyDefinition } from './types';
 import {
+  getPortfolio,
   getOpenPositions,
+  hasPositionForMarket,
   updatePosition,
+  insertPosition,
   insertTrade,
+  updatePortfolioOnOpen,
   updatePortfolioOnClose,
+  recordScannedMarket,
 } from './repository';
 
 const GAMMA_API_URL = 'https://gamma-api.polymarket.com';
 
 /**
- * Position monitor for open positions.
+ * Strategy-aware position monitor.
+ * Each instance handles one strategy (yes-buyer or no-buyer).
  */
 export class PositionMonitor {
   private client: PolymarketClient;
   private config: StrategyConfig;
+  private strategyId: StrategyId;
+  private strategy: StrategyDefinition;
 
-  constructor(client: PolymarketClient, config: StrategyConfig) {
+  constructor(client: PolymarketClient, config: StrategyConfig, strategyId: StrategyId) {
     this.client = client;
     this.config = config;
+    this.strategyId = strategyId;
+    this.strategy = getStrategy(strategyId);
+  }
+
+  /**
+   * Get the strategy ID this monitor is using.
+   */
+  getStrategyId(): StrategyId {
+    return this.strategyId;
+  }
+
+  /**
+   * Get the strategy definition.
+   */
+  getStrategy(): StrategyDefinition {
+    return this.strategy;
   }
 
   /**
    * Monitor all open positions and handle exits.
+   * Optionally also check scanned markets for entry opportunities.
+   *
+   * @param scannedMarkets - Optional markets from scanner to evaluate for entry
    */
-  async monitor(): Promise<MonitorResult> {
+  async monitor(scannedMarkets?: ScannedMarket[]): Promise<MonitorResult> {
     const result: MonitorResult = {
       timestamp: new Date(),
       positionsChecked: 0,
+      positionsOpened: 0,
       takeProfitTriggered: 0,
       stopLossTriggered: 0,
       resolved: 0,
@@ -46,31 +76,162 @@ export class PositionMonitor {
     };
 
     try {
-      const positions = await getOpenPositions();
-      result.positionsChecked = positions.length;
-
-      if (positions.length === 0) {
-        return result;
+      // 1. Check for new entry opportunities if markets provided
+      if (scannedMarkets && scannedMarkets.length > 0) {
+        for (const market of scannedMarkets) {
+          const opened = await this.checkForEntry(market);
+          if (opened) {
+            result.positionsOpened++;
+          }
+        }
       }
 
-      console.log(`Monitoring ${positions.length} open positions...`);
+      // 2. Monitor existing positions for this strategy
+      const positions = await getOpenPositions(this.strategyId);
+      result.positionsChecked = positions.length;
 
-      for (const position of positions) {
-        await this.checkPosition(position, result);
+      if (positions.length > 0) {
+        console.log(`[${this.strategy.name}] Monitoring ${positions.length} open positions...`);
+
+        for (const position of positions) {
+          await this.checkPosition(position, result);
+        }
       }
 
       result.stillOpen = positions.length - result.takeProfitTriggered - result.stopLossTriggered - result.resolved;
 
-      console.log(`Monitor complete: ${result.takeProfitTriggered} TP, ${result.stopLossTriggered} SL, ${result.resolved} resolved, ${result.stillOpen} still open`);
+      if (result.positionsOpened > 0 || result.takeProfitTriggered > 0 || result.stopLossTriggered > 0 || result.resolved > 0) {
+        console.log(`[${this.strategy.name}] Monitor complete: ${result.positionsOpened} opened, ${result.takeProfitTriggered} TP, ${result.stopLossTriggered} SL, ${result.resolved} resolved, ${result.stillOpen} still open`);
+      }
     } catch (error) {
-      console.error('Error during monitoring:', error);
+      console.error(`[${this.strategy.name}] Error during monitoring:`, error);
     }
 
     return result;
   }
 
   /**
-   * Check a single position.
+   * Check if a scanned market meets entry criteria for this strategy.
+   * If so, open a position.
+   */
+  async checkForEntry(market: ScannedMarket): Promise<boolean> {
+    // Skip if we already have a position for this market in this strategy
+    if (await hasPositionForMarket(market.marketId, this.strategyId)) {
+      return false;
+    }
+
+    // Get the price for this strategy's side
+    const price = this.strategy.side === 'YES' ? market.yesPrice : market.noPrice;
+    const tokenId = this.strategy.side === 'YES' ? market.yesTokenId : market.noTokenId;
+
+    // Skip if no price available for our side
+    if (price === 0) {
+      return false;
+    }
+
+    // Check price range against strategy config
+    if (price < this.strategy.minPrice || price > this.strategy.maxPrice) {
+      return false;
+    }
+
+    // Calculate edge using strategy's category win rates
+    const winRate = this.strategy.categoryWinRates[market.category];
+    if (winRate === undefined) {
+      return false; // Category not supported by this strategy
+    }
+
+    const edge = winRate - price;
+    if (edge < this.strategy.minEdge) {
+      return false;
+    }
+
+    // Check portfolio has capital
+    const portfolio = await getPortfolio(this.strategyId);
+    if (!portfolio || portfolio.cashBalance < this.config.positionSize) {
+      return false;
+    }
+
+    // All checks passed - open position!
+    return this.openPosition(market, tokenId, price, edge);
+  }
+
+  /**
+   * Open a position for a market.
+   */
+  private async openPosition(
+    market: ScannedMarket,
+    tokenId: string,
+    price: number,
+    edge: number
+  ): Promise<boolean> {
+    const entryPrice = price;
+    const slippageCost = this.config.positionSize * this.config.slippagePercent;
+    const entryPriceAfterSlippage = entryPrice * (1 + this.config.slippagePercent);
+    const costBasis = this.config.positionSize + slippageCost;
+    const quantity = this.config.positionSize / entryPriceAfterSlippage;
+
+    const positionId = randomUUID();
+    const tradeId = randomUUID();
+
+    // Create position
+    const position: Position = {
+      id: positionId,
+      strategyId: this.strategyId,
+      marketId: market.marketId,
+      tokenId,
+      tokenSide: this.strategy.side,
+      question: market.question,
+      category: market.category,
+      entryPrice,
+      entryPriceAfterSlippage,
+      quantity,
+      costBasis,
+      estimatedEdge: edge,
+      entryTime: new Date(),
+      endDate: market.endDate,
+      status: 'OPEN',
+    };
+
+    // Create trade record
+    const trade: Trade = {
+      id: tradeId,
+      strategyId: this.strategyId,
+      positionId,
+      marketId: market.marketId,
+      question: market.question,
+      category: market.category,
+      side: 'BUY',
+      tokenSide: this.strategy.side,
+      price: entryPrice,
+      priceAfterSlippage: entryPriceAfterSlippage,
+      quantity,
+      value: this.config.positionSize,
+      slippageCost,
+      timestamp: new Date(),
+      reason: 'Entry',
+    };
+
+    // Persist
+    await insertPosition(position);
+    await insertTrade(trade);
+    await updatePortfolioOnOpen(costBasis, this.strategyId);
+    await recordScannedMarket(market.marketId, true, undefined, true);
+
+    console.log(`\n📈 [${this.strategy.name}] POSITION OPENED`);
+    console.log(`   Market: ${market.question.substring(0, 60)}...`);
+    console.log(`   Category: ${market.category}`);
+    console.log(`   Side: ${this.strategy.side}`);
+    console.log(`   ${this.strategy.side} Price: ${(entryPrice * 100).toFixed(1)}%`);
+    console.log(`   Edge: ${(edge * 100).toFixed(1)}%`);
+    console.log(`   Size: $${this.config.positionSize}`);
+    console.log(`   Quantity: ${quantity.toFixed(2)} contracts`);
+    console.log(`   Resolves: ${market.endDate.toISOString().split('T')[0]}`);
+
+    return true;
+  }
+
+  /**
+   * Check a single position for exit conditions.
    */
   private async checkPosition(position: Position, result: MonitorResult): Promise<void> {
     try {
@@ -87,7 +248,7 @@ export class PositionMonitor {
       const currentPrice = await this.getCurrentPrice(position.tokenId);
 
       if (currentPrice === null) {
-        console.log(`Could not get price for position ${position.id}`);
+        console.log(`[${this.strategy.name}] Could not get price for position ${position.id}`);
         return;
       }
 
@@ -107,7 +268,7 @@ export class PositionMonitor {
 
       // Position still open
     } catch (error) {
-      console.error(`Error checking position ${position.id}:`, error);
+      console.error(`[${this.strategy.name}] Error checking position ${position.id}:`, error);
     }
   }
 
@@ -123,44 +284,45 @@ export class PositionMonitor {
       const response = await axios.get(`${GAMMA_API_URL}/markets/${marketId}`);
       const data = response.data;
 
-      // Check various resolution indicators
-      const resolved = data.closed === true || data.resolutionSource !== undefined;
-
-      if (resolved) {
-        // Try to determine winning outcome
-        let winningOutcome: string | undefined;
-        let resolutionPrice: number | undefined;
-
-        // Check outcomePrices for resolution
-        if (data.outcomePrices) {
-          let prices: number[] = [];
-          if (typeof data.outcomePrices === 'string') {
-            try {
-              prices = JSON.parse(data.outcomePrices);
-            } catch {
-              prices = [];
-            }
-          } else if (Array.isArray(data.outcomePrices)) {
-            prices = data.outcomePrices.map((p: any) => parseFloat(String(p)));
+      // Parse outcome prices
+      let prices: number[] = [];
+      if (data.outcomePrices) {
+        if (typeof data.outcomePrices === 'string') {
+          try {
+            prices = JSON.parse(data.outcomePrices).map((p: any) => parseFloat(String(p)));
+          } catch {
+            prices = [];
           }
+        } else if (Array.isArray(data.outcomePrices)) {
+          prices = data.outcomePrices.map((p: any) => parseFloat(String(p)));
+        }
+      }
 
-          // In a resolved market, one outcome should be 0 or 1
-          if (prices.length >= 2) {
-            // Yes price is first, No price is second
-            const yesPrice = prices[0];
-            const noPrice = prices[1];
+      // A market is resolved when:
+      // 1. closed === true, OR
+      // 2. Prices are at terminal values (0/1) indicating settlement
+      const hasTerminalPrices = prices.length >= 2 && (
+        (prices[0] >= 0.99 && prices[1] <= 0.01) ||  // YES won
+        (prices[0] <= 0.01 && prices[1] >= 0.99)     // NO won
+      );
+      const resolved = data.closed === true || hasTerminalPrices;
 
-            if (noPrice >= 0.99 || yesPrice <= 0.01) {
-              winningOutcome = 'NO';
-              resolutionPrice = 1;  // No wins = $1 per No contract
-            } else if (yesPrice >= 0.99 || noPrice <= 0.01) {
-              winningOutcome = 'YES';
-              resolutionPrice = 0;  // Yes wins = $0 per No contract
-            }
-          }
+      if (resolved && prices.length >= 2) {
+        const yesPrice = prices[0];
+        const noPrice = prices[1];
+
+        let winningOutcome: string;
+        let resolutionPrice: number;
+
+        if (noPrice >= 0.99 || yesPrice <= 0.01) {
+          winningOutcome = 'NO';
+          resolutionPrice = 1;  // No wins = $1 per No contract
+        } else {
+          winningOutcome = 'YES';
+          resolutionPrice = 0;  // Yes wins = $0 per No contract
         }
 
-        return { resolved, winningOutcome, resolutionPrice };
+        return { resolved: true, winningOutcome, resolutionPrice };
       }
 
       return { resolved: false };
@@ -169,7 +331,7 @@ export class PositionMonitor {
       if (error?.response?.status === 404) {
         return null;
       }
-      console.error(`Error getting market info for ${marketId}:`, error);
+      console.error(`[${this.strategy.name}] Error getting market info for ${marketId}:`, error);
       return null;
     }
   }
@@ -200,7 +362,7 @@ export class PositionMonitor {
 
       return null;
     } catch (error) {
-      console.error(`Error getting price for token ${tokenId}:`, error);
+      console.error(`[${this.strategy.name}] Error getting price for token ${tokenId}:`, error);
       return null;
     }
   }
@@ -229,6 +391,7 @@ export class PositionMonitor {
     const tradeId = randomUUID();
     const trade: Trade = {
       id: tradeId,
+      strategyId: position.strategyId,
       positionId: position.id,
       marketId: position.marketId,
       question: position.question,
@@ -255,10 +418,10 @@ export class PositionMonitor {
     // Persist
     await insertTrade(trade);
     await updatePosition(position);
-    await updatePortfolioOnClose(exitValueAfterSlippage, pnl, isWin);
+    await updatePortfolioOnClose(exitValueAfterSlippage, pnl, isWin, position.strategyId);
 
     const emoji = isWin ? '💰' : '❌';
-    console.log(`\n${emoji} POSITION RESOLVED`);
+    console.log(`\n${emoji} [${this.strategy.name}] POSITION RESOLVED`);
     console.log(`   Market: ${position.question.substring(0, 60)}...`);
     console.log(`   Our Side: ${tokenSide}`);
     console.log(`   Outcome: ${marketInfo.winningOutcome}`);
@@ -292,6 +455,7 @@ export class PositionMonitor {
     const tradeId = randomUUID();
     const trade: Trade = {
       id: tradeId,
+      strategyId: position.strategyId,
       positionId: position.id,
       marketId: position.marketId,
       question: position.question,
@@ -318,10 +482,10 @@ export class PositionMonitor {
     // Persist
     await insertTrade(trade);
     await updatePosition(position);
-    await updatePortfolioOnClose(exitValue, pnl, isWin);
+    await updatePortfolioOnClose(exitValue, pnl, isWin, position.strategyId);
 
     const emoji = status === 'CLOSED_TP' ? '🎯' : '🛑';
-    console.log(`\n${emoji} ${reason.toUpperCase()} TRIGGERED`);
+    console.log(`\n${emoji} [${this.strategy.name}] ${reason.toUpperCase()} TRIGGERED`);
     console.log(`   Market: ${position.question.substring(0, 60)}...`);
     console.log(`   Side: ${tokenSide}`);
     console.log(`   Entry: ${(position.entryPrice * 100).toFixed(1)}%`);

@@ -319,12 +319,13 @@ export interface MonitorDashboardState {
   lastUpdate: Date;
 }
 
-export function renderMonitorDashboard(state: MonitorDashboardState): void {
+export function renderMonitorDashboard(state: MonitorDashboardState, strategyName?: string): void {
   process.stdout.write('\x1B[2J\x1B[0f');
   const lines: string[] = [];
 
+  const title = strategyName ? `  👁️  MONITOR - ${strategyName}` : '  👁️  MONITOR';
   lines.push('╔' + '═'.repeat(BOX_WIDTH) + '╗');
-  lines.push('║' + pad('  👁️  MONITOR', BOX_WIDTH) + '║');
+  lines.push('║' + pad(title, BOX_WIDTH) + '║');
   lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
 
   // Status
@@ -369,25 +370,26 @@ export function renderMonitorDashboard(state: MonitorDashboardState): void {
   if (state.positions.length === 0) {
     lines.push('║  ' + pad('  No open positions', BOX_WIDTH - 2) + '║');
   } else {
-    lines.push('║  ┌' + '─'.repeat(32) + '┬' + '─'.repeat(7) + '┬' + '─'.repeat(7) + '┬' + '─'.repeat(10) + '┬' + '─'.repeat(12) + '┐  ║');
-    lines.push('║  │' + pad(' Market', 32) + '│' + pad(' Entry', 7) + '│' + pad(' Now', 7) + '│' + pad(' Ends', 10) + '│' + pad(' P&L', 12) + '│  ║');
-    lines.push('║  ├' + '─'.repeat(32) + '┼' + '─'.repeat(7) + '┼' + '─'.repeat(7) + '┼' + '─'.repeat(10) + '┼' + '─'.repeat(12) + '┤  ║');
+    lines.push('║  ┌' + '─'.repeat(26) + '┬' + '─'.repeat(7) + '┬' + '─'.repeat(7) + '┬' + '─'.repeat(9) + '┬' + '─'.repeat(9) + '┬' + '─'.repeat(8) + '┐  ║');
+    lines.push('║  │' + pad(' Market', 26) + '│' + pad(' Entry', 7) + '│' + pad(' Now', 7) + '│' + pad(' Ends', 9) + '│' + pad(' P&L', 9) + '│' + pad(' P&L%', 8) + '│  ║');
+    lines.push('║  ├' + '─'.repeat(26) + '┼' + '─'.repeat(7) + '┼' + '─'.repeat(7) + '┼' + '─'.repeat(9) + '┼' + '─'.repeat(9) + '┼' + '─'.repeat(8) + '┤  ║');
 
     const displayPositions = state.positions.slice(0, 8);
     for (const pos of displayPositions) {
-      const marketName = truncate(pos.question, 30);
+      const marketName = truncate(pos.question, 24);
       const entryPrice = formatPercent(pos.entryPrice);
       const currentPrice = pos.currentPrice !== undefined ? formatPercent(pos.currentPrice) : '...';
       const endsIn = pos.endDate ? formatEndsIn(pos.endDate) : '...';
       const pnl = pos.unrealizedPnl !== undefined ? formatPnl(pos.unrealizedPnl) : '...';
-      lines.push('║  │' + pad(` ${marketName}`, 32) + '│' + pad(` ${entryPrice}`, 7) + '│' + pad(` ${currentPrice}`, 7) + '│' + pad(` ${endsIn}`, 10) + '│' + pad(` ${pnl}`, 12) + '│  ║');
+      const pnlPct = pos.unrealizedPnlPercent !== undefined ? `${pos.unrealizedPnlPercent >= 0 ? '+' : ''}${pos.unrealizedPnlPercent.toFixed(1)}%` : '...';
+      lines.push('║  │' + pad(` ${marketName}`, 26) + '│' + pad(` ${entryPrice}`, 7) + '│' + pad(` ${currentPrice}`, 7) + '│' + pad(` ${endsIn}`, 9) + '│' + pad(` ${pnl}`, 9) + '│' + pad(` ${pnlPct}`, 8) + '│  ║');
     }
 
     if (state.positions.length > 8) {
-      lines.push('║  │' + pad(` ... and ${state.positions.length - 8} more`, 32) + '│' + pad('', 7) + '│' + pad('', 7) + '│' + pad('', 10) + '│' + pad('', 12) + '│  ║');
+      lines.push('║  │' + pad(` ... and ${state.positions.length - 8} more`, 26) + '│' + pad('', 7) + '│' + pad('', 7) + '│' + pad('', 9) + '│' + pad('', 9) + '│' + pad('', 8) + '│  ║');
     }
 
-    lines.push('║  └' + '─'.repeat(32) + '┴' + '─'.repeat(7) + '┴' + '─'.repeat(7) + '┴' + '─'.repeat(10) + '┴' + '─'.repeat(12) + '┘  ║');
+    lines.push('║  └' + '─'.repeat(26) + '┴' + '─'.repeat(7) + '┴' + '─'.repeat(7) + '┴' + '─'.repeat(9) + '┴' + '─'.repeat(9) + '┴' + '─'.repeat(8) + '┘  ║');
   }
 
   lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');

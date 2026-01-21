@@ -1,32 +1,33 @@
 /**
- * Performance report generator for the No-betting paper trading strategy.
+ * Performance report generator for the paper trading strategy.
  */
 
 import Table from 'cli-table3';
 import chalk from 'chalk';
-import { PerformanceReport, CategoryPerformance, Position } from './types';
+import { PerformanceReport, CategoryPerformance, Position, StrategyId } from './types';
 import {
   getPortfolio,
   getOpenPositions,
   getClosedPositions,
   getDailySnapshots,
 } from './repository';
+import { getStrategy } from './config';
 
 type TradeInfo = { marketId: string; question: string; pnl: number; pnlPercent: number };
 
 /**
- * Generate a full performance report.
+ * Generate a full performance report for a strategy.
  */
-export async function generateReport(): Promise<PerformanceReport | null> {
-  const portfolio = await getPortfolio();
+export async function generateReport(strategyId: StrategyId): Promise<PerformanceReport | null> {
+  const portfolio = await getPortfolio(strategyId);
   if (!portfolio) {
     console.log('No portfolio data found');
     return null;
   }
 
-  const openPositions = await getOpenPositions();
-  const closedPositions = await getClosedPositions();
-  const dailySnapshots = await getDailySnapshots();
+  const openPositions = await getOpenPositions(strategyId);
+  const closedPositions = await getClosedPositions(strategyId);
+  const dailySnapshots = await getDailySnapshots(strategyId);
 
   const allPositions = [...openPositions, ...closedPositions];
   if (allPositions.length === 0) {
@@ -142,11 +143,12 @@ function calculateCategoryPerformance(positions: Position[]): CategoryPerformanc
 /**
  * Print the performance report to console.
  */
-export function printReport(report: PerformanceReport): void {
+export function printReport(report: PerformanceReport, strategyId: StrategyId): void {
+  const strategy = getStrategy(strategyId);
   console.log('\n');
   console.log(chalk.bold.blue('═══════════════════════════════════════════════════════════════'));
   console.log(chalk.bold.blue('                    PAPER TRADING REPORT'));
-  console.log(chalk.bold.blue('                  No-Betting Strategy'));
+  console.log(chalk.bold.blue(`                  ${strategy.name} Strategy`));
   console.log(chalk.bold.blue('═══════════════════════════════════════════════════════════════'));
   console.log('\n');
 
@@ -299,20 +301,21 @@ function colorPnl(value: number, text: string): string {
 }
 
 /**
- * Print current portfolio status (quick view).
+ * Print current portfolio status (quick view) for a strategy.
  */
-export async function printStatus(): Promise<void> {
-  const portfolio = await getPortfolio();
+export async function printStatus(strategyId: StrategyId): Promise<void> {
+  const strategy = getStrategy(strategyId);
+  const portfolio = await getPortfolio(strategyId);
   if (!portfolio) {
-    console.log('No portfolio data found. Run "no-trader start" first.');
+    console.log(`No portfolio data found for ${strategy.name}. Run "no-trader monitor --strategy=${strategyId}" first.`);
     return;
   }
 
-  const openPositions = await getOpenPositions();
+  const openPositions = await getOpenPositions(strategyId);
 
   console.log('\n');
   console.log(chalk.bold.blue('═══════════════════════════════════════════════════════════════'));
-  console.log(chalk.bold.blue('                    PORTFOLIO STATUS'));
+  console.log(chalk.bold.blue(`                    PORTFOLIO STATUS - ${strategy.name}`));
   console.log(chalk.bold.blue('═══════════════════════════════════════════════════════════════'));
   console.log('\n');
 

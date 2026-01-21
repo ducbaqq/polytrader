@@ -5,6 +5,80 @@
  * due to retail bettors emotionally overbuying Yes on exciting/fearful outcomes.
  */
 
+import { StrategyId, StrategyDefinition, TokenSide } from './types';
+
+// ============================================================================
+// Strategy Registry - defines all available trading strategies
+// ============================================================================
+
+/**
+ * Registry of all available trading strategies.
+ * Each strategy has its own configuration for side, price range, and edge calculation.
+ */
+export const STRATEGY_REGISTRY: Record<StrategyId, StrategyDefinition> = {
+  'yes-buyer': {
+    id: 'yes-buyer',
+    name: 'YES Buyer',
+    description: 'Buys YES tokens when price is below expected win rate',
+    side: 'YES',
+    minPrice: 0.10,
+    maxPrice: 0.60,
+    minEdge: 0.02,
+    categoryWinRates: {
+      'Crypto': 0.70,        // Crypto price targets tend to be hit
+      'Entertainment': 0.65, // Entertainment YES events often occur
+      'Finance': 0.60,       // Finance YES predictions sometimes hit
+      'Weather': 0.55,       // Weather YES events sometimes occur
+      'Tech': 0.65,          // Tech announcements often happen
+    },
+  },
+  'no-buyer': {
+    id: 'no-buyer',
+    name: 'NO Buyer',
+    description: 'Buys NO tokens when YES is overpriced by retail bettors',
+    side: 'NO',
+    minPrice: 0.10,
+    maxPrice: 0.60,
+    minEdge: 0.02,
+    categoryWinRates: {
+      'Crypto': 0.30,        // Crypto NO - 30% (inverse of YES)
+      'Entertainment': 1.00, // Entertainment NO win rate
+      'Finance': 0.986,      // Finance NO win rate
+      'Weather': 0.985,      // Weather NO win rate
+      'Tech': 0.982,         // Tech NO win rate
+    },
+  },
+};
+
+/**
+ * Get a strategy definition by ID.
+ * @throws Error if strategy ID is not found
+ */
+export function getStrategy(id: string): StrategyDefinition {
+  if (!isValidStrategy(id)) {
+    throw new Error(`Unknown strategy: ${id}. Available strategies: ${getAvailableStrategies().join(', ')}`);
+  }
+  return STRATEGY_REGISTRY[id as StrategyId];
+}
+
+/**
+ * Get list of all available strategy IDs.
+ */
+export function getAvailableStrategies(): StrategyId[] {
+  return Object.keys(STRATEGY_REGISTRY) as StrategyId[];
+}
+
+/**
+ * Check if a strategy ID is valid.
+ */
+export function isValidStrategy(id: string): id is StrategyId {
+  return id in STRATEGY_REGISTRY;
+}
+
+// ============================================================================
+// Strategy Configuration
+// ============================================================================
+
 export interface StrategyConfig {
   // Capital management
   initialCapital: number;          // Starting balance ($)
@@ -61,7 +135,7 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
 
   // Entry conditions - categories detected via keywords in question text
   categories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],
-  yesCategories: ['Crypto'],   // Crypto buys YES, others buy NO
+  yesCategories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],   // All categories buy YES
   minDurationDays: 1,
   maxDurationDays: 7,
   minPrice: 0,

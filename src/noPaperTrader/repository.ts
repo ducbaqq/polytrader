@@ -4,7 +4,7 @@
  */
 
 import { query, queryRows, queryOne, withTransaction } from '../database/index';
-import { Position, Trade, Portfolio, DailySummary, PositionStatus, TokenSide } from './types';
+import { Position, Trade, Portfolio, DailySummary, PositionStatus, TokenSide, StrategyId } from './types';
 
 /**
  * Initialize database tables for No paper trading.
@@ -14,6 +14,7 @@ export async function initializeTables(): Promise<void> {
   await query(`
     CREATE TABLE IF NOT EXISTS no_positions (
       id TEXT PRIMARY KEY,
+      strategy_id TEXT NOT NULL DEFAULT 'no-buyer',
       market_id TEXT NOT NULL,
       token_id TEXT NOT NULL,
       token_side TEXT NOT NULL DEFAULT 'NO',
@@ -44,10 +45,19 @@ export async function initializeTables(): Promise<void> {
     END $$;
   `);
 
+  // Add strategy_id column if it doesn't exist (migration for existing tables)
+  await query(`
+    DO $$ BEGIN
+      ALTER TABLE no_positions ADD COLUMN IF NOT EXISTS strategy_id TEXT NOT NULL DEFAULT 'no-buyer';
+    EXCEPTION WHEN others THEN NULL;
+    END $$;
+  `);
+
   // Trades table
   await query(`
     CREATE TABLE IF NOT EXISTS no_trades (
       id TEXT PRIMARY KEY,
+      strategy_id TEXT NOT NULL DEFAULT 'no-buyer',
       position_id TEXT NOT NULL,
       market_id TEXT NOT NULL,
       question TEXT NOT NULL,
@@ -65,10 +75,18 @@ export async function initializeTables(): Promise<void> {
     )
   `);
 
-  // Portfolio state table (single row, updated over time)
+  // Add strategy_id column to trades if it doesn't exist (migration)
+  await query(`
+    DO $$ BEGIN
+      ALTER TABLE no_trades ADD COLUMN IF NOT EXISTS strategy_id TEXT NOT NULL DEFAULT 'no-buyer';
+    EXCEPTION WHEN others THEN NULL;
+    END $$;
+  `);
+
+  // Portfolio state table (one row per strategy)
   await query(`
     CREATE TABLE IF NOT EXISTS no_portfolio (
-      id INTEGER PRIMARY KEY DEFAULT 1,
+      strategy_id TEXT PRIMARY KEY,
       cash_balance NUMERIC(12, 2) NOT NULL,
       initial_capital NUMERIC(12, 2) NOT NULL,
       realized_pnl NUMERIC(12, 2) NOT NULL DEFAULT 0,
@@ -77,15 +95,27 @@ export async function initializeTables(): Promise<void> {
       losing_trades INTEGER NOT NULL DEFAULT 0,
       best_trade NUMERIC(12, 2),
       worst_trade NUMERIC(12, 2),
-      last_updated TIMESTAMP NOT NULL DEFAULT NOW(),
-      CONSTRAINT single_row CHECK (id = 1)
+      last_updated TIMESTAMP NOT NULL DEFAULT NOW()
     )
   `);
 
-  // Daily equity snapshots for equity curve
+  // Migration: If old schema exists with id column, migrate to new schema
+  // First check if there's data in the old format
+  await query(`
+    DO $$ BEGIN
+      -- Try to add strategy_id if it doesn't exist
+      ALTER TABLE no_portfolio ADD COLUMN IF NOT EXISTS strategy_id TEXT;
+      -- Migrate old id=1 row to strategy_id='no-buyer' if it exists
+      UPDATE no_portfolio SET strategy_id = 'no-buyer' WHERE strategy_id IS NULL;
+    EXCEPTION WHEN others THEN NULL;
+    END $$;
+  `);
+
+  // Daily equity snapshots for equity curve (one row per strategy per day)
   await query(`
     CREATE TABLE IF NOT EXISTS no_daily_snapshots (
-      date DATE PRIMARY KEY,
+      strategy_id TEXT NOT NULL DEFAULT 'no-buyer',
+      date DATE NOT NULL,
       starting_equity NUMERIC(12, 2) NOT NULL,
       ending_equity NUMERIC(12, 2) NOT NULL,
       daily_pnl NUMERIC(12, 2) NOT NULL,
@@ -93,8 +123,17 @@ export async function initializeTables(): Promise<void> {
       trades_opened INTEGER NOT NULL DEFAULT 0,
       trades_closed INTEGER NOT NULL DEFAULT 0,
       winning_trades INTEGER NOT NULL DEFAULT 0,
-      losing_trades INTEGER NOT NULL DEFAULT 0
+      losing_trades INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (strategy_id, date)
     )
+  `);
+
+  // Migration: add strategy_id to daily_snapshots if it doesn't exist
+  await query(`
+    DO $$ BEGIN
+      ALTER TABLE no_daily_snapshots ADD COLUMN IF NOT EXISTS strategy_id TEXT NOT NULL DEFAULT 'no-buyer';
+    EXCEPTION WHEN others THEN NULL;
+    END $$;
   `);
 
   // Scanned markets log (to avoid re-scanning same markets)
@@ -118,22 +157,23 @@ export async function initializeTables(): Promise<void> {
 }
 
 /**
- * Initialize portfolio with starting capital.
+ * Initialize portfolio with starting capital for a strategy.
  */
-export async function initializePortfolio(initialCapital: number): Promise<void> {
+export async function initializePortfolio(initialCapital: number, strategyId: StrategyId): Promise<void> {
   await query(`
-    INSERT INTO no_portfolio (id, cash_balance, initial_capital, realized_pnl, last_updated)
-    VALUES (1, $1, $1, 0, NOW())
-    ON CONFLICT (id) DO NOTHING
-  `, [initialCapital]);
+    INSERT INTO no_portfolio (strategy_id, cash_balance, initial_capital, realized_pnl, last_updated)
+    VALUES ($1, $2, $2, 0, NOW())
+    ON CONFLICT (strategy_id) DO NOTHING
+  `, [strategyId, initialCapital]);
 }
 
 /**
- * Get current portfolio state.
+ * Get current portfolio state for a strategy.
  */
-export async function getPortfolio(): Promise<Portfolio | null> {
+export async function getPortfolio(strategyId: StrategyId): Promise<Portfolio | null> {
   const row = await queryOne<any>(`
     SELECT
+      strategy_id,
       cash_balance,
       initial_capital,
       realized_pnl,
@@ -144,13 +184,13 @@ export async function getPortfolio(): Promise<Portfolio | null> {
       worst_trade,
       last_updated
     FROM no_portfolio
-    WHERE id = 1
-  `);
+    WHERE strategy_id = $1
+  `, [strategyId]);
 
   if (!row) return null;
 
   // Get open positions for unrealized P&L calculation
-  const openPositions = await getOpenPositions();
+  const openPositions = await getOpenPositions(strategyId);
   const openPositionValue = openPositions.reduce((sum, p) => sum + p.costBasis, 0);
 
   const cashBalance = parseFloat(String(row.cash_balance));
@@ -162,6 +202,7 @@ export async function getPortfolio(): Promise<Portfolio | null> {
   const realizedPnl = parseFloat(String(row.realized_pnl)) || 0;
 
   return {
+    strategyId,
     cashBalance,
     initialCapital,
     openPositionCount: openPositions.length,
@@ -183,42 +224,43 @@ export async function getPortfolio(): Promise<Portfolio | null> {
 }
 
 /**
- * Get all open positions.
+ * Get all open positions for a strategy.
  */
-export async function getOpenPositions(): Promise<Position[]> {
+export async function getOpenPositions(strategyId: StrategyId): Promise<Position[]> {
   const rows = await queryRows<any>(`
     SELECT *
     FROM no_positions
-    WHERE status = 'OPEN'
+    WHERE status = 'OPEN' AND strategy_id = $1
     ORDER BY entry_time DESC
-  `);
+  `, [strategyId]);
 
   return rows.map(rowToPosition);
 }
 
 /**
- * Get all positions (open and closed).
+ * Get all positions (open and closed) for a strategy.
  */
-export async function getAllPositions(): Promise<Position[]> {
+export async function getAllPositions(strategyId: StrategyId): Promise<Position[]> {
   const rows = await queryRows<any>(`
     SELECT *
     FROM no_positions
+    WHERE strategy_id = $1
     ORDER BY entry_time DESC
-  `);
+  `, [strategyId]);
 
   return rows.map(rowToPosition);
 }
 
 /**
- * Get closed positions only.
+ * Get closed positions only for a strategy.
  */
-export async function getClosedPositions(): Promise<Position[]> {
+export async function getClosedPositions(strategyId: StrategyId): Promise<Position[]> {
   const rows = await queryRows<any>(`
     SELECT *
     FROM no_positions
-    WHERE status != 'OPEN'
+    WHERE status != 'OPEN' AND strategy_id = $1
     ORDER BY exit_time DESC
-  `);
+  `, [strategyId]);
 
   return rows.map(rowToPosition);
 }
@@ -235,12 +277,12 @@ export async function getPosition(positionId: string): Promise<Position | null> 
 }
 
 /**
- * Check if we already have a position for a market.
+ * Check if we already have a position for a market in a specific strategy.
  */
-export async function hasPositionForMarket(marketId: string): Promise<boolean> {
+export async function hasPositionForMarket(marketId: string, strategyId: StrategyId): Promise<boolean> {
   const row = await queryOne<any>(`
-    SELECT 1 FROM no_positions WHERE market_id = $1 AND status = 'OPEN'
-  `, [marketId]);
+    SELECT 1 FROM no_positions WHERE market_id = $1 AND status = 'OPEN' AND strategy_id = $2
+  `, [marketId, strategyId]);
   return !!row;
 }
 
@@ -250,12 +292,13 @@ export async function hasPositionForMarket(marketId: string): Promise<boolean> {
 export async function insertPosition(position: Position): Promise<void> {
   await query(`
     INSERT INTO no_positions (
-      id, market_id, token_id, token_side, question, category,
+      id, strategy_id, market_id, token_id, token_side, question, category,
       entry_price, entry_price_after_slippage, quantity, cost_basis, estimated_edge,
       entry_time, end_date, status
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
   `, [
     position.id,
+    position.strategyId,
     position.marketId,
     position.tokenId,
     position.tokenSide,
@@ -302,12 +345,13 @@ export async function updatePosition(position: Position): Promise<void> {
 export async function insertTrade(trade: Trade): Promise<void> {
   await query(`
     INSERT INTO no_trades (
-      id, position_id, market_id, question, category,
+      id, strategy_id, position_id, market_id, question, category,
       side, token_side, price, price_after_slippage, quantity,
       value, slippage_cost, timestamp, reason
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
   `, [
     trade.id,
+    trade.strategyId,
     trade.positionId,
     trade.marketId,
     trade.question,
@@ -347,13 +391,13 @@ export async function getTradesForPosition(positionId: string): Promise<Trade[]>
 /**
  * Update portfolio after opening a position.
  */
-export async function updatePortfolioOnOpen(costBasis: number): Promise<void> {
+export async function updatePortfolioOnOpen(costBasis: number, strategyId: StrategyId): Promise<void> {
   await query(`
     UPDATE no_portfolio SET
       cash_balance = cash_balance - $1,
       last_updated = NOW()
-    WHERE id = 1
-  `, [costBasis]);
+    WHERE strategy_id = $2
+  `, [costBasis, strategyId]);
 }
 
 /**
@@ -362,7 +406,8 @@ export async function updatePortfolioOnOpen(costBasis: number): Promise<void> {
 export async function updatePortfolioOnClose(
   proceeds: number,
   pnl: number,
-  isWin: boolean
+  isWin: boolean,
+  strategyId: StrategyId
 ): Promise<void> {
   await query(`
     UPDATE no_portfolio SET
@@ -374,8 +419,8 @@ export async function updatePortfolioOnClose(
       best_trade = GREATEST(COALESCE(best_trade, -999999), $2),
       worst_trade = LEAST(COALESCE(worst_trade, 999999), $2),
       last_updated = NOW()
-    WHERE id = 1
-  `, [proceeds, pnl, isWin]);
+    WHERE strategy_id = $4
+  `, [proceeds, pnl, isWin, strategyId]);
 }
 
 /**
@@ -408,7 +453,7 @@ export async function recordScannedMarket(
 }
 
 /**
- * Record daily snapshot.
+ * Record daily snapshot for a strategy.
  */
 export async function recordDailySnapshot(
   date: string,
@@ -417,34 +462,35 @@ export async function recordDailySnapshot(
   tradesOpened: number,
   tradesClosed: number,
   winningTrades: number,
-  losingTrades: number
+  losingTrades: number,
+  strategyId: StrategyId
 ): Promise<void> {
   const dailyPnl = endingEquity - startingEquity;
   const dailyPnlPercent = startingEquity > 0 ? (dailyPnl / startingEquity) * 100 : 0;
 
   await query(`
     INSERT INTO no_daily_snapshots (
-      date, starting_equity, ending_equity, daily_pnl, daily_pnl_percent,
+      strategy_id, date, starting_equity, ending_equity, daily_pnl, daily_pnl_percent,
       trades_opened, trades_closed, winning_trades, losing_trades
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    ON CONFLICT (date) DO UPDATE SET
-      ending_equity = $3,
-      daily_pnl = $4,
-      daily_pnl_percent = $5,
-      trades_opened = no_daily_snapshots.trades_opened + $6,
-      trades_closed = no_daily_snapshots.trades_closed + $7,
-      winning_trades = no_daily_snapshots.winning_trades + $8,
-      losing_trades = no_daily_snapshots.losing_trades + $9
-  `, [date, startingEquity, endingEquity, dailyPnl, dailyPnlPercent, tradesOpened, tradesClosed, winningTrades, losingTrades]);
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    ON CONFLICT (strategy_id, date) DO UPDATE SET
+      ending_equity = $4,
+      daily_pnl = $5,
+      daily_pnl_percent = $6,
+      trades_opened = no_daily_snapshots.trades_opened + $7,
+      trades_closed = no_daily_snapshots.trades_closed + $8,
+      winning_trades = no_daily_snapshots.winning_trades + $9,
+      losing_trades = no_daily_snapshots.losing_trades + $10
+  `, [strategyId, date, startingEquity, endingEquity, dailyPnl, dailyPnlPercent, tradesOpened, tradesClosed, winningTrades, losingTrades]);
 }
 
 /**
- * Get daily snapshots for equity curve.
+ * Get daily snapshots for equity curve for a strategy.
  */
-export async function getDailySnapshots(): Promise<DailySummary[]> {
+export async function getDailySnapshots(strategyId: StrategyId): Promise<DailySummary[]> {
   const rows = await queryRows<any>(`
-    SELECT * FROM no_daily_snapshots ORDER BY date ASC
-  `);
+    SELECT * FROM no_daily_snapshots WHERE strategy_id = $1 ORDER BY date ASC
+  `, [strategyId]);
 
   return rows.map(row => ({
     date: row.date.toISOString().split('T')[0],
@@ -460,9 +506,9 @@ export async function getDailySnapshots(): Promise<DailySummary[]> {
 }
 
 /**
- * Get lifetime exit statistics (all-time, not just session).
+ * Get lifetime exit statistics (all-time, not just session) for a strategy.
  */
-export async function getLifetimeExitStats(): Promise<{
+export async function getLifetimeExitStats(strategyId: StrategyId): Promise<{
   takeProfitCount: number;
   stopLossCount: number;
   resolvedCount: number;
@@ -473,7 +519,8 @@ export async function getLifetimeExitStats(): Promise<{
       COUNT(*) FILTER (WHERE status = 'CLOSED_SL') as sl_count,
       COUNT(*) FILTER (WHERE status = 'CLOSED_RESOLVED') as resolved_count
     FROM no_positions
-  `);
+    WHERE strategy_id = $1
+  `, [strategyId]);
 
   return {
     takeProfitCount: parseInt(String(row?.tp_count || 0)),
@@ -508,6 +555,7 @@ function numOrUndefined(value: any): number | undefined {
 function rowToPosition(row: any): Position {
   return {
     id: row.id,
+    strategyId: (row.strategy_id || 'no-buyer') as StrategyId,
     marketId: row.market_id,
     tokenId: row.token_id,
     tokenSide: (row.token_side || 'NO') as TokenSide,
@@ -532,6 +580,7 @@ function rowToPosition(row: any): Position {
 function rowToTrade(row: any): Trade {
   return {
     id: row.id,
+    strategyId: (row.strategy_id || 'no-buyer') as StrategyId,
     positionId: row.position_id,
     marketId: row.market_id,
     question: row.question,
