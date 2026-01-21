@@ -72,6 +72,7 @@ Polymarket WebSocket
 - Subscribes to market book updates
 - Maintains in-memory market prices
 - Emits events: `price`, `book`, `connected`, `disconnected`
+- Extracts token IDs directly from `GammaMarket.clobTokenIds` (no REST calls for order books)
 
 ### WSMarketValidator (`wsValidator.ts`)
 - Buffers WebSocket updates for batch DB writes

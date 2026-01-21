@@ -293,10 +293,12 @@ The monitor uses WebSocket for real-time price updates to avoid REST API rate li
 
 | Operation | With WebSocket | Without (--no-websocket) |
 |-----------|---------------|--------------------------|
+| WS initialization | 1 getAllMarkets() | N/A |
+| Scanner per cycle | 1 getAllMarkets() | 1 getAllMarkets() + N buildMarketData() |
 | Price check (TP/SL) | Cache lookup | REST API call |
-| Scanner prices | Cache lookup | REST API call |
+| Scanner prices | Cache lookup + metadata from GammaMarket | REST API call |
 | Resolution check | REST API (no WS alternative) | REST API |
-| API calls/min | ~N (resolution only) | ~150+ |
+| API calls/min | ~2 + N resolution checks | ~150+ |
 
 ### Fallback Behavior
 

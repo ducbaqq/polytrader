@@ -10,6 +10,7 @@ import {
   MarketSnapshot,
   TokenData,
   OrderBookLevel,
+  GammaMarket,
   calculateVolumeDistribution,
   calculateSpreadDistribution,
   createEmptyVolumeDistribution,
@@ -253,7 +254,7 @@ export class WSMarketScanner extends EventEmitter {
   /**
    * Extract token IDs from GammaMarket without making REST calls.
    */
-  private extractTokenIds(market: any): string[] {
+  private extractTokenIds(market: GammaMarket): string[] {
     // Try tokens array first
     if (market.tokens && Array.isArray(market.tokens) && market.tokens.length > 0) {
       return market.tokens.map((t: any) => t.token_id).filter(Boolean);
