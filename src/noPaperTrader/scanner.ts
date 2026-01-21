@@ -168,120 +168,101 @@ export class MarketScanner {
       return;
     }
 
-    // Try WebSocket cache first for prices (no API call needed)
+    // Try WebSocket cache first - can skip REST entirely if we have prices
     let yesPrice = 0;
     let noPrice = 0;
     let yesTokenId = '';
     let noTokenId = '';
+    let endDate: Date | null = null;
+    let createdAt: Date | null = null;
+    let volume24h = 0;
     let usedWSCache = false;
 
     if (this.wsProvider && this.wsProvider.isConnected()) {
       const wsPrices = this.wsProvider.getMarketPrices(marketId);
       if (wsPrices.yes && wsPrices.no) {
-        // Use best ask for buying
         yesPrice = wsPrices.yes.bestAsk?.price || wsPrices.yes.bestBid?.price || 0;
         noPrice = wsPrices.no.bestAsk?.price || wsPrices.no.bestBid?.price || 0;
         yesTokenId = wsPrices.yes.assetId;
         noTokenId = wsPrices.no.assetId;
+
+        // Get metadata from GammaMarket (no REST call needed)
+        if (market.endDate) endDate = new Date(market.endDate);
+        if (market.createdAt) createdAt = new Date(market.createdAt);
+        volume24h = market.volume24hr || market.volumeNum || 0;
         usedWSCache = true;
       }
     }
 
-    // Get market details (still needed for endDate, createdAt, etc.)
-    const marketData = await this.client.buildMarketData(market);
-    if (!marketData) {
-      await recordScannedMarket(marketId, false, 'No market data');
-      result.rejectedCount++;
-      result.rejectionReasons['No market data'] = (result.rejectionReasons['No market data'] || 0) + 1;
-      return;
-    }
-
-    // Need both tokens for direction-agnostic scanning
-    const yesToken = marketData.yesToken;
-    const noToken = marketData.noToken;
-
-    if (!yesToken || !noToken) {
-      await recordScannedMarket(marketId, false, 'Missing tokens');
-      result.rejectedCount++;
-      result.rejectionReasons['No token'] = (result.rejectionReasons['No token'] || 0) + 1;
-      return;
-    }
-
-    // Use token IDs from REST data if not already set
-    if (!yesTokenId) yesTokenId = yesToken.tokenId;
-    if (!noTokenId) noTokenId = noToken.tokenId;
-
-    // If we didn't get prices from WebSocket, use REST data
+    // Only call REST API if we don't have WebSocket data
     if (!usedWSCache) {
-      // Get YES price (use best ask for buying)
-      if (yesToken.bestAsk) {
-        yesPrice = yesToken.bestAsk.price;
-      } else if (yesToken.bestBid) {
-        yesPrice = yesToken.bestBid.price;
+      const marketData = await this.client.buildMarketData(market);
+      if (!marketData) {
+        await recordScannedMarket(marketId, false, 'No market data');
+        result.rejectedCount++;
+        result.rejectionReasons['No market data'] = (result.rejectionReasons['No market data'] || 0) + 1;
+        return;
       }
 
-      // Get NO price (use best ask for buying)
-      if (noToken.bestAsk) {
-        noPrice = noToken.bestAsk.price;
-      } else if (noToken.bestBid) {
-        noPrice = noToken.bestBid.price;
+      const yesToken = marketData.yesToken;
+      const noToken = marketData.noToken;
+
+      if (!yesToken || !noToken) {
+        await recordScannedMarket(marketId, false, 'Missing tokens');
+        result.rejectedCount++;
+        result.rejectionReasons['No token'] = (result.rejectionReasons['No token'] || 0) + 1;
+        return;
       }
+
+      yesTokenId = yesToken.tokenId;
+      noTokenId = noToken.tokenId;
+      yesPrice = yesToken.bestAsk?.price || yesToken.bestBid?.price || 0;
+      noPrice = noToken.bestAsk?.price || noToken.bestBid?.price || 0;
+      endDate = marketData.endDate;
+      createdAt = marketData.createdAt;
+      volume24h = marketData.volume24h;
     }
 
     // Need at least one price
     if (yesPrice === 0 && noPrice === 0) {
-      // Temporary rejection - don't persist, liquidity could appear
       result.rejectedCount++;
       result.rejectionReasons['No price'] = (result.rejectionReasons['No price'] || 0) + 1;
       return;
     }
 
-    // Check basic duration filter (not price/edge - monitors decide that)
-    if (marketData.endDate) {
-      const timeToEndMs = marketData.endDate.getTime() - Date.now();
-      const daysToEnd = timeToEndMs / (1000 * 60 * 60 * 24);
-
-      if (daysToEnd < this.config.minDurationDays) {
-        // Temporary rejection - conditions change over time
-        result.rejectedCount++;
-        result.rejectionReasons['Duration'] = (result.rejectionReasons['Duration'] || 0) + 1;
-        return;
-      }
-      if (daysToEnd > this.config.maxDurationDays) {
-        // Temporary rejection
-        result.rejectedCount++;
-        result.rejectionReasons['Duration'] = (result.rejectionReasons['Duration'] || 0) + 1;
-        return;
-      }
-    } else {
+    // Check basic duration filter
+    if (!endDate) {
       await recordScannedMarket(marketId, false, 'No end date');
       result.rejectedCount++;
       result.rejectionReasons['No end date'] = (result.rejectionReasons['No end date'] || 0) + 1;
       return;
     }
 
-    // Market passes basic criteria! Create direction-agnostic ScannedMarket
-    const ageHours = marketData.createdAt
-      ? (Date.now() - marketData.createdAt.getTime()) / (1000 * 60 * 60)
-      : 0;
+    const timeToEndMs = endDate.getTime() - Date.now();
+    const daysToEnd = timeToEndMs / (1000 * 60 * 60 * 24);
 
-    const daysToResolution = marketData.endDate
-      ? (marketData.endDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
-      : 0;
+    if (daysToEnd < this.config.minDurationDays || daysToEnd > this.config.maxDurationDays) {
+      result.rejectedCount++;
+      result.rejectionReasons['Duration'] = (result.rejectionReasons['Duration'] || 0) + 1;
+      return;
+    }
+
+    // Market passes basic criteria
+    const ageHours = createdAt ? (Date.now() - createdAt.getTime()) / (1000 * 60 * 60) : 0;
 
     const scannedMarket: ScannedMarket = {
       marketId,
-      question: marketData.question,
+      question: market.question,
       category: detectedCategory,
       yesTokenId,
       noTokenId,
       yesPrice,
       noPrice,
-      volume24h: marketData.volume24h,
-      createdAt: marketData.createdAt!,
-      endDate: marketData.endDate!,
+      volume24h,
+      createdAt: createdAt || new Date(),
+      endDate,
       ageHours,
-      daysToResolution,
+      daysToResolution: daysToEnd,
     };
 
     result.scannedMarkets.push(scannedMarket);
