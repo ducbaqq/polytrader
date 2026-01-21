@@ -173,6 +173,7 @@ program
   .description('Run monitor continuously for a strategy (opens positions and manages exits)')
   .requiredOption('--strategy <name>', 'Strategy to use (yes-buyer, no-buyer)')
   .option('--interval <seconds>', 'Monitor interval in seconds (default: 30)', '30')
+  .option('--scan-interval <seconds>', 'Scan interval in seconds (default: 120)', '120')
   .option('--capital <amount>', 'Initial capital (default: $2500)', '2500')
   .option('--size <amount>', 'Position size per trade (default: $50)', '50')
   .option('--take-profit <percent>', 'Take profit threshold (default: 90%)', '90')
@@ -193,6 +194,7 @@ program
       if (options.takeProfit) config.takeProfitThreshold = parseFloat(options.takeProfit) / 100;
       if (options.stopLoss) config.stopLossThreshold = parseFloat(options.stopLoss) / 100;
 
+      const scanIntervalSeconds = parseInt(options.scanInterval) || 120;
       const useDashboard = options.dashboard !== false;
 
       // Initialize portfolio for this strategy
@@ -255,7 +257,9 @@ program
       };
 
       if (!useDashboard) {
-        console.log(`👁️  Monitor started for ${strategy.name} (interval: ${config.monitorIntervalSeconds}s)`);
+        console.log(`👁️  Monitor started for ${strategy.name}`);
+        console.log(`   Monitor interval: ${config.monitorIntervalSeconds}s`);
+        console.log(`   Scan interval: ${scanIntervalSeconds}s`);
         console.log(`   Side: ${strategy.side}`);
         console.log(`   Take profit: ${(config.takeProfitThreshold * 100).toFixed(0)}%`);
         console.log(`   Stop loss: ${(config.stopLossThreshold * 100).toFixed(0)}%`);
@@ -263,16 +267,32 @@ program
       }
 
       let cycleCount = 0;
+      let lastScanTime = 0;
+      let cachedScannedMarkets: Awaited<ReturnType<typeof scanner.scan>>['scannedMarkets'] = [];
+
       const runMonitor = async () => {
         cycleCount++;
         dashState.status = 'checking';
         if (useDashboard) await refreshDashboard();
 
-        // First scan for new markets
-        const scanResult = await scanner.scan(undefined, true);
+        // Only scan if scan interval has elapsed
+        const now = Date.now();
+        if (now - lastScanTime >= scanIntervalSeconds * 1000) {
+          dashState.status = 'scanning';
+          if (useDashboard) await refreshDashboard();
 
-        // Then monitor - pass scanned markets for entry evaluation
-        const result = await monitor.monitor(scanResult.scannedMarkets);
+          const scanResult = await scanner.scan(undefined, true);
+          cachedScannedMarkets = scanResult.scannedMarkets;
+          lastScanTime = now;
+
+          if (!useDashboard) {
+            console.log(`[${new Date().toISOString()}] [${strategy.name}] Scanned ${scanResult.marketsScanned} markets, found ${cachedScannedMarkets.length} eligible`);
+          }
+        }
+
+        // Monitor - pass cached scanned markets for entry evaluation
+        dashState.status = 'monitoring';
+        const result = await monitor.monitor(cachedScannedMarkets);
         dashState.status = 'idle';
 
         const actions = result.positionsOpened + result.takeProfitTriggered + result.stopLossTriggered + result.resolved;

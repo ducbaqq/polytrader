@@ -309,7 +309,7 @@ export function renderScannerDashboard(state: ScannerDashboardState): void {
 // ============================================================================
 
 export interface MonitorDashboardState {
-  status: 'idle' | 'checking';
+  status: 'idle' | 'checking' | 'scanning' | 'monitoring';
   runtime: number;
   takeProfitCount: number;
   stopLossCount: number;
@@ -329,7 +329,10 @@ export function renderMonitorDashboard(state: MonitorDashboardState, strategyNam
   lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
 
   // Status
-  const statusText = state.status === 'checking' ? '🔄 Checking positions...' : '⏸️  Idle - waiting for next check';
+  let statusText = '⏸️  Idle - waiting for next cycle';
+  if (state.status === 'scanning') statusText = '🔍 Scanning markets...';
+  else if (state.status === 'monitoring') statusText = '🔄 Checking positions...';
+  else if (state.status === 'checking') statusText = '🔄 Checking...';
   const timeText = `Runtime: ${formatDuration(state.runtime)}  ${state.lastUpdate.toLocaleTimeString()}`;
   lines.push('║  ' + pad(statusText, 45) + pad(timeText, BOX_WIDTH - 47) + '║');
 
