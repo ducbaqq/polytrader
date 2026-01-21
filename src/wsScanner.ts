@@ -168,69 +168,64 @@ export class WSMarketScanner extends EventEmitter {
 
   /**
    * Refresh market subscriptions (call periodically to update market list).
+   * Extracts token IDs directly from GammaMarket without REST calls.
    */
   async refreshSubscriptions(): Promise<void> {
     console.log('[WS] Refreshing market subscriptions...');
 
     try {
-      // Fetch top markets by volume
+      // Fetch top markets by volume (single REST call)
       const markets = await this.client.getAllMarkets(
         true,
-        this.config.maxSubscriptions * 2,  // Fetch more to filter
+        this.config.maxSubscriptions * 2,
         this.config.minVolume
       );
 
-      // Build market data to get token IDs
       const newAssets = new Map<string, AssetInfo>();
       const newMarketAssets = new Map<string, Set<string>>();
-
       let processedCount = 0;
 
       for (const rawMarket of markets) {
         if (processedCount >= this.config.maxSubscriptions) break;
 
-        const marketData = await this.client.buildMarketData(rawMarket);
-        if (!marketData) continue;
+        // Extract token IDs directly from GammaMarket (no REST call)
+        const tokenIds = this.extractTokenIds(rawMarket);
+        if (tokenIds.length < 2) continue;
 
+        const volume24h = rawMarket.volume24hr || rawMarket.volumeNum || 0;
         const assetSet = new Set<string>();
 
-        // Add YES token
-        if (marketData.yesToken?.tokenId) {
-          newAssets.set(marketData.yesToken.tokenId, {
-            tokenId: marketData.yesToken.tokenId,
-            marketId: marketData.marketId,
-            outcome: 'YES',
-            question: marketData.question,
-            category: marketData.category,
-            volume24h: marketData.volume24h,
-          });
-          assetSet.add(marketData.yesToken.tokenId);
-        }
+        // First token is YES, second is NO
+        const yesTokenId = tokenIds[0];
+        const noTokenId = tokenIds[1];
 
-        // Add NO token
-        if (marketData.noToken?.tokenId) {
-          newAssets.set(marketData.noToken.tokenId, {
-            tokenId: marketData.noToken.tokenId,
-            marketId: marketData.marketId,
-            outcome: 'NO',
-            question: marketData.question,
-            category: marketData.category,
-            volume24h: marketData.volume24h,
-          });
-          assetSet.add(marketData.noToken.tokenId);
-        }
+        newAssets.set(yesTokenId, {
+          tokenId: yesTokenId,
+          marketId: rawMarket.id,
+          outcome: 'YES',
+          question: rawMarket.question,
+          category: rawMarket.category || '',
+          volume24h,
+        });
+        assetSet.add(yesTokenId);
 
-        if (assetSet.size > 0) {
-          newMarketAssets.set(marketData.marketId, assetSet);
-          processedCount++;
-        }
+        newAssets.set(noTokenId, {
+          tokenId: noTokenId,
+          marketId: rawMarket.id,
+          outcome: 'NO',
+          question: rawMarket.question,
+          category: rawMarket.category || '',
+          volume24h,
+        });
+        assetSet.add(noTokenId);
+
+        newMarketAssets.set(rawMarket.id, assetSet);
+        processedCount++;
       }
 
       // Update subscription maps
       const oldAssetIds = new Set(this.subscribedAssets.keys());
       const newAssetIds = new Set(newAssets.keys());
-
-      // Find assets to add and remove
       const toAdd = [...newAssetIds].filter(id => !oldAssetIds.has(id));
       const toRemove = [...oldAssetIds].filter(id => !newAssetIds.has(id));
 
@@ -253,6 +248,31 @@ export class WSMarketScanner extends EventEmitter {
       console.error('[WS] Error refreshing subscriptions:', error);
       this.stats.errors++;
     }
+  }
+
+  /**
+   * Extract token IDs from GammaMarket without making REST calls.
+   */
+  private extractTokenIds(market: any): string[] {
+    // Try tokens array first
+    if (market.tokens && Array.isArray(market.tokens) && market.tokens.length > 0) {
+      return market.tokens.map((t: any) => t.token_id).filter(Boolean);
+    }
+
+    // Try clobTokenIds (JSON string or array)
+    if (market.clobTokenIds) {
+      if (typeof market.clobTokenIds === 'string') {
+        try {
+          return JSON.parse(market.clobTokenIds);
+        } catch {
+          return [];
+        }
+      } else if (Array.isArray(market.clobTokenIds)) {
+        return market.clobTokenIds;
+      }
+    }
+
+    return [];
   }
 
   /**
