@@ -2,9 +2,10 @@
 
 ## Purpose
 
-Simulated trading system that bets **No** on high win-rate categories based on alpha analysis:
+Simulated trading system that bets on market outcomes based on category analysis:
 
-> Crypto, Entertainment, Finance, Weather, and Tech markets show historically high No win rates (98-100%) due to retail bettors emotionally overbuying Yes on exciting/fearful outcomes. If No is priced below its historical win rate, there may be edge.
+- **Crypto**: Buys **YES** (price prediction markets tend to resolve YES)
+- **Entertainment, Finance, Weather, Tech**: Buys **NO** (high NO win rates due to retail overbuying YES)
 
 ---
 
@@ -19,9 +20,9 @@ Simulated trading system that bets **No** on high win-rate categories based on a
 | File | Purpose |
 |------|---------|
 | `src/noPaperTrader/config.ts` | Strategy config + keyword-based category detection |
-| `src/noPaperTrader/types.ts` | Type definitions (Position, Trade, Portfolio, etc.) |
+| `src/noPaperTrader/types.ts` | Type definitions (Position, Trade, Portfolio, TokenSide) |
 | `src/noPaperTrader/repository.ts` | Database operations for positions, trades, portfolio |
-| `src/noPaperTrader/scanner.ts` | Market scanner with price history checks |
+| `src/noPaperTrader/scanner.ts` | Market scanner - selects YES or NO based on category |
 | `src/noPaperTrader/monitor.ts` | Position monitor for TP/SL and resolution |
 | `src/noPaperTrader/report.ts` | Performance report generation |
 | `src/noPaperTrader/dashboard.ts` | Live terminal dashboard with portfolio/position display |
@@ -80,31 +81,32 @@ const DEFAULT_STRATEGY_CONFIG = {
   // Capital
   initialCapital: 2500,          // $2,500 starting balance
   positionSize: 50,              // $50 per position
-  side: 'NO',                    // Always bet No
 
   // Entry conditions
   categories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],
+  yesCategories: ['Crypto'],     // These buy YES, others buy NO
   minDurationDays: 1,            // Resolves in 1+ days
   maxDurationDays: 7,            // Resolves in 7 or fewer days
-  minNoPrice: 0,                 // No minimum price
-  maxNoPrice: 0.60,              // Max 60¢ (looking for underpriced No)
+  minPrice: 0,                   // No minimum price
+  maxPrice: 0.60,                // Max 60¢ (looking for underpriced tokens)
   minVolume: 1000,               // Min $1K volume
-  maxVolume: Infinity,           // No max cap (was $50K)
-  minEdge: 0.02,                 // 2% minimum edge (was 5%)
-  maxTimeBelowThreshold: 0.75,   // Skip if price low >75% of lifetime (was 25%)
+  maxVolume: Infinity,           // No max cap
+  minEdge: 0.02,                 // 2% minimum edge
+  maxTimeBelowThreshold: 0.75,   // Skip if price low >75% of lifetime
 
-  // Historical win rates from alpha analysis
+  // Historical win rates
+  // For yesCategories: YES win rate; for others: NO win rate
   categoryWinRates: {
-    'Crypto': 1.00,              // 100%
-    'Entertainment': 1.00,       // 100%
-    'Finance': 0.986,            // 98.6%
-    'Weather': 0.985,            // 98.5%
-    'Tech': 0.982,               // 98.2%
+    'Crypto': 1.00,              // 100% YES win rate
+    'Entertainment': 1.00,       // 100% NO win rate
+    'Finance': 0.986,            // 98.6% NO win rate
+    'Weather': 0.985,            // 98.5% NO win rate
+    'Tech': 0.982,               // 98.2% NO win rate
   },
 
   // Exit conditions
-  takeProfitThreshold: 0.90,     // Sell if No reaches 90%
-  stopLossThreshold: 0.25,       // Sell if No drops to 25%
+  takeProfitThreshold: 0.90,     // Sell if price reaches 90%
+  stopLossThreshold: 0.25,       // Sell if price drops to 25%
 
   // Costs
   slippagePercent: 0.005,        // 0.5% slippage
@@ -117,6 +119,24 @@ const DEFAULT_STRATEGY_CONFIG = {
   scanConcurrency: 20,           // Process 20 markets in parallel
 };
 ```
+
+---
+
+## YES vs NO Logic
+
+The system determines which side to buy based on category:
+
+| Category | Token Side | Rationale |
+|----------|------------|-----------|
+| Crypto | **YES** | Price prediction markets (dips, above $X) tend to resolve YES |
+| Entertainment | NO | Retail overbuys YES on exciting outcomes |
+| Finance | NO | Same bias pattern |
+| Weather | NO | Same bias pattern |
+| Tech | NO | Same bias pattern |
+
+**Position Resolution:**
+- YES position wins $1 if YES wins, $0 if NO wins
+- NO position wins $1 if NO wins, $0 if YES wins
 
 ---
 
@@ -139,20 +159,24 @@ Since the Polymarket API doesn't provide categories for open markets, we use **k
 ## Edge Calculation
 
 ```
-Edge = Historical Category No Win Rate - Current No Price
+Edge = Historical Win Rate - Current Price
 
-Example:
-  Finance market, No priced at 55%
+Example (Crypto - YES side):
+  "Will Bitcoin dip to $88K?" YES priced at 55%
+  Edge = 100% - 55% = 45%
+
+Example (Finance - NO side):
+  "Will Fed raise rates?" NO priced at 55%
   Edge = 98.6% - 55% = 43.6%
 
-  Only enter if Edge >= 2%
+Only enter if Edge >= 2%
 ```
 
 ---
 
 ## Brief Opportunity Window Rule
 
-Markets are rejected if the No price has been at/below the entry threshold (60¢) for more than 75% of the market's lifetime. This filters out "stale" opportunities that everyone already knows about.
+Markets are rejected if the price has been at/below the entry threshold (60¢) for more than 75% of the market's lifetime. This filters out "stale" opportunities.
 
 Implementation: Fetches price history from CLOB API and calculates `(points below threshold) / (total points)`.
 
@@ -164,9 +188,10 @@ Implementation: Fetches price history from CLOB API and calculates `(points belo
 
 1. Fetch all active markets from Polymarket Gamma API
 2. Detect category using keyword matching on question text
-3. Filter to target categories (Crypto, Entertainment, Finance, Weather, Tech)
+3. Filter to target categories
 4. For each market:
-   - Check if already scanned or have position
+   - Determine token side (YES for Crypto, NO for others)
+   - Get price for that token side
    - Validate entry conditions (duration, price ≤60¢, volume ≥$1K)
    - Calculate edge vs historical win rate
    - Check brief opportunity window (price history)
@@ -177,9 +202,9 @@ Implementation: Fetches price history from CLOB API and calculates `(points belo
 1. Get all open positions
 2. For each position:
    - Check if market resolved → close at resolution price
-   - Get current No price
-   - Check take profit (No >= 90%) → sell
-   - Check stop loss (No <= 25%) → sell
+   - Get current price for the position's token side
+   - Check take profit (price >= 90%) → sell
+   - Check stop loss (price <= 25%) → sell
    - Otherwise, hold
 
 ### Position Lifecycle
@@ -196,7 +221,7 @@ OPEN → CLOSED_TP (take profit)
 
 | Table | Purpose |
 |-------|---------|
-| `no_positions` | Open and closed positions |
+| `no_positions` | Open and closed positions (includes `token_side` column) |
 | `no_trades` | Entry and exit trades |
 | `no_portfolio` | Current portfolio state |
 | `no_daily_snapshots` | Daily equity snapshots |
@@ -214,7 +239,7 @@ NO_TRADER_MIN_EDGE=0.02
 NO_TRADER_TAKE_PROFIT=0.90
 NO_TRADER_STOP_LOSS=0.25
 NO_TRADER_SCAN_INTERVAL=60
-NO_TRADER_MAX_NO_PRICE=0.60
+NO_TRADER_MAX_PRICE=0.60
 NO_TRADER_MIN_VOLUME=1000
 NO_TRADER_MAX_VOLUME=<infinity>           # Optional, defaults to no cap
 NO_TRADER_MAX_TIME_BELOW_THRESHOLD=0.75
@@ -238,32 +263,7 @@ The report shows:
 
 ## Live Dashboard
 
-When running `npm run no-trader -- start`, a live terminal dashboard displays:
-
-```
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  NO PAPER TRADER                                                             ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║  🔍 Scanning: 342/2613                   Runtime: 18s  10:19:23 PM           ║
-║  Scans: 0  Opened: 0  Closed: 0                                              ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║  PORTFOLIO                                                                   ║
-║  ├─ Initial Capital:   $2500.00                                              ║
-║  ├─ Cash Balance:      $2449.75                                              ║
-║  ├─ Position Value:    $84.92                                                ║
-║  ├─ Total Equity:      $2534.67                                              ║
-║  ├─ Unrealized P&L:    +$34.67                                               ║
-║  └─ Total P&L:         +$34.67                                               ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║  OPEN POSITIONS (1)                                                          ║
-║  │ Will the price of Bitcoin be above $9... │ 58.0%  │ 99.0%  │ +$34.67      │
-╚══════════════════════════════════════════════════════════════════════════════╝
-```
-
-- **Status**: Shows scanning progress (e.g., `342/2613`), monitoring, or idle
-- **Portfolio**: Initial capital, cash, position value, equity, unrealized/total P&L
-- **Positions**: Entry price, current price, unrealized P&L per position
-- **Refresh**: Updates every 5 seconds + on scan progress
+When running `npm run no-trader -- start`, a live terminal dashboard displays portfolio and positions with entry/current prices and P&L.
 
 Use `--no-dashboard` for plain text output mode.
 
@@ -283,15 +283,15 @@ The scanner tracks markets in `no_scanned_markets` to avoid redundant processing
 
 | Rejection Type | Persisted? | Reason |
 |----------------|------------|--------|
-| No market data / No token | ✅ Yes | Structural issue, won't change |
-| No end date specified | ✅ Yes | Market structure |
-| Category not in target | ✅ Yes | Category won't change |
-| Price above max | ❌ No | Prices change constantly |
-| Duration out of range | ❌ No | Time passes |
-| Volume below min | ❌ No | Volume can increase |
-| Edge below min | ❌ No | Depends on price |
-| No liquidity | ❌ No | Liquidity could appear |
+| No market data / No token | Yes | Structural issue, won't change |
+| No end date specified | Yes | Market structure |
+| Category not in target | Yes | Category won't change |
+| Price above max | No | Prices change constantly |
+| Duration out of range | No | Time passes |
+| Volume below min | No | Volume can increase |
+| Edge below min | No | Depends on price |
+| No liquidity | No | Liquidity could appear |
 
-**Why this matters**: Markets rejected for temporary reasons (price, time, volume) will be re-evaluated on each scan cycle. This allows the scanner to catch opportunities when conditions change (e.g., a market's NO price drops from 65¢ to 55¢).
+Markets rejected for temporary reasons are re-evaluated on each scan cycle.
 
-Implementation: `isPermanentRejection()` in `scanner.ts` (lines 26-43).
+Implementation: `isPermanentRejection()` in `scanner.ts`.

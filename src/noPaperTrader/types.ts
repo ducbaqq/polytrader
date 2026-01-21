@@ -3,11 +3,13 @@
  */
 
 export type PositionStatus = 'OPEN' | 'CLOSED_TP' | 'CLOSED_SL' | 'CLOSED_RESOLVED' | 'CLOSED_MANUAL';
+export type TokenSide = 'YES' | 'NO';
 
 export interface Position {
   id: string;
   marketId: string;
-  tokenId: string;       // No token ID
+  tokenId: string;       // Token ID (YES or NO depending on tokenSide)
+  tokenSide: TokenSide;  // Which side we're betting on
   question: string;
   category: string;
   entryPrice: number;
@@ -32,7 +34,7 @@ export interface Trade {
   question: string;
   category: string;
   side: 'BUY' | 'SELL';
-  tokenSide: 'NO';
+  tokenSide: TokenSide;
   price: number;
   priceAfterSlippage: number;
   quantity: number;
@@ -121,9 +123,10 @@ export interface PerformanceReport {
 export interface EligibleMarket {
   marketId: string;
   tokenId: string;
+  tokenSide: TokenSide;
   question: string;
   category: string;
-  noPrice: number;
+  price: number;         // Entry price for the token side we're buying
   volume: number;
   createdAt: Date;
   endDate: Date;

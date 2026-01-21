@@ -256,7 +256,7 @@ program
 
         // Track recently opened
         for (const m of result.eligibleMarkets.slice(0, result.positionsOpened)) {
-          recentOpened.push({ question: m.question, price: m.noPrice, edge: m.edge });
+          recentOpened.push({ question: m.question, price: m.price, edge: m.edge });
           if (recentOpened.length > 10) recentOpened.shift();
         }
 
@@ -456,7 +456,7 @@ program
         console.log('\nEligible Markets:');
         for (const market of result.eligibleMarkets) {
           console.log(`  - ${market.question.substring(0, 50)}...`);
-          console.log(`    Category: ${market.category}, No: ${(market.noPrice * 100).toFixed(1)}%, Edge: ${(market.edge * 100).toFixed(1)}%`);
+          console.log(`    Category: ${market.category}, Side: ${market.tokenSide}, Price: ${(market.price * 100).toFixed(1)}%, Edge: ${(market.edge * 100).toFixed(1)}%`);
         }
       }
 

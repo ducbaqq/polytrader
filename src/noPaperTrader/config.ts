@@ -9,26 +9,28 @@ export interface StrategyConfig {
   // Capital management
   initialCapital: number;          // Starting balance ($)
   positionSize: number;            // Amount per trade ($)
-  side: 'NO';                      // Always bet No
 
   // Entry conditions
   categories: string[];            // Target categories
+  yesCategories: string[];         // Categories where we buy YES instead of NO
   minDurationDays: number;         // Min time until resolution
   maxDurationDays: number;         // Max time until resolution
-  minNoPrice: number;              // Min No price (0-1)
-  maxNoPrice: number;              // Max No price (0-1)
+  minPrice: number;                // Min entry price (0-1)
+  maxPrice: number;                // Max entry price (0-1)
   minVolume: number;               // Min market volume ($)
   maxVolume: number;               // Max market volume ($)
   minEdge: number;                 // Min estimated edge (e.g., 0.05 = 5%)
-  maxTimeBelowThreshold: number;   // Max % of market lifetime No price was below maxNoPrice (0-1)
+  maxTimeBelowThreshold: number;   // Max % of market lifetime price was below maxPrice (0-1)
 
-  // Historical No win rates by category (for edge calculation)
+  // Historical win rates by category (for edge calculation)
+  // For NO categories: this is NO win rate
+  // For YES categories: this is YES win rate
   categoryWinRates: Record<string, number>;
 
   // Exit conditions
   holdToResolution: boolean;       // Default exit strategy
-  takeProfitThreshold: number;     // Sell if No reaches this (e.g., 0.90)
-  stopLossThreshold: number;       // Sell if No drops to this (e.g., 0.25)
+  takeProfitThreshold: number;     // Sell if price reaches this (e.g., 0.90)
+  stopLossThreshold: number;       // Sell if price drops to this (e.g., 0.25)
 
   // Costs
   slippagePercent: number;         // Slippage assumption (0.005 = 0.5%)
@@ -44,8 +46,9 @@ export interface StrategyConfig {
 /**
  * Default configuration based on the hypothesis.
  *
- * Categories selected based on alpha analysis showing high No win rates:
- * - Crypto: 100%, Entertainment: 100%, Finance: 98.6%, Weather: 98.5%, Tech: 98.2%
+ * Categories selected based on alpha analysis:
+ * - Crypto: Buy YES (price prediction markets tend to resolve YES)
+ * - Entertainment, Finance, Weather, Tech: Buy NO (high NO win rates)
  * - Excluded: Sports and Politics (lower win rates)
  *
  * Note: The Polymarket API doesn't provide category fields for open markets.
@@ -55,26 +58,28 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   // Capital
   initialCapital: 2500,
   positionSize: 50,
-  side: 'NO',
 
   // Entry conditions - categories detected via keywords in question text
   categories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],
+  yesCategories: ['Crypto'],   // Crypto buys YES, others buy NO
   minDurationDays: 1,
   maxDurationDays: 7,
-  minNoPrice: 0,
-  maxNoPrice: 0.60,              // Max 60¢ - looking for underpriced No
-  minVolume: 1000,               // Min $1K volume
-  maxVolume: Infinity,           // No max cap
-  minEdge: 0.02,                 // 2% minimum edge
-  maxTimeBelowThreshold: 0.75,   // Skip if price was low >75% of lifetime
+  minPrice: 0,
+  maxPrice: 0.60,              // Max 60¢ - looking for underpriced tokens
+  minVolume: 1000,             // Min $1K volume
+  maxVolume: Infinity,         // No max cap
+  minEdge: 0.02,               // 2% minimum edge
+  maxTimeBelowThreshold: 0.75, // Skip if price was low >75% of lifetime
 
-  // Historical win rates from alpha analysis
+  // Historical win rates from alpha/observation
+  // For NO categories: NO win rate
+  // For YES categories (Crypto): YES win rate
   categoryWinRates: {
-    'Crypto': 1.00,        // 100%
-    'Entertainment': 1.00, // 100%
-    'Finance': 0.986,      // 98.6%
-    'Weather': 0.985,      // 98.5%
-    'Tech': 0.982,         // 98.2%
+    'Crypto': 1.00,        // 100% YES win rate (price predictions tend to happen)
+    'Entertainment': 1.00, // 100% NO win rate
+    'Finance': 0.986,      // 98.6% NO win rate
+    'Weather': 0.985,      // 98.5% NO win rate
+    'Tech': 0.982,         // 98.2% NO win rate
   },
 
   // Exit conditions
@@ -107,7 +112,7 @@ export function loadConfig(): StrategyConfig {
     ['NO_TRADER_MIN_EDGE', 'minEdge'],
     ['NO_TRADER_TAKE_PROFIT', 'takeProfitThreshold'],
     ['NO_TRADER_STOP_LOSS', 'stopLossThreshold'],
-    ['NO_TRADER_MAX_NO_PRICE', 'maxNoPrice'],
+    ['NO_TRADER_MAX_PRICE', 'maxPrice'],
     ['NO_TRADER_MIN_VOLUME', 'minVolume'],
     ['NO_TRADER_MAX_VOLUME', 'maxVolume'],
     ['NO_TRADER_MAX_TIME_BELOW_THRESHOLD', 'maxTimeBelowThreshold'],
@@ -131,19 +136,27 @@ export function loadConfig(): StrategyConfig {
 }
 
 /**
+ * Check if a category should buy YES instead of NO.
+ */
+export function isYesCategory(category: string, config: StrategyConfig): boolean {
+  return config.yesCategories.includes(category);
+}
+
+/**
  * Calculate estimated edge for a market.
- * Edge = Historical No win rate - Current No price
+ * Edge = Historical win rate - Current price
+ * Works for both YES and NO positions.
  */
 export function calculateEdge(
   category: string,
-  noPrice: number,
+  price: number,
   config: StrategyConfig
 ): number {
   const winRate = config.categoryWinRates[category];
   if (winRate === undefined) {
     return 0;  // Unknown category = no edge
   }
-  return winRate - noPrice;
+  return winRate - price;
 }
 
 /**
@@ -153,11 +166,12 @@ export interface MarketEligibility {
   eligible: boolean;
   reason?: string;
   edge?: number;
+  tokenSide?: 'YES' | 'NO';
 }
 
 export function checkMarketEligibility(
   category: string,
-  noPrice: number,
+  price: number,
   volume: number,
   endDate: Date | null,
   config: StrategyConfig
@@ -167,12 +181,15 @@ export function checkMarketEligibility(
     return { eligible: false, reason: `Category ${category} not in target list` };
   }
 
-  // Check No price range
-  if (noPrice < config.minNoPrice) {
-    return { eligible: false, reason: `No price ${noPrice.toFixed(2)} below min ${config.minNoPrice}` };
+  // Determine which side we're buying
+  const tokenSide = isYesCategory(category, config) ? 'YES' : 'NO';
+
+  // Check price range
+  if (price < config.minPrice) {
+    return { eligible: false, reason: `${tokenSide} price ${price.toFixed(2)} below min ${config.minPrice}` };
   }
-  if (noPrice > config.maxNoPrice) {
-    return { eligible: false, reason: `No price ${noPrice.toFixed(2)} above max ${config.maxNoPrice}` };
+  if (price > config.maxPrice) {
+    return { eligible: false, reason: `${tokenSide} price ${price.toFixed(2)} above max ${config.maxPrice}` };
   }
 
   // Check volume
@@ -199,16 +216,17 @@ export function checkMarketEligibility(
   }
 
   // Calculate edge
-  const edge = calculateEdge(category, noPrice, config);
+  const edge = calculateEdge(category, price, config);
   if (edge < config.minEdge) {
     return {
       eligible: false,
       reason: `Edge ${(edge * 100).toFixed(1)}% below min ${(config.minEdge * 100).toFixed(1)}%`,
       edge,
+      tokenSide,
     };
   }
 
-  return { eligible: true, edge };
+  return { eligible: true, edge, tokenSide };
 }
 
 /**

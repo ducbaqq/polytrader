@@ -6,8 +6,8 @@
 import { randomUUID } from 'crypto';
 import { PolymarketClient } from '../apiClient';
 import { GammaMarket } from '../types';
-import { StrategyConfig, checkMarketEligibility, detectCategoryFromQuestion } from './config';
-import { EligibleMarket, ScanResult, Position, Trade } from './types';
+import { StrategyConfig, checkMarketEligibility, detectCategoryFromQuestion, isYesCategory } from './config';
+import { EligibleMarket, ScanResult, Position, Trade, TokenSide } from './types';
 import {
   getPortfolio,
   hasPositionForMarket,
@@ -192,23 +192,33 @@ export class MarketScanner {
 
     // Get market details
     const marketData = await this.client.buildMarketData(market);
-    if (!marketData || !marketData.noToken) {
-      // Permanent rejection - record to avoid re-scanning
-      await recordScannedMarket(marketId, false, 'No market data or No token');
+    if (!marketData) {
+      await recordScannedMarket(marketId, false, 'No market data');
       result.rejectedCount++;
       result.rejectionReasons['No market data'] = (result.rejectionReasons['No market data'] || 0) + 1;
       return;
     }
 
-    // Get No price (use best ask for buying)
-    let noPrice = 0;
-    if (marketData.noToken.bestAsk) {
-      noPrice = marketData.noToken.bestAsk.price;
-    } else if (marketData.noToken.bestBid) {
-      noPrice = marketData.noToken.bestBid.price;
+    // Determine which side to buy based on category
+    const tokenSide: TokenSide = isYesCategory(detectedCategory, this.config) ? 'YES' : 'NO';
+    const token = tokenSide === 'YES' ? marketData.yesToken : marketData.noToken;
+
+    if (!token) {
+      await recordScannedMarket(marketId, false, `No ${tokenSide} token`);
+      result.rejectedCount++;
+      result.rejectionReasons['No token'] = (result.rejectionReasons['No token'] || 0) + 1;
+      return;
     }
 
-    if (noPrice === 0) {
+    // Get price for the token side we want to buy (use best ask for buying)
+    let price = 0;
+    if (token.bestAsk) {
+      price = token.bestAsk.price;
+    } else if (token.bestBid) {
+      price = token.bestBid.price;
+    }
+
+    if (price === 0) {
       // Temporary rejection - don't persist, liquidity could appear
       result.rejectedCount++;
       result.rejectionReasons['No price'] = (result.rejectionReasons['No price'] || 0) + 1;
@@ -218,7 +228,7 @@ export class MarketScanner {
     // Check eligibility using the detected category
     const eligibility = checkMarketEligibility(
       detectedCategory,
-      noPrice,
+      price,
       marketData.volume24h,
       marketData.endDate,
       this.config
@@ -238,8 +248,8 @@ export class MarketScanner {
 
     // Brief opportunity window check - skip if price below threshold too long
     const timeBelowRatio = await this.checkTimeBelowThreshold(
-      marketData.noToken.tokenId,
-      this.config.maxNoPrice
+      token.tokenId,
+      this.config.maxPrice
     );
 
     if (timeBelowRatio > this.config.maxTimeBelowThreshold) {
@@ -260,10 +270,11 @@ export class MarketScanner {
 
     const eligibleMarket: EligibleMarket = {
       marketId,
-      tokenId: marketData.noToken.tokenId,
+      tokenId: token.tokenId,
+      tokenSide,
       question: marketData.question,
       category: detectedCategory,
-      noPrice,
+      price,
       volume: marketData.volume24h,
       createdAt: marketData.createdAt!,
       endDate: marketData.endDate!,
@@ -301,7 +312,7 @@ export class MarketScanner {
     }
 
     // Calculate position details
-    const entryPrice = market.noPrice;
+    const entryPrice = market.price;
     const slippageCost = this.config.positionSize * this.config.slippagePercent;
     const entryPriceAfterSlippage = entryPrice * (1 + this.config.slippagePercent);
     const costBasis = this.config.positionSize + slippageCost;
@@ -315,6 +326,7 @@ export class MarketScanner {
       id: positionId,
       marketId: market.marketId,
       tokenId: market.tokenId,
+      tokenSide: market.tokenSide,
       question: market.question,
       category: market.category,
       entryPrice,
@@ -335,7 +347,7 @@ export class MarketScanner {
       question: market.question,
       category: market.category,
       side: 'BUY',
-      tokenSide: 'NO',
+      tokenSide: market.tokenSide,
       price: entryPrice,
       priceAfterSlippage: entryPriceAfterSlippage,
       quantity,
@@ -354,7 +366,8 @@ export class MarketScanner {
       console.log(`\n📈 POSITION OPENED`);
       console.log(`   Market: ${market.question.substring(0, 60)}...`);
       console.log(`   Category: ${market.category}`);
-      console.log(`   No Price: ${(entryPrice * 100).toFixed(1)}%`);
+      console.log(`   Side: ${market.tokenSide}`);
+      console.log(`   ${market.tokenSide} Price: ${(entryPrice * 100).toFixed(1)}%`);
       console.log(`   Edge: ${(market.edge * 100).toFixed(1)}%`);
       console.log(`   Size: $${this.config.positionSize}`);
       console.log(`   Quantity: ${quantity.toFixed(2)} contracts`);

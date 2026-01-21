@@ -10,7 +10,7 @@ import { randomUUID } from 'crypto';
 import axios from 'axios';
 import { PolymarketClient } from '../apiClient';
 import { StrategyConfig } from './config';
-import { Position, Trade, MonitorResult, PositionStatus } from './types';
+import { Position, Trade, MonitorResult, PositionStatus, TokenSide } from './types';
 import {
   getOpenPositions,
   updatePosition,
@@ -83,24 +83,24 @@ export class PositionMonitor {
         return;
       }
 
-      // Get current No price
-      const currentNoPrice = await this.getCurrentNoPrice(position.tokenId);
+      // Get current price for the token we hold (YES or NO)
+      const currentPrice = await this.getCurrentPrice(position.tokenId);
 
-      if (currentNoPrice === null) {
+      if (currentPrice === null) {
         console.log(`Could not get price for position ${position.id}`);
         return;
       }
 
-      // Check take profit
-      if (currentNoPrice >= this.config.takeProfitThreshold) {
-        await this.closePosition(position, currentNoPrice, 'CLOSED_TP', 'Take Profit');
+      // Check take profit - price goes up = good for both YES and NO
+      if (currentPrice >= this.config.takeProfitThreshold) {
+        await this.closePosition(position, currentPrice, 'CLOSED_TP', 'Take Profit');
         result.takeProfitTriggered++;
         return;
       }
 
-      // Check stop loss
-      if (currentNoPrice <= this.config.stopLossThreshold) {
-        await this.closePosition(position, currentNoPrice, 'CLOSED_SL', 'Stop Loss');
+      // Check stop loss - price goes down = bad for both YES and NO
+      if (currentPrice <= this.config.stopLossThreshold) {
+        await this.closePosition(position, currentPrice, 'CLOSED_SL', 'Stop Loss');
         result.stopLossTriggered++;
         return;
       }
@@ -175,10 +175,10 @@ export class PositionMonitor {
   }
 
   /**
-   * Get current No price from order book.
+   * Get current price from order book for any token (YES or NO).
    * For selling, we look at bids (what buyers will pay).
    */
-  private async getCurrentNoPrice(tokenId: string): Promise<number | null> {
+  private async getCurrentPrice(tokenId: string): Promise<number | null> {
     try {
       const orderBook = await this.client.getOrderBook(tokenId);
       if (!orderBook) return null;
@@ -212,18 +212,18 @@ export class PositionMonitor {
     position: Position,
     marketInfo: { resolved: boolean; winningOutcome?: string; resolutionPrice?: number }
   ): Promise<void> {
-    const resolutionPrice = marketInfo.resolutionPrice ?? (marketInfo.winningOutcome === 'NO' ? 1 : 0);
+    // Resolution: we win $1 if our side wins, $0 otherwise
+    const tokenSide = position.tokenSide || 'NO'; // Default for legacy positions
+    const resolutionPrice = marketInfo.winningOutcome === tokenSide ? 1 : 0;
 
     // Calculate P&L
-    // If No wins, each contract is worth $1
-    // If Yes wins, each contract is worth $0
     const exitValue = position.quantity * resolutionPrice;
     const exitValueAfterSlippage = exitValue; // No slippage on resolution
     const pnl = exitValueAfterSlippage - position.costBasis;
     const pnlPercent = (pnl / position.costBasis) * 100;
 
     const isWin = pnl > 0;
-    const exitReason = marketInfo.winningOutcome === 'NO' ? 'Resolution (No Won)' : 'Resolution (Yes Won)';
+    const exitReason = `Resolution (${marketInfo.winningOutcome} Won)`;
 
     // Create exit trade
     const tradeId = randomUUID();
@@ -234,7 +234,7 @@ export class PositionMonitor {
       question: position.question,
       category: position.category,
       side: 'SELL',
-      tokenSide: 'NO',
+      tokenSide,
       price: resolutionPrice,
       priceAfterSlippage: resolutionPrice,
       quantity: position.quantity,
@@ -260,6 +260,7 @@ export class PositionMonitor {
     const emoji = isWin ? '💰' : '❌';
     console.log(`\n${emoji} POSITION RESOLVED`);
     console.log(`   Market: ${position.question.substring(0, 60)}...`);
+    console.log(`   Our Side: ${tokenSide}`);
     console.log(`   Outcome: ${marketInfo.winningOutcome}`);
     console.log(`   Entry: ${(position.entryPrice * 100).toFixed(1)}%`);
     console.log(`   Exit: ${(resolutionPrice * 100).toFixed(1)}%`);
@@ -275,6 +276,8 @@ export class PositionMonitor {
     status: PositionStatus,
     reason: string
   ): Promise<void> {
+    const tokenSide = position.tokenSide || 'NO'; // Default to NO for legacy positions
+
     // Calculate exit with slippage (we're selling)
     const slippageCost = position.quantity * currentPrice * this.config.slippagePercent;
     const exitPriceAfterSlippage = currentPrice * (1 - this.config.slippagePercent);
@@ -294,7 +297,7 @@ export class PositionMonitor {
       question: position.question,
       category: position.category,
       side: 'SELL',
-      tokenSide: 'NO',
+      tokenSide,
       price: currentPrice,
       priceAfterSlippage: exitPriceAfterSlippage,
       quantity: position.quantity,
@@ -320,6 +323,7 @@ export class PositionMonitor {
     const emoji = status === 'CLOSED_TP' ? '🎯' : '🛑';
     console.log(`\n${emoji} ${reason.toUpperCase()} TRIGGERED`);
     console.log(`   Market: ${position.question.substring(0, 60)}...`);
+    console.log(`   Side: ${tokenSide}`);
     console.log(`   Entry: ${(position.entryPrice * 100).toFixed(1)}%`);
     console.log(`   Exit: ${(currentPrice * 100).toFixed(1)}%`);
     console.log(`   P&L: $${pnl.toFixed(2)} (${pnlPercent.toFixed(1)}%)`);

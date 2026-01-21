@@ -4,7 +4,7 @@
  */
 
 import { query, queryRows, queryOne, withTransaction } from '../database/index';
-import { Position, Trade, Portfolio, DailySummary, PositionStatus } from './types';
+import { Position, Trade, Portfolio, DailySummary, PositionStatus, TokenSide } from './types';
 
 /**
  * Initialize database tables for No paper trading.
@@ -16,6 +16,7 @@ export async function initializeTables(): Promise<void> {
       id TEXT PRIMARY KEY,
       market_id TEXT NOT NULL,
       token_id TEXT NOT NULL,
+      token_side TEXT NOT NULL DEFAULT 'NO',
       question TEXT NOT NULL,
       category TEXT NOT NULL,
       entry_price NUMERIC(10, 4) NOT NULL,
@@ -33,6 +34,14 @@ export async function initializeTables(): Promise<void> {
       realized_pnl_percent NUMERIC(8, 4),
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     )
+  `);
+
+  // Add token_side column if it doesn't exist (migration for existing tables)
+  await query(`
+    DO $$ BEGIN
+      ALTER TABLE no_positions ADD COLUMN IF NOT EXISTS token_side TEXT NOT NULL DEFAULT 'NO';
+    EXCEPTION WHEN others THEN NULL;
+    END $$;
   `);
 
   // Trades table
@@ -241,14 +250,15 @@ export async function hasPositionForMarket(marketId: string): Promise<boolean> {
 export async function insertPosition(position: Position): Promise<void> {
   await query(`
     INSERT INTO no_positions (
-      id, market_id, token_id, question, category,
+      id, market_id, token_id, token_side, question, category,
       entry_price, entry_price_after_slippage, quantity, cost_basis, estimated_edge,
       entry_time, end_date, status
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
   `, [
     position.id,
     position.marketId,
     position.tokenId,
+    position.tokenSide,
     position.question,
     position.category,
     position.entryPrice,
@@ -500,6 +510,7 @@ function rowToPosition(row: any): Position {
     id: row.id,
     marketId: row.market_id,
     tokenId: row.token_id,
+    tokenSide: (row.token_side || 'NO') as TokenSide,
     question: row.question,
     category: row.category,
     entryPrice: num(row.entry_price),
