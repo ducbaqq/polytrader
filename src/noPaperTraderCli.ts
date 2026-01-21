@@ -40,6 +40,7 @@ import {
 import { PolymarketClient } from './apiClient';
 import { MarketScanner } from './noPaperTrader/scanner';
 import { PositionMonitor } from './noPaperTrader/monitor';
+import { initWSProvider, stopWSProvider, type WSPriceProvider } from './noPaperTrader/wsProvider';
 
 const program = new Command();
 
@@ -179,6 +180,7 @@ program
   .option('--take-profit <percent>', 'Take profit threshold (default: 90%)', '90')
   .option('--stop-loss <percent>', 'Stop loss threshold (default: 25%)', '25')
   .option('--no-dashboard', 'Disable live dashboard')
+  .option('--no-websocket', 'Disable WebSocket (use REST API only)')
   .action(async (options) => {
     try {
       const strategyId = validateStrategy(options.strategy);
@@ -196,13 +198,29 @@ program
 
       const scanIntervalSeconds = parseInt(options.scanInterval) || 120;
       const useDashboard = options.dashboard !== false;
+      const useWebSocket = options.websocket !== false;
 
       // Initialize portfolio for this strategy
       await initializePortfolio(config.initialCapital, strategyId);
 
+      // Initialize WebSocket provider if enabled
+      let wsProvider: WSPriceProvider | undefined;
+      if (useWebSocket) {
+        try {
+          console.log('[Monitor] Initializing WebSocket price provider...');
+          wsProvider = await initWSProvider({
+            maxSubscriptions: 200,
+            minVolume: 1000,
+          });
+          console.log('[Monitor] WebSocket price provider ready');
+        } catch (error) {
+          console.warn('[Monitor] Failed to initialize WebSocket, falling back to REST:', error);
+        }
+      }
+
       const client = new PolymarketClient();
-      const scanner = new MarketScanner(client, config, config.scanConcurrency);
-      const monitor = new PositionMonitor(client, config, strategyId);
+      const scanner = new MarketScanner(client, config, config.scanConcurrency, wsProvider);
+      const monitor = new PositionMonitor(client, config, strategyId, wsProvider);
 
       const startTime = Date.now();
 
@@ -224,14 +242,34 @@ program
         for (const pos of positions) {
           const posWithPrice: PositionWithPrice = { ...pos };
           try {
-            const orderBook = await client.getOrderBook(pos.tokenId);
-            if (orderBook && orderBook.bids && orderBook.bids.length > 0) {
-              const bestBid = orderBook.bids[orderBook.bids.length - 1];
-              posWithPrice.currentPrice = parseFloat(String(bestBid.price));
-            } else if (orderBook && orderBook.asks && orderBook.asks.length > 0) {
-              const bestAsk = orderBook.asks[orderBook.asks.length - 1];
-              posWithPrice.currentPrice = parseFloat(String(bestAsk.price));
+            // Try WebSocket cache first
+            let gotPrice = false;
+            if (wsProvider && wsProvider.isConnected()) {
+              const cached = wsProvider.getPrice(pos.tokenId);
+              if (cached && wsProvider.isDataFresh(pos.tokenId, 60000)) {
+                // Use best bid for current value (what we could sell for)
+                if (cached.bestBid) {
+                  posWithPrice.currentPrice = cached.bestBid.price;
+                  gotPrice = true;
+                } else if (cached.bestAsk) {
+                  posWithPrice.currentPrice = cached.bestAsk.price;
+                  gotPrice = true;
+                }
+              }
             }
+
+            // Fallback to REST API if WebSocket unavailable
+            if (!gotPrice) {
+              const orderBook = await client.getOrderBook(pos.tokenId);
+              if (orderBook && orderBook.bids && orderBook.bids.length > 0) {
+                const bestBid = orderBook.bids[orderBook.bids.length - 1];
+                posWithPrice.currentPrice = parseFloat(String(bestBid.price));
+              } else if (orderBook && orderBook.asks && orderBook.asks.length > 0) {
+                const bestAsk = orderBook.asks[orderBook.asks.length - 1];
+                posWithPrice.currentPrice = parseFloat(String(bestAsk.price));
+              }
+            }
+
             if (posWithPrice.currentPrice !== undefined) {
               const currentValue = pos.quantity * posWithPrice.currentPrice;
               posWithPrice.unrealizedPnl = currentValue - pos.costBasis;
@@ -253,6 +291,14 @@ program
         dashState.stopLossCount = lifetimeStats.stopLossCount;
         dashState.resolvedCount = lifetimeStats.resolvedCount;
         dashState.lastUpdate = new Date();
+        // Add WebSocket stats if available
+        if (wsProvider) {
+          const stats = wsProvider.getStats();
+          dashState.wsStats = {
+            connected: stats.connected,
+            cachedPrices: stats.cachedPrices,
+          };
+        }
         renderMonitorDashboard(dashState, strategy.name);
       };
 
@@ -263,6 +309,7 @@ program
         console.log(`   Side: ${strategy.side}`);
         console.log(`   Take profit: ${(config.takeProfitThreshold * 100).toFixed(0)}%`);
         console.log(`   Stop loss: ${(config.stopLossThreshold * 100).toFixed(0)}%`);
+        console.log(`   WebSocket: ${wsProvider ? 'enabled' : 'disabled'}`);
         console.log('   Press Ctrl+C to stop\n');
       }
 
@@ -310,6 +357,7 @@ program
         if (!useDashboard) console.log(`\nShutting down ${strategy.name} monitor...`);
         running = false;
         if (dashIntervalId) clearInterval(dashIntervalId);
+        stopWSProvider();
         await closeDatabase();
         process.exit(0);
       };

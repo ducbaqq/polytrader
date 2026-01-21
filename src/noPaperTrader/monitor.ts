@@ -24,6 +24,7 @@ import {
   updatePortfolioOnClose,
   recordScannedMarket,
 } from './repository';
+import { WSPriceProvider } from './wsProvider';
 
 const GAMMA_API_URL = 'https://gamma-api.polymarket.com';
 
@@ -36,12 +37,19 @@ export class PositionMonitor {
   private config: StrategyConfig;
   private strategyId: StrategyId;
   private strategy: StrategyDefinition;
+  private wsProvider: WSPriceProvider | null;
 
-  constructor(client: PolymarketClient, config: StrategyConfig, strategyId: StrategyId) {
+  constructor(
+    client: PolymarketClient,
+    config: StrategyConfig,
+    strategyId: StrategyId,
+    wsProvider?: WSPriceProvider
+  ) {
     this.client = client;
     this.config = config;
     this.strategyId = strategyId;
     this.strategy = getStrategy(strategyId);
+    this.wsProvider = wsProvider || null;
   }
 
   /**
@@ -339,8 +347,32 @@ export class PositionMonitor {
   /**
    * Get current price from order book for any token (YES or NO).
    * For selling, we look at bids (what buyers will pay).
+   * Uses WebSocket cache first, falls back to REST API if unavailable or stale.
    */
   private async getCurrentPrice(tokenId: string): Promise<number | null> {
+    // 1. Try WebSocket cache first (instant, no API call)
+    if (this.wsProvider && this.wsProvider.isConnected()) {
+      const cached = this.wsProvider.getPrice(tokenId);
+      if (cached && this.wsProvider.isDataFresh(tokenId, 60000)) {
+        // Use best bid for selling (what buyers will pay)
+        if (cached.bestBid) {
+          return cached.bestBid.price;
+        }
+        // Fallback to best ask if no bids
+        if (cached.bestAsk) {
+          return cached.bestAsk.price;
+        }
+      }
+    }
+
+    // 2. Fallback to REST API (only if WebSocket unavailable/stale)
+    return this.getCurrentPriceRest(tokenId);
+  }
+
+  /**
+   * Get current price via REST API (fallback method).
+   */
+  private async getCurrentPriceRest(tokenId: string): Promise<number | null> {
     try {
       const orderBook = await this.client.getOrderBook(tokenId);
       if (!orderBook) return null;

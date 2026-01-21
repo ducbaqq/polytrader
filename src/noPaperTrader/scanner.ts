@@ -15,6 +15,7 @@ import {
   recordScannedMarket,
 } from './repository';
 import { printProgress, clearProgress } from './dashboard';
+import { WSPriceProvider } from './wsProvider';
 
 export type ProgressCallback = (current: number, total: number, rejected: number, eligible: number) => void;
 
@@ -51,11 +52,18 @@ export class MarketScanner {
   private client: PolymarketClient;
   private config: StrategyConfig;
   private concurrency: number;
+  private wsProvider: WSPriceProvider | null;
 
-  constructor(client: PolymarketClient, config: StrategyConfig, concurrency: number = 10) {
+  constructor(
+    client: PolymarketClient,
+    config: StrategyConfig,
+    concurrency: number = 10,
+    wsProvider?: WSPriceProvider
+  ) {
     this.client = client;
     this.config = config;
     this.concurrency = concurrency;
+    this.wsProvider = wsProvider || null;
   }
 
   /**
@@ -150,6 +158,7 @@ export class MarketScanner {
   /**
    * Process a single market - direction-agnostic.
    * Returns market data with both YES and NO prices for monitors to evaluate.
+   * Uses WebSocket cache first for prices, falls back to REST API.
    */
   private async processMarket(market: GammaMarket, result: ScanResult, detectedCategory: string, _silent: boolean = false): Promise<void> {
     const marketId = market.id;
@@ -159,7 +168,26 @@ export class MarketScanner {
       return;
     }
 
-    // Get market details
+    // Try WebSocket cache first for prices (no API call needed)
+    let yesPrice = 0;
+    let noPrice = 0;
+    let yesTokenId = '';
+    let noTokenId = '';
+    let usedWSCache = false;
+
+    if (this.wsProvider && this.wsProvider.isConnected()) {
+      const wsPrices = this.wsProvider.getMarketPrices(marketId);
+      if (wsPrices.yes && wsPrices.no) {
+        // Use best ask for buying
+        yesPrice = wsPrices.yes.bestAsk?.price || wsPrices.yes.bestBid?.price || 0;
+        noPrice = wsPrices.no.bestAsk?.price || wsPrices.no.bestBid?.price || 0;
+        yesTokenId = wsPrices.yes.assetId;
+        noTokenId = wsPrices.no.assetId;
+        usedWSCache = true;
+      }
+    }
+
+    // Get market details (still needed for endDate, createdAt, etc.)
     const marketData = await this.client.buildMarketData(market);
     if (!marketData) {
       await recordScannedMarket(marketId, false, 'No market data');
@@ -179,20 +207,25 @@ export class MarketScanner {
       return;
     }
 
-    // Get YES price (use best ask for buying)
-    let yesPrice = 0;
-    if (yesToken.bestAsk) {
-      yesPrice = yesToken.bestAsk.price;
-    } else if (yesToken.bestBid) {
-      yesPrice = yesToken.bestBid.price;
-    }
+    // Use token IDs from REST data if not already set
+    if (!yesTokenId) yesTokenId = yesToken.tokenId;
+    if (!noTokenId) noTokenId = noToken.tokenId;
 
-    // Get NO price (use best ask for buying)
-    let noPrice = 0;
-    if (noToken.bestAsk) {
-      noPrice = noToken.bestAsk.price;
-    } else if (noToken.bestBid) {
-      noPrice = noToken.bestBid.price;
+    // If we didn't get prices from WebSocket, use REST data
+    if (!usedWSCache) {
+      // Get YES price (use best ask for buying)
+      if (yesToken.bestAsk) {
+        yesPrice = yesToken.bestAsk.price;
+      } else if (yesToken.bestBid) {
+        yesPrice = yesToken.bestBid.price;
+      }
+
+      // Get NO price (use best ask for buying)
+      if (noToken.bestAsk) {
+        noPrice = noToken.bestAsk.price;
+      } else if (noToken.bestBid) {
+        noPrice = noToken.bestBid.price;
+      }
     }
 
     // Need at least one price
@@ -240,8 +273,8 @@ export class MarketScanner {
       marketId,
       question: marketData.question,
       category: detectedCategory,
-      yesTokenId: yesToken.tokenId,
-      noTokenId: noToken.tokenId,
+      yesTokenId,
+      noTokenId,
       yesPrice,
       noPrice,
       volume24h: marketData.volume24h,

@@ -21,6 +21,7 @@ import {
 } from './repository';
 import { DashboardState, PositionWithPrice, renderDashboard } from './dashboard';
 import { StrategyId } from './types';
+import { WSPriceProvider } from './wsProvider';
 
 export interface PaperTraderStats {
   isRunning: boolean;
@@ -52,13 +53,20 @@ export class NoPaperTrader {
   private currentDate: string = '';
   private dashboardState: DashboardState;
   private useDashboard: boolean = true;
+  private wsProvider: WSPriceProvider | null = null;
 
-  constructor(strategyId: StrategyId = 'no-buyer', config?: StrategyConfig, useDashboard: boolean = true) {
+  constructor(
+    strategyId: StrategyId = 'no-buyer',
+    config?: StrategyConfig,
+    useDashboard: boolean = true,
+    wsProvider?: WSPriceProvider
+  ) {
     this.strategyId = strategyId;
     this.config = config || loadConfig();
     this.client = new PolymarketClient();
-    this.scanner = new MarketScanner(this.client, this.config, this.config.scanConcurrency);
-    this.monitor = new PositionMonitor(this.client, this.config, strategyId);
+    this.wsProvider = wsProvider || null;
+    this.scanner = new MarketScanner(this.client, this.config, this.config.scanConcurrency, wsProvider);
+    this.monitor = new PositionMonitor(this.client, this.config, strategyId, wsProvider);
     this.useDashboard = useDashboard;
     this.stats = {
       isRunning: false,
@@ -425,4 +433,5 @@ export {
   resetPaperTrading,
   hasPositionForMarket,
 } from './repository';
+export { WSPriceProvider, getWSProvider, initWSProvider, stopWSProvider } from './wsProvider';
 export * from './types';

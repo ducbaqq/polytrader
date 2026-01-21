@@ -317,6 +317,10 @@ export interface MonitorDashboardState {
   positions: PositionWithPrice[];
   portfolio: Portfolio | null;
   lastUpdate: Date;
+  wsStats?: {
+    connected: boolean;
+    cachedPrices: number;
+  };
 }
 
 export function renderMonitorDashboard(state: MonitorDashboardState, strategyName?: string): void {
@@ -335,6 +339,14 @@ export function renderMonitorDashboard(state: MonitorDashboardState, strategyNam
   else if (state.status === 'checking') statusText = '🔄 Checking...';
   const timeText = `Runtime: ${formatDuration(state.runtime)}  ${state.lastUpdate.toLocaleTimeString()}`;
   lines.push('║  ' + pad(statusText, 45) + pad(timeText, BOX_WIDTH - 47) + '║');
+
+  // WebSocket status
+  if (state.wsStats) {
+    const wsStatus = state.wsStats.connected
+      ? `WS: connected (${state.wsStats.cachedPrices} cached)`
+      : 'WS: disconnected';
+    lines.push('║  ' + pad(wsStatus, BOX_WIDTH - 2) + '║');
+  }
 
   lines.push('╠' + '═'.repeat(BOX_WIDTH) + '╣');
 
