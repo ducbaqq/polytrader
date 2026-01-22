@@ -260,15 +260,16 @@ export class PositionMonitor {
         return;
       }
 
-      // Check take profit - price goes up = good for both YES and NO
+      // Take profit when price reaches 90¢ (close to $1 payout)
       if (currentPrice >= this.config.takeProfitThreshold) {
         await this.closePosition(position, currentPrice, 'CLOSED_TP', 'Take Profit');
         result.takeProfitTriggered++;
         return;
       }
 
-      // Check stop loss - price goes down = bad for both YES and NO
-      if (currentPrice <= this.config.stopLossThreshold) {
+      // Stop loss when price drops 25% from entry price
+      const stopLossPrice = position.entryPriceAfterSlippage * (1 - this.config.stopLossThreshold);
+      if (currentPrice <= stopLossPrice) {
         await this.closePosition(position, currentPrice, 'CLOSED_SL', 'Stop Loss');
         result.stopLossTriggered++;
         return;
