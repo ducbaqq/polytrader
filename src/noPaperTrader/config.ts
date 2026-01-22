@@ -55,22 +55,17 @@ export const STRATEGY_REGISTRY: Record<StrategyId, StrategyDefinition> = {
  * @throws Error if strategy ID is not found
  */
 export function getStrategy(id: string): StrategyDefinition {
-  if (!isValidStrategy(id)) {
-    throw new Error(`Unknown strategy: ${id}. Available strategies: ${getAvailableStrategies().join(', ')}`);
+  const strategy = STRATEGY_REGISTRY[id as StrategyId];
+  if (!strategy) {
+    throw new Error(`Unknown strategy: ${id}. Available: ${getAvailableStrategies().join(', ')}`);
   }
-  return STRATEGY_REGISTRY[id as StrategyId];
+  return strategy;
 }
 
-/**
- * Get list of all available strategy IDs.
- */
 export function getAvailableStrategies(): StrategyId[] {
   return Object.keys(STRATEGY_REGISTRY) as StrategyId[];
 }
 
-/**
- * Check if a strategy ID is valid.
- */
 export function isValidStrategy(id: string): id is StrategyId {
   return id in STRATEGY_REGISTRY;
 }
@@ -83,6 +78,7 @@ export interface StrategyConfig {
   // Capital management
   initialCapital: number;          // Starting balance ($)
   positionSize: number;            // Amount per trade ($)
+  maxPositions: number;            // Max open positions at once
 
   // Entry conditions
   categories: string[];            // Target categories
@@ -94,6 +90,7 @@ export interface StrategyConfig {
   minVolume: number;               // Min market volume ($)
   maxVolume: number;               // Max market volume ($)
   minEdge: number;                 // Min estimated edge (e.g., 0.05 = 5%)
+  maxSpread: number;               // Max bid-ask spread (e.g., 0.10 = 10%)
   maxTimeBelowThreshold: number;   // Max % of market lifetime price was below maxPrice (0-1)
 
   // Historical win rates by category (for edge calculation)
@@ -132,6 +129,7 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   // Capital
   initialCapital: 2500,
   positionSize: 50,
+  maxPositions: 10,  // Limit to 10 open positions
 
   // Entry conditions - categories detected via keywords in question text
   categories: ['Crypto', 'Entertainment', 'Finance', 'Weather', 'Tech'],
@@ -143,6 +141,7 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   minVolume: 1000,             // Min $1K volume
   maxVolume: Infinity,         // No max cap
   minEdge: 0.02,               // 2% minimum edge
+  maxSpread: 0.10,             // Max 10% bid-ask spread
   maxTimeBelowThreshold: 0.75, // Skip if price was low >75% of lifetime
 
   // Historical win rates from alpha/observation
@@ -179,11 +178,11 @@ export function loadConfig(): StrategyConfig {
   const config = { ...DEFAULT_STRATEGY_CONFIG };
   const env = process.env;
 
-  // Map environment variables to config properties
   const floatMappings: [string, keyof StrategyConfig][] = [
     ['NO_TRADER_INITIAL_CAPITAL', 'initialCapital'],
     ['NO_TRADER_POSITION_SIZE', 'positionSize'],
     ['NO_TRADER_MIN_EDGE', 'minEdge'],
+    ['NO_TRADER_MAX_SPREAD', 'maxSpread'],
     ['NO_TRADER_TAKE_PROFIT', 'takeProfitThreshold'],
     ['NO_TRADER_STOP_LOSS', 'stopLossThreshold'],
     ['NO_TRADER_MAX_PRICE', 'maxPrice'],
@@ -192,18 +191,22 @@ export function loadConfig(): StrategyConfig {
     ['NO_TRADER_MAX_TIME_BELOW_THRESHOLD', 'maxTimeBelowThreshold'],
   ];
 
+  const intMappings: [string, keyof StrategyConfig][] = [
+    ['NO_TRADER_SCAN_INTERVAL', 'scanIntervalSeconds'],
+    ['NO_TRADER_SCAN_CONCURRENCY', 'scanConcurrency'],
+    ['NO_TRADER_MAX_POSITIONS', 'maxPositions'],
+  ];
+
   for (const [envKey, configKey] of floatMappings) {
     if (env[envKey]) {
       (config as any)[configKey] = parseFloat(env[envKey]!);
     }
   }
 
-  if (env.NO_TRADER_SCAN_INTERVAL) {
-    config.scanIntervalSeconds = parseInt(env.NO_TRADER_SCAN_INTERVAL);
-  }
-
-  if (env.NO_TRADER_SCAN_CONCURRENCY) {
-    config.scanConcurrency = parseInt(env.NO_TRADER_SCAN_CONCURRENCY);
+  for (const [envKey, configKey] of intMappings) {
+    if (env[envKey]) {
+      (config as any)[configKey] = parseInt(env[envKey]!);
+    }
   }
 
   return config;

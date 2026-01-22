@@ -141,6 +141,7 @@ export interface PerformanceReport {
 /**
  * Direction-agnostic scanned market with both YES and NO prices.
  * Monitors decide which side to trade based on their strategy.
+ * Includes both ask (buy) and bid (sell) prices to check spreads.
  */
 export interface ScannedMarket {
   marketId: string;
@@ -148,8 +149,10 @@ export interface ScannedMarket {
   category: string;
   yesTokenId: string;
   noTokenId: string;
-  yesPrice: number;
-  noPrice: number;
+  yesPrice: number;      // Best ask (price to buy YES)
+  noPrice: number;       // Best ask (price to buy NO)
+  yesBidPrice: number;   // Best bid (price to sell YES)
+  noBidPrice: number;    // Best bid (price to sell NO)
   volume24h: number;
   createdAt: Date;
   endDate: Date;

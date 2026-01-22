@@ -6,16 +6,13 @@
  * and lets the monitors decide which side to trade based on their strategy.
  */
 
-import { PolymarketClient } from '../apiClient';
-import { GammaMarket } from '../types';
-import { StrategyConfig, detectCategoryFromQuestion } from './config';
-import { ScannedMarket, ScanResult } from './types';
-import {
-  wasMarketScanned,
-  recordScannedMarket,
-} from './repository';
-import { printProgress, clearProgress } from './dashboard';
-import { WSPriceProvider } from './wsProvider';
+import { PolymarketClient } from '../apiClient.js';
+import { GammaMarket } from '../types.js';
+import { StrategyConfig, detectCategoryFromQuestion } from './config.js';
+import { ScannedMarket, ScanResult } from './types.js';
+import { wasMarketScanned, recordScannedMarket } from './repository.js';
+import { printProgress, clearProgress } from './dashboard.js';
+import { WSPriceProvider } from './wsProvider.js';
 
 export type ProgressCallback = (current: number, total: number, rejected: number, eligible: number) => void;
 
@@ -122,7 +119,7 @@ export class MarketScanner {
       const processWithSemaphore = async (market: GammaMarket, detectedCategory: string) => {
         await semaphore.acquire();
         try {
-          await this.processMarket(market, result, detectedCategory, silent);
+          await this.processMarket(market, result, detectedCategory);
         } finally {
           semaphore.release();
           processed++;
@@ -156,101 +153,44 @@ export class MarketScanner {
   }
 
   /**
-   * Process a single market - direction-agnostic.
-   * Returns market data with both YES and NO prices for monitors to evaluate.
+   * Process a single market. Returns market data with both YES and NO prices.
    * Uses WebSocket cache first for prices, falls back to REST API.
    */
-  private async processMarket(market: GammaMarket, result: ScanResult, detectedCategory: string, _silent: boolean = false): Promise<void> {
+  private async processMarket(market: GammaMarket, result: ScanResult, detectedCategory: string): Promise<void> {
     const marketId = market.id;
 
-    // Skip if already scanned with permanent rejection
     if (await wasMarketScanned(marketId)) {
       return;
     }
 
-    // Try WebSocket cache first - can skip REST entirely if we have prices
-    let yesPrice = 0;
-    let noPrice = 0;
-    let yesTokenId = '';
-    let noTokenId = '';
-    let endDate: Date | null = null;
-    let createdAt: Date | null = null;
-    let volume24h = 0;
-    let usedWSCache = false;
-
-    if (this.wsProvider && this.wsProvider.isConnected()) {
-      const wsPrices = this.wsProvider.getMarketPrices(marketId);
-      if (wsPrices.yes && wsPrices.no) {
-        yesPrice = wsPrices.yes.bestAsk?.price || wsPrices.yes.bestBid?.price || 0;
-        noPrice = wsPrices.no.bestAsk?.price || wsPrices.no.bestBid?.price || 0;
-        yesTokenId = wsPrices.yes.assetId;
-        noTokenId = wsPrices.no.assetId;
-
-        // Get metadata from GammaMarket (no REST call needed)
-        if (market.endDate) endDate = new Date(market.endDate);
-        if (market.createdAt) createdAt = new Date(market.createdAt);
-        volume24h = market.volume24hr || market.volumeNum || 0;
-        usedWSCache = true;
-      }
+    // Try WebSocket cache first, then REST API
+    const priceData = await this.getPriceData(market);
+    if (!priceData) {
+      this.recordRejection(result, marketId, 'No market data');
+      return;
     }
 
-    // Only call REST API if we don't have WebSocket data
-    if (!usedWSCache) {
-      const marketData = await this.client.buildMarketData(market);
-      if (!marketData) {
-        await recordScannedMarket(marketId, false, 'No market data');
-        result.rejectedCount++;
-        result.rejectionReasons['No market data'] = (result.rejectionReasons['No market data'] || 0) + 1;
-        return;
-      }
+    const { yesPrice, noPrice, yesBidPrice, noBidPrice, yesTokenId, noTokenId, endDate, createdAt, volume24h } = priceData;
 
-      const yesToken = marketData.yesToken;
-      const noToken = marketData.noToken;
-
-      if (!yesToken || !noToken) {
-        await recordScannedMarket(marketId, false, 'Missing tokens');
-        result.rejectedCount++;
-        result.rejectionReasons['No token'] = (result.rejectionReasons['No token'] || 0) + 1;
-        return;
-      }
-
-      yesTokenId = yesToken.tokenId;
-      noTokenId = noToken.tokenId;
-      yesPrice = yesToken.bestAsk?.price || yesToken.bestBid?.price || 0;
-      noPrice = noToken.bestAsk?.price || noToken.bestBid?.price || 0;
-      endDate = marketData.endDate;
-      createdAt = marketData.createdAt;
-      volume24h = marketData.volume24h;
-    }
-
-    // Need at least one price
     if (yesPrice === 0 && noPrice === 0) {
-      result.rejectedCount++;
-      result.rejectionReasons['No price'] = (result.rejectionReasons['No price'] || 0) + 1;
+      this.recordRejection(result, null, 'No price');
       return;
     }
 
-    // Check basic duration filter
     if (!endDate) {
-      await recordScannedMarket(marketId, false, 'No end date');
-      result.rejectedCount++;
-      result.rejectionReasons['No end date'] = (result.rejectionReasons['No end date'] || 0) + 1;
+      this.recordRejection(result, marketId, 'No end date');
       return;
     }
 
-    const timeToEndMs = endDate.getTime() - Date.now();
-    const daysToEnd = timeToEndMs / (1000 * 60 * 60 * 24);
-
+    const daysToEnd = (endDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
     if (daysToEnd < this.config.minDurationDays || daysToEnd > this.config.maxDurationDays) {
-      result.rejectedCount++;
-      result.rejectionReasons['Duration'] = (result.rejectionReasons['Duration'] || 0) + 1;
+      this.recordRejection(result, null, 'Duration');
       return;
     }
 
-    // Market passes basic criteria
     const ageHours = createdAt ? (Date.now() - createdAt.getTime()) / (1000 * 60 * 60) : 0;
 
-    const scannedMarket: ScannedMarket = {
+    result.scannedMarkets.push({
       marketId,
       question: market.question,
       category: detectedCategory,
@@ -258,16 +198,69 @@ export class MarketScanner {
       noTokenId,
       yesPrice,
       noPrice,
+      yesBidPrice,
+      noBidPrice,
       volume24h,
       createdAt: createdAt || new Date(),
       endDate,
       ageHours,
       daysToResolution: daysToEnd,
+    });
+  }
+
+  private async getPriceData(market: GammaMarket): Promise<{
+    yesPrice: number;
+    noPrice: number;
+    yesBidPrice: number;
+    noBidPrice: number;
+    yesTokenId: string;
+    noTokenId: string;
+    endDate: Date | null;
+    createdAt: Date | null;
+    volume24h: number;
+  } | null> {
+    // Try WebSocket cache first
+    if (this.wsProvider?.isConnected()) {
+      const wsPrices = this.wsProvider.getMarketPrices(market.id);
+      if (wsPrices.yes && wsPrices.no) {
+        return {
+          yesPrice: wsPrices.yes.bestAsk?.price || 0,
+          noPrice: wsPrices.no.bestAsk?.price || 0,
+          yesBidPrice: wsPrices.yes.bestBid?.price || 0,
+          noBidPrice: wsPrices.no.bestBid?.price || 0,
+          yesTokenId: wsPrices.yes.assetId,
+          noTokenId: wsPrices.no.assetId,
+          endDate: market.endDate ? new Date(market.endDate) : null,
+          createdAt: market.createdAt ? new Date(market.createdAt) : null,
+          volume24h: market.volume24hr || market.volumeNum || 0,
+        };
+      }
+    }
+
+    // Fallback to REST API
+    const marketData = await this.client.buildMarketData(market);
+    if (!marketData?.yesToken || !marketData?.noToken) {
+      return null;
+    }
+
+    return {
+      yesPrice: marketData.yesToken.bestAsk?.price || 0,
+      noPrice: marketData.noToken.bestAsk?.price || 0,
+      yesBidPrice: marketData.yesToken.bestBid?.price || 0,
+      noBidPrice: marketData.noToken.bestBid?.price || 0,
+      yesTokenId: marketData.yesToken.tokenId,
+      noTokenId: marketData.noToken.tokenId,
+      endDate: marketData.endDate,
+      createdAt: marketData.createdAt,
+      volume24h: marketData.volume24h,
     };
+  }
 
-    result.scannedMarkets.push(scannedMarket);
-
-    // Don't persist to scanned_markets - let monitors decide
-    // (they will record when they open positions)
+  private recordRejection(result: ScanResult, marketId: string | null, reason: string): void {
+    result.rejectedCount++;
+    result.rejectionReasons[reason] = (result.rejectionReasons[reason] || 0) + 1;
+    if (marketId) {
+      recordScannedMarket(marketId, false, reason);
+    }
   }
 }

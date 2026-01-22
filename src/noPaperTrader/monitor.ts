@@ -10,9 +10,9 @@
 
 import { randomUUID } from 'crypto';
 import axios from 'axios';
-import { PolymarketClient } from '../apiClient';
-import { StrategyConfig, getStrategy } from './config';
-import { Position, Trade, MonitorResult, PositionStatus, ScannedMarket, StrategyId, StrategyDefinition } from './types';
+import { PolymarketClient } from '../apiClient.js';
+import { StrategyConfig, getStrategy } from './config.js';
+import { Position, Trade, MonitorResult, PositionStatus, ScannedMarket, StrategyId, StrategyDefinition } from './types.js';
 import {
   getPortfolio,
   getOpenPositions,
@@ -23,8 +23,8 @@ import {
   updatePortfolioOnOpen,
   updatePortfolioOnClose,
   recordScannedMarket,
-} from './repository';
-import { WSPriceProvider } from './wsProvider';
+} from './repository.js';
+import { WSPriceProvider } from './wsProvider.js';
 
 const GAMMA_API_URL = 'https://gamma-api.polymarket.com';
 
@@ -52,16 +52,10 @@ export class PositionMonitor {
     this.wsProvider = wsProvider || null;
   }
 
-  /**
-   * Get the strategy ID this monitor is using.
-   */
   getStrategyId(): StrategyId {
     return this.strategyId;
   }
 
-  /**
-   * Get the strategy definition.
-   */
   getStrategy(): StrategyDefinition {
     return this.strategy;
   }
@@ -128,16 +122,31 @@ export class PositionMonitor {
       return false;
     }
 
-    // Get the price for this strategy's side
-    const price = this.strategy.side === 'YES' ? market.yesPrice : market.noPrice;
-    const tokenId = this.strategy.side === 'YES' ? market.yesTokenId : market.noTokenId;
-
-    // Skip if no price available for our side
-    if (price === 0) {
+    // Skip if we've reached max positions
+    const openPositions = await getOpenPositions(this.strategyId);
+    if (openPositions.length >= this.config.maxPositions) {
       return false;
     }
 
-    // Check price range against strategy config
+    // Get the price for this strategy's side (ask = buy price, bid = sell price)
+    const askPrice = this.strategy.side === 'YES' ? market.yesPrice : market.noPrice;
+    const bidPrice = this.strategy.side === 'YES' ? market.yesBidPrice : market.noBidPrice;
+    const tokenId = this.strategy.side === 'YES' ? market.yesTokenId : market.noTokenId;
+
+    // Skip if no prices available for our side
+    if (askPrice === 0 || bidPrice === 0) {
+      return false;
+    }
+
+    // Check bid-ask spread - skip if too wide
+    // Spread = (ask - bid) / ask = how much we lose immediately after buying
+    const spread = (askPrice - bidPrice) / askPrice;
+    if (spread > this.config.maxSpread) {
+      return false;
+    }
+
+    // Check price range against strategy config (use ask price = what we pay)
+    const price = askPrice;
     if (price < this.strategy.minPrice || price > this.strategy.maxPrice) {
       return false;
     }
@@ -163,18 +172,14 @@ export class PositionMonitor {
     return this.openPosition(market, tokenId, price, edge);
   }
 
-  /**
-   * Open a position for a market.
-   */
   private async openPosition(
     market: ScannedMarket,
     tokenId: string,
     price: number,
     edge: number
   ): Promise<boolean> {
-    const entryPrice = price;
     const slippageCost = this.config.positionSize * this.config.slippagePercent;
-    const entryPriceAfterSlippage = entryPrice * (1 + this.config.slippagePercent);
+    const entryPriceAfterSlippage = price * (1 + this.config.slippagePercent);
     const costBasis = this.config.positionSize + slippageCost;
     const quantity = this.config.positionSize / entryPriceAfterSlippage;
 
@@ -190,7 +195,7 @@ export class PositionMonitor {
       tokenSide: this.strategy.side,
       question: market.question,
       category: market.category,
-      entryPrice,
+      entryPrice: price,
       entryPriceAfterSlippage,
       quantity,
       costBasis,
@@ -210,7 +215,7 @@ export class PositionMonitor {
       category: market.category,
       side: 'BUY',
       tokenSide: this.strategy.side,
-      price: entryPrice,
+      price,
       priceAfterSlippage: entryPriceAfterSlippage,
       quantity,
       value: this.config.positionSize,
@@ -229,7 +234,7 @@ export class PositionMonitor {
     console.log(`   Market: ${market.question.substring(0, 60)}...`);
     console.log(`   Category: ${market.category}`);
     console.log(`   Side: ${this.strategy.side}`);
-    console.log(`   ${this.strategy.side} Price: ${(entryPrice * 100).toFixed(1)}%`);
+    console.log(`   ${this.strategy.side} Price: ${(price * 100).toFixed(1)}%`);
     console.log(`   Edge: ${(edge * 100).toFixed(1)}%`);
     console.log(`   Size: $${this.config.positionSize}`);
     console.log(`   Quantity: ${quantity.toFixed(2)} contracts`);
@@ -293,50 +298,31 @@ export class PositionMonitor {
       const response = await axios.get(`${GAMMA_API_URL}/markets/${marketId}`);
       const data = response.data;
 
-      // Parse outcome prices
-      let prices: number[] = [];
-      if (data.outcomePrices) {
-        if (typeof data.outcomePrices === 'string') {
-          try {
-            prices = JSON.parse(data.outcomePrices).map((p: any) => parseFloat(String(p)));
-          } catch {
-            prices = [];
-          }
-        } else if (Array.isArray(data.outcomePrices)) {
-          prices = data.outcomePrices.map((p: any) => parseFloat(String(p)));
-        }
-      }
+      // Parse outcome prices [yesPrice, noPrice]
+      const prices = this.parseOutcomePrices(data.outcomePrices);
 
-      // A market is resolved when:
-      // 1. closed === true, OR
-      // 2. Prices are at terminal values (0/1) indicating settlement
+      // Market is resolved when closed or prices are terminal (0/1)
       const hasTerminalPrices = prices.length >= 2 && (
-        (prices[0] >= 0.99 && prices[1] <= 0.01) ||  // YES won
-        (prices[0] <= 0.01 && prices[1] >= 0.99)     // NO won
+        (prices[0] >= 0.99 && prices[1] <= 0.01) ||
+        (prices[0] <= 0.01 && prices[1] >= 0.99)
       );
-      const resolved = data.closed === true || hasTerminalPrices;
 
-      if (resolved && prices.length >= 2) {
-        const yesPrice = prices[0];
-        const noPrice = prices[1];
-
-        let winningOutcome: string;
-        let resolutionPrice: number;
-
-        if (noPrice >= 0.99 || yesPrice <= 0.01) {
-          winningOutcome = 'NO';
-          resolutionPrice = 1;  // No wins = $1 per No contract
-        } else {
-          winningOutcome = 'YES';
-          resolutionPrice = 0;  // Yes wins = $0 per No contract
-        }
-
-        return { resolved: true, winningOutcome, resolutionPrice };
+      if (!data.closed && !hasTerminalPrices) {
+        return { resolved: false };
       }
 
-      return { resolved: false };
+      if (prices.length < 2) {
+        return { resolved: false };
+      }
+
+      // Determine winner: NO wins if noPrice >= 0.99 or yesPrice <= 0.01
+      const noWins = prices[1] >= 0.99 || prices[0] <= 0.01;
+      return {
+        resolved: true,
+        winningOutcome: noWins ? 'NO' : 'YES',
+        resolutionPrice: noWins ? 1 : 0,
+      };
     } catch (error: any) {
-      // 404 might mean market doesn't exist or is very old
       if (error?.response?.status === 404) {
         return null;
       }
@@ -345,34 +331,38 @@ export class PositionMonitor {
     }
   }
 
-  /**
-   * Get current price from order book for any token (YES or NO).
-   * For selling, we look at bids (what buyers will pay).
-   * Uses WebSocket cache first, falls back to REST API if unavailable or stale.
-   */
-  private async getCurrentPrice(tokenId: string): Promise<number | null> {
-    // 1. Try WebSocket cache first (instant, no API call)
-    if (this.wsProvider && this.wsProvider.isConnected()) {
-      const cached = this.wsProvider.getPrice(tokenId);
-      if (cached && this.wsProvider.isDataFresh(tokenId, 60000)) {
-        // Use best bid for selling (what buyers will pay)
-        if (cached.bestBid) {
-          return cached.bestBid.price;
-        }
-        // Fallback to best ask if no bids
-        if (cached.bestAsk) {
-          return cached.bestAsk.price;
-        }
+  private parseOutcomePrices(outcomePrices: unknown): number[] {
+    if (!outcomePrices) return [];
+    if (typeof outcomePrices === 'string') {
+      try {
+        return JSON.parse(outcomePrices).map((p: unknown) => parseFloat(String(p)));
+      } catch {
+        return [];
       }
     }
-
-    // 2. Fallback to REST API (only if WebSocket unavailable/stale)
-    return this.getCurrentPriceRest(tokenId);
+    if (Array.isArray(outcomePrices)) {
+      return outcomePrices.map((p: unknown) => parseFloat(String(p)));
+    }
+    return [];
   }
 
   /**
-   * Get current price via REST API (fallback method).
+   * Get current bid price for selling a token.
+   * Uses WebSocket cache first, falls back to REST API.
    */
+  private async getCurrentPrice(tokenId: string): Promise<number | null> {
+    // Try WebSocket cache first
+    if (this.wsProvider?.isConnected()) {
+      const cached = this.wsProvider.getPrice(tokenId);
+      if (cached && this.wsProvider.isDataFresh(tokenId, 60000)) {
+        return cached.bestBid?.price ?? cached.bestAsk?.price ?? null;
+      }
+    }
+
+    // Fallback to REST API
+    return this.getCurrentPriceRest(tokenId);
+  }
+
   private async getCurrentPriceRest(tokenId: string): Promise<number | null> {
     try {
       const orderBook = await this.client.getOrderBook(tokenId);
@@ -381,13 +371,11 @@ export class PositionMonitor {
       const bids = orderBook.bids || [];
       const asks = orderBook.asks || [];
 
-      // Best bid (highest price buyers will pay)
       if (bids.length > 0) {
         const prices = bids.map((b: any) => parseFloat(String(b.price || 0)));
         return Math.max(...prices);
       }
 
-      // Fallback to best ask (lowest price sellers want)
       if (asks.length > 0) {
         const prices = asks.map((a: any) => parseFloat(String(a.price || 0)));
         return Math.min(...prices);
