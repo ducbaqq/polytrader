@@ -10,9 +10,9 @@
 
 import { randomUUID } from 'crypto';
 import axios from 'axios';
-import { PolymarketClient } from '../apiClient.js';
-import { StrategyConfig, getStrategy } from './config.js';
-import { Position, Trade, MonitorResult, PositionStatus, ScannedMarket, StrategyId, StrategyDefinition } from './types.js';
+import { PolymarketClient } from '../apiClient';
+import { StrategyConfig, getStrategy } from './config';
+import { Position, Trade, MonitorResult, PositionStatus, ScannedMarket, StrategyId, StrategyDefinition } from './types';
 import {
   getPortfolio,
   getOpenPositions,
@@ -23,8 +23,8 @@ import {
   updatePortfolioOnOpen,
   updatePortfolioOnClose,
   recordScannedMarket,
-} from './repository.js';
-import { WSPriceProvider } from './wsProvider.js';
+} from './repository';
+import { WSPriceProvider } from './wsProvider';
 
 const GAMMA_API_URL = 'https://gamma-api.polymarket.com';
 

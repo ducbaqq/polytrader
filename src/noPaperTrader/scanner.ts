@@ -6,13 +6,13 @@
  * and lets the monitors decide which side to trade based on their strategy.
  */
 
-import { PolymarketClient } from '../apiClient.js';
-import { GammaMarket } from '../types.js';
-import { StrategyConfig, detectCategoryFromQuestion } from './config.js';
-import { ScannedMarket, ScanResult } from './types.js';
-import { wasMarketScanned, recordScannedMarket } from './repository.js';
-import { printProgress, clearProgress } from './dashboard.js';
-import { WSPriceProvider } from './wsProvider.js';
+import { PolymarketClient } from '../apiClient';
+import { GammaMarket } from '../types';
+import { StrategyConfig, detectCategoryFromQuestion } from './config';
+import { ScannedMarket, ScanResult } from './types';
+import { wasMarketScanned, recordScannedMarket } from './repository';
+import { printProgress, clearProgress } from './dashboard';
+import { WSPriceProvider } from './wsProvider';
 
 export type ProgressCallback = (current: number, total: number, rejected: number, eligible: number) => void;
 
