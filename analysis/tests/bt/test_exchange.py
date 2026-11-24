@@ -130,13 +130,29 @@ def test_proportional_trade_decrease_not_double_counted():
 
 def test_trade_echo_not_double_counted():
     md = market("0.48:100", "0.52:100", trades=[(T0 + 1010, "Up", "SELL", 0.48, 30),
-                                                (T0 + 1020, "Up", "SELL", 0.47, 30)])
+                                                (T0 + 1150, "Up", "SELL", 0.47, 30)])
     for model in ("behind", "proportional"):
         ex = Exchange(md, ExchangeConfig(cancel_model=model))
         o = order(px=480, size=10, arrival=T0 + 1000)
         ex.submit(o)
         assert fills(ex.advance(T0 + 5000)) == []
         assert o.queue_ahead == 100 and o.filled == 0
+
+
+def test_echo_and_explain_defaults():
+    cfg = ExchangeConfig()
+    assert cfg.trade_echo_ms == 150 and cfg.trade_explain_ms == 150
+
+
+def test_proportional_decrease_explained_by_lagging_trade():
+    # Trade ts lags its level change by up to ~134 ms (p99): a drop 120 ms before the trade is the trade.
+    md = market("0.48:100", "0.52:100", changes=[(T0 + 1880, "BUY", 0.48, 70)],
+                trades=[(T0 + 2000, "Up", "SELL", 0.48, 30)])
+    ex = Exchange(md, ExchangeConfig(cancel_model="proportional"))
+    o = order(px=480, size=10)
+    ex.submit(o)
+    ex.advance(T0 + 5000)
+    assert o.queue_ahead == pytest.approx(70)
 
 
 def test_own_orders_fifo_and_share_trade_volume():
@@ -194,8 +210,8 @@ def test_ordering_equal_ms_pessimistic():
     ex.submit(o)
     ex.request_cancel(o.id, T0 + 2000)
     ev = ex.advance(T0 + 5000)
-    assert [e.kind for e in ev] == ["accepted", "fill", "rejected"]
-    assert ev[-1].reason.startswith("cancel rejected") and o.status == "filled"
+    assert [e.kind for e in ev] == ["accepted", "fill", "cancel_rejected"]
+    assert ev[-1].reason == "filled" and o.status == "filled"
 
 
 def test_arrival_after_same_ms_trade():
@@ -214,7 +230,8 @@ def test_cancel_before_arrival_is_rejected_and_order_rests():
     ex.submit(o)
     ex.request_cancel(o.id, T0 + 1000)  # same ms: the cancel is processed first
     ev = ex.advance(T0 + 5000)
-    assert [e.kind for e in ev] == ["rejected", "accepted"] and o.status == "open"
+    assert [e.kind for e in ev] == ["cancel_rejected", "accepted"] and o.status == "open"
+    assert ev[0].reason == "pending"
 
 
 def test_close_expires_open_orders():
@@ -226,7 +243,40 @@ def test_close_expires_open_orders():
     ev = ex.close(T0 + 300_000)
     assert [(e.kind, e.order_id, e.ts_ms) for e in ev] == [("expired", o.id, T0 + 300_000)]
     assert o.status == "cancelled"
-    assert ex.advance(T0 + 400_000) == []
+    assert ex.advance(T0 + 400_000) == [] and ex.close(T0 + 300_000) == []  # idempotent
+
+
+def test_no_fills_after_window_end():
+    end = T0 + 300_000
+    md = market("0.48:100", "0.52:100", trades=[(end + 5000, "Up", "SELL", 0.40, 100)])
+    ex = Exchange(md, ExchangeConfig())
+    o = order(px=480, size=10)
+    ex.submit(o)
+    ev = ex.advance(end + 10_000)  # no close()
+    assert [(e.kind, e.ts_ms, e.reason) for e in ev] == [("accepted", T0 + 1000, ""), ("expired", end, "window end")]
+    assert o.status == "cancelled" and o.filled == 0
+    assert ex.close(end + 10_000) == []
+
+
+def test_trade_at_window_end_not_matched():
+    end = T0 + 300_000
+    md = market("0.48:100", "0.52:100", trades=[(end - 1, "Up", "SELL", 0.47, 10), (end, "Up", "SELL", 0.40, 100)])
+    ex = Exchange(md, ExchangeConfig())
+    a, b = order(px=480, size=10), order(px=470, size=10)
+    ex.submit(a)
+    ex.submit(b)
+    ev = ex.close(end)
+    assert [(e.kind, e.order_id) for e in ev if e.kind in ("fill", "expired")] == [("fill", a.id), ("expired", b.id)]
+
+
+def test_close_cancels_orders_that_never_arrived():
+    md = market("0.48:100", "0.52:100")
+    ex = Exchange(md, ExchangeConfig())
+    o = order(px=480, size=10, arrival=T0 + 290_000)
+    ex.submit(o)
+    ev = ex.close(T0 + 200_000)
+    assert [(e.kind, e.reason) for e in ev] == [("cancelled", "never arrived")]
+    assert o.status == "cancelled" and o.reason == "never arrived"
 
 
 # ------------------------------------------------------------------------------------------ takers

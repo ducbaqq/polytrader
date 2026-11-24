@@ -16,7 +16,7 @@ The model is deliberately pessimistic (spec: "Queue and fill model"):
     our later orders, shrinks by every fill of ours (trade-throughs included), never by the
     volume that consumed `queue_ahead` (each order's `queue_ahead` counts other traders only).
   - **Trade echo:** trades with `ts_ms <= arrival_ms + trade_echo_ms` never touch the order (no queue
-    reduction, no fill): a trade's `ts_ms` lags the level change it caused by a few ms, so its
+    reduction, no fill): a trade's `ts_ms` lags the level change it caused (median 21 ms, p99 134 ms), so its
     volume may already be missing from the level we joined behind.
 - **Cancels by others.** `"behind"`: ignored. `"proportional"`: a level decrease not explained by
   trade volume at that level within `trade_explain_ms` after it removes `decrease * ahead / size_before`
@@ -26,6 +26,9 @@ The model is deliberately pessimistic (spec: "Queue and fill model"):
   is cancelled (IOC), a limit remainder rests.
 - **Impact** (liquidity we took) per (level side, px) stays removed until the recorded level reaches
   0 after our last take there, or more than `impact_reset_ms` after it.
+
+**Window end.** When the clock reaches `window_end_ms`, every open order expires there, whether or
+not the engine calls `close()`: trades with `ts_ms >= window_end_ms` never match.
 
 Same-ms order: recorded trades, then our cancels, then our arrivals. `advance` returns `ExEvent`s in
 exchange-time order; the engine adds report latency. Order ids are assigned by the caller.
@@ -95,7 +98,7 @@ class Fill:
 class ExEvent:
     ts_ms: int
     order_id: int
-    kind: Literal["accepted", "rejected", "cancelled", "fill", "expired"]
+    kind: Literal["accepted", "rejected", "cancelled", "cancel_rejected", "fill", "expired"]
     fill: Fill | None = None
     reason: str = ""
 
@@ -104,8 +107,9 @@ class ExEvent:
 class ExchangeConfig:
     cancel_model: Literal["behind", "proportional"] = "behind"
     impact_reset_ms: int = 5000
-    trade_echo_ms: int = 30
-    trade_explain_ms: int = 50  # proportional: a decrease followed by trade volume this soon is not a cancel
+    # Trade ts minus the ts of the level change it caused (BTC 5m): median 21 ms, p95 40 ms, p99 134 ms.
+    trade_echo_ms: int = 150
+    trade_explain_ms: int = 150  # proportional: a decrease followed by trade volume this soon is not a cancel
 
 
 @dataclass
@@ -133,6 +137,8 @@ class Exchange:
         self._n_open = 0
         self._impact: dict[tuple[str, int], list] = {}  # (level side, px) -> [shares taken, last take ms]
         self._lvl: dict[tuple[str, int], _LevelState] = {}
+        self._end = int(md.info.window_end_ms)
+        self._expired = False  # open orders were expired at the window end
 
     # ------------------------------------------------------------------------------------ requests
     def submit(self, order: Order) -> None:
@@ -168,6 +174,10 @@ class Exchange:
                 if ts[self._cur] <= lim:
                     self._cur = int(np.searchsorted(ts, lim, side="right"))
             tt = int(ts[self._cur]) if self._cur < n else _INF
+            if not self._expired and t_ms >= self._end and min(tt, nxt) >= self._end:
+                self._expire_open(self._end, out)  # before anything at or after the window end
+                self._expired = True
+                continue
             if min(tt, nxt) > t_ms:
                 break
             if tt <= nxt:
@@ -183,18 +193,23 @@ class Exchange:
         return out
 
     def close(self, t_ms: int) -> list[ExEvent]:
-        """Advance to the window end and expire everything still open or not yet arrived."""
+        """Advance to `t_ms` (normally the window end), expire what is still open and cancel orders
+        that have not arrived yet. Idempotent."""
         out = self.advance(t_ms)
-        left = [o for lv in self._book.values() for q in lv.values() for o in q]
-        left += [o for _, _, o in self._arrivals]
-        for o in sorted(left, key=lambda o: (o.arrival_ms, o.id)):
-            if o.status == "open":
-                self._remove(o)
-            o.status, o.reason = "cancelled", "window end"
-            out.append(ExEvent(t_ms, o.id, "expired", None, "window end"))
+        self._expire_open(t_ms, out)
+        for _, _, o in sorted(self._arrivals):
+            o.status, o.reason = "cancelled", "never arrived"
+            out.append(ExEvent(t_ms, o.id, "cancelled", None, "never arrived"))
         self._arrivals.clear()
         self._cancels.clear()
         return out
+
+    def _expire_open(self, t: int, out: list[ExEvent]) -> None:
+        left = [o for lv in self._book.values() for q in lv.values() for o in q]
+        for o in sorted(left, key=lambda o: (o.arrival_ms, o.id)):
+            self._remove(o)
+            o.status, o.reason = "cancelled", "window end"
+            out.append(ExEvent(t, o.id, "expired", None, "window end"))
 
     # ------------------------------------------------------------------------------------ arrivals
     def _reject_reason(self, o: Order) -> str:
@@ -264,8 +279,7 @@ class Exchange:
     def _on_cancel(self, oid: int, t: int, out: list[ExEvent]) -> None:
         o = self.orders.get(oid)
         if o is None or o.status != "open":
-            why = "unknown order" if o is None else o.status
-            out.append(ExEvent(t, oid, "rejected", None, f"cancel rejected: {why}"))
+            out.append(ExEvent(t, oid, "cancel_rejected", None, "unknown order" if o is None else o.status))
             return
         self._remove(o)
         o.status, o.reason = "cancelled", "cancel request"
@@ -288,6 +302,10 @@ class Exchange:
     def _take(self, o: Order, t: int, out: list[ExEvent]) -> None:
         """Walk the recorded book at arrival (minus our impact) up to the limit."""
         opp: Side = "SELL" if o.up_side == "BUY" else "BUY"
+        bids, asks = self.md.book_at(t, "ts", depth=1)  # most limits don't cross: check the top first
+        top = asks if opp == "SELL" else bids
+        if not top or ((top[0][0] > o.up_px) if opp == "SELL" else (top[0][0] < o.up_px)):
+            return
         bids, asks = self.md.book_at(t, "ts")
         took: list[tuple[int, float]] = []
         rem = o.remaining
@@ -330,6 +348,8 @@ class Exchange:
         if not lv:
             return
         ts, P, x = int(self._ts[i]), int(self._tpx[i]), float(self._tsize[i])
+        if ts >= self._end:  # unreachable (orders expire first); never match after the window
+            return
         echo = self.cfg.trade_echo_ms
         for px in sorted(lv, reverse=(rest == "BUY")):  # price priority for the taker
             if px == P:
