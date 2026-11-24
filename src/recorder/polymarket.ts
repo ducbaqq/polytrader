@@ -27,6 +27,8 @@ interface Market {
   done: boolean;          // unsubscribed after end
   resolved: boolean;
   tradesFetched: boolean;
+  failures?: number;      // consecutive REST failures while resolving (drives backoff)
+  nextTry?: number;       // don't retry before this time (ms)
 }
 
 const markets = new Map<string, Market>();          // slug -> market
@@ -118,10 +120,40 @@ function leadMs(m: Market): number {
 
 const LOOKAHEAD: Record<string, number> = { '5m': 4, '15m': 3, hourly: 3, '4h': 2, daily: 2 };
 
+class HttpError extends Error {
+  constructor(readonly status: number, message: string, readonly retryAfterS?: number) {
+    super(message);
+  }
+}
+
 async function getJson(url: string): Promise<any> {
   const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new Error(`${res.status} ${url.slice(0, 160)}`);
+  if (!res.ok) {
+    const ra = Number(res.headers.get('retry-after'));
+    throw new HttpError(res.status, `${res.status} ${url.slice(0, 160)}`, Number.isFinite(ra) && ra > 0 ? ra : undefined);
+  }
   return res.json();
+}
+
+/**
+ * Rate-limit handling per API host: on HTTP 429 stop calling that host for Retry-After seconds
+ * (at least 10, default 60) instead of retrying every market every 30 s, which only prolongs the limiting.
+ */
+type Api = 'gamma' | 'data';
+const pausedUntil: Record<Api, number> = { gamma: 0, data: 0 };
+const isPaused = (api: Api) => Date.now() < pausedUntil[api];
+function noteError(api: Api, e: unknown): void {
+  if (e instanceof HttpError && e.status === 429) {
+    const wasPaused = isPaused(api);
+    const pauseS = Math.max(e.retryAfterS ?? 60, 10); // Polymarket sends Retry-After: 1, too short to help
+    pausedUntil[api] = Date.now() + pauseS * 1000;
+    if (!wasPaused) logEvent('rate_limited', `pm_${api}`, `429, pausing ${pauseS} s: ${e.message.slice(4, 120)}`);
+  }
+}
+/** Per-market exponential backoff after a failure: 30 s, 60 s, 2 min ... capped at 10 min. */
+function backoff(m: Market): void {
+  m.failures = (m.failures ?? 0) + 1;
+  m.nextTry = Date.now() + Math.min(30_000 * 2 ** (m.failures - 1), 600_000);
 }
 
 function registerMarket(series: SeriesDef, event: any, now: number): void {
@@ -166,12 +198,14 @@ async function discover(): Promise<void> {
   const now = Date.now();
   const iso = new Date(now).toISOString();
   for (const s of SERIES) {
+    if (isPaused('gamma')) break;
     try {
       const events = await getJson(
         `${CONFIG.gammaUrl}/events?series_id=${s.id}&closed=false&end_date_min=${iso}&order=endDate&ascending=true&limit=${LOOKAHEAD[s.recurrence]}`,
       );
       for (const e of events) registerMarket(s, e, now);
     } catch (e) {
+      noteError('gamma', e);
       logEvent('rest_error', `pm_discover:${s.slug}`, (e as Error).message);
     }
   }
@@ -215,21 +249,21 @@ function updateSubscriptions(): void {
   }
 }
 
+/** All Data API trades of a market. Pages are buffered and written only once the download is
+ *  complete, so a retry after a mid-pagination failure can't write trades twice. */
 async function fetchTrades(m: Market): Promise<number> {
   let cursor: string | undefined;
-  let n = 0;
+  const rows: unknown[] = [];
   for (let page = 0; page < 200; page++) {
     const url = `${CONFIG.dataApiUrl}/v2/trades?condition_id=${m.conditionId}&limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
     const r = await getJson(url);
-    const now = Date.now();
-    for (const t of r.data || []) {
-      apiTrades({ slug: m.slug, ...t }, now);
-      n++;
-    }
+    for (const t of r.data || []) rows.push({ slug: m.slug, ...t });
     if (!r.pagination?.has_more || !r.pagination?.next_cursor) break;
     cursor = r.pagination.next_cursor;
   }
-  return n;
+  const now = Date.now();
+  for (const row of rows) apiTrades(row, now);
+  return rows.length;
 }
 
 let resolving = false;
@@ -239,9 +273,10 @@ async function resolveEnded(): Promise<void> {
   try {
     const now = Date.now();
     for (const m of markets.values()) {
-      if (now < m.end + 30_000) continue;
+      if (now < m.end + 30_000 || now < (m.nextTry ?? 0)) continue;
       try {
         if (!m.resolved) {
+          if (isPaused('gamma')) continue;
           const [e] = await getJson(`${CONFIG.gammaUrl}/events?slug=${m.slug}`);
           const mm = e?.markets?.[0];
           const prices = JSON.parse(mm?.outcomePrices || '[]').map(Number);
@@ -262,13 +297,17 @@ async function resolveEnded(): Promise<void> {
           m.resolved = true;
         }
         if (m.resolved && !m.tradesFetched && now > m.end + 120_000) {
+          if (isPaused('data')) continue;
           const n = await fetchTrades(m);
           bg('UPDATE rec_markets SET api_trades = $2, updated_at = now() WHERE slug = $1', [m.slug, n]);
           m.tradesFetched = true;
         }
         if (m.resolved && m.tradesFetched && m.done) markets.delete(m.slug); // keep tokenKey for late messages
+        m.failures = 0;
       } catch (e) {
-        logEvent('rest_error', `pm_resolve:${m.slug}`, (e as Error).message);
+        noteError(m.resolved ? 'data' : 'gamma', e);
+        backoff(m);
+        logEvent('rest_error', `pm_resolve:${m.slug}`, `${(e as Error).message} (attempt ${m.failures}, next in ${Math.round(((m.nextTry ?? 0) - Date.now()) / 1000)} s)`);
       }
     }
   } finally {

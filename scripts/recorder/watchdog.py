@@ -155,23 +155,26 @@ def check_db() -> dict:
         if kind in ("ws_close", "ws_stale", "ws_error") and int(age) > 300:
             out[f"conn:{source}"] = (f"Connection {source} down for {fmt_dur(int(age))}, not reconnecting", 1)
 
-    # Rate limiting / errors. Threshold = occurrences in 10 min that trigger an alert.
-    # Transient REST errors and depth gaps self-heal and are not alerted.
+    # Binance rate limiting is actionable (it escalates to IP bans): 418 at once, repeated 429s.
+    # Polymarket 429s are not alerted directly: the recorder pauses that API and backs off, and any
+    # lasting effect shows up in the coverage / unresolved / trades checks below.
+    for code, n, sample in sql("""SELECT substring(detail FROM '\\m(429|418)\\M'), count(*), max(left(source || ': ' || detail, 200))
+                                  FROM rec_events WHERE ts > now() - interval '10 minutes'
+                                    AND kind = 'rest_error' AND source LIKE 'bn_%' AND detail ~ '\\m(429|418)\\M'
+                                  GROUP BY 1"""):
+        if code == "418":
+            out["ipban"] = (f"BINANCE IP BAN (HTTP 418, {n}x in 10 min): {sample}", 1)
+        elif int(n) >= 5:
+            out["ratelimit"] = (f"Binance rate limiting ({n}x in 10 min): {sample}", 3)
+
+    # Format changes (Polymarket or Binance changed something) and recorder bugs.
     thresholds = {"parse_error": 20, "unhandled_rejection": 5, "pm_unexpected_outcomes": 1}
     for kind, n, sample in sql(f"""SELECT kind, count(*), max(left(source || ': ' || coalesce(detail, ''), 200))
                                   FROM rec_events WHERE ts > now() - interval '10 minutes'
-                                    AND (kind IN ({", ".join(f"'{k}'" for k in thresholds)})
-                                         OR detail ~ '\\m(429|418)\\M')
+                                    AND kind IN ({", ".join(f"'{k}'" for k in thresholds)})
                                   GROUP BY 1"""):
-        if "418" in sample:  # Binance IP ban: actionable immediately
-            out["ipban"] = (f"IP BANNED (HTTP 418, {n}x in 10 min): {sample}", 1)
-        elif "429" in sample and int(n) >= 20:
-            # Scattered 429s (often alongside 5xx when Polymarket's Data API struggles) are retried and
-            # self-heal; only heavy, sustained limiting is actionable. Lasting damage shows up in the
-            # "trades" / "coverage" checks.
-            out["ratelimit"] = (f"RATE LIMITED, sustained ({n}x in 10 min): {sample}", 10)
-        elif int(n) >= thresholds.get(kind, 10):
-            label = {"seq_gap": "Binance depth sequence gaps", "parse_error": "unparseable messages (format change?)"}.get(kind, kind)
+        if int(n) >= thresholds[kind]:
+            label = {"parse_error": "unparseable messages (format change?)"}.get(kind, kind)
             out[f"errors:{kind}"] = (f"{n}x {label} in 10 min, e.g. {sample}", 3)
 
     # Every series must have its current market subscribed.
@@ -230,14 +233,15 @@ def status_report() -> str:
                                           AND window_end < now() - interval '20 minutes'""")
         lines.append(f"Markets ended in 24h: {n}, resolved {resolved}, Data API trades {int(trades):,}")
         # code=1000 = Polymarket closing a single-market connection after the market resolved (expected)
-        (drops, rest, gaps, restarts), = sql("""SELECT
+        (drops, rest, gaps, restarts, limited), = sql("""SELECT
                 count(*) FILTER (WHERE kind IN ('ws_close', 'ws_stale') AND coalesce(detail, '') NOT LIKE 'code=1000%'),
                 count(*) FILTER (WHERE kind = 'rest_error'),
                 count(*) FILTER (WHERE kind = 'seq_gap'),
-                count(*) FILTER (WHERE kind = 'start')
+                count(*) FILTER (WHERE kind = 'start'),
+                count(*) FILTER (WHERE kind = 'rate_limited')
             FROM rec_events WHERE ts > now() - interval '24 hours'""")
-        lines.append(f"Self-healed in 24h: {drops} connection drops, {rest} REST errors, "
-                     f"{gaps} depth resyncs, {restarts} restarts")
+        lines.append(f"Self-healed in 24h: {drops} connection drops, {rest} REST errors, {limited} Polymarket "
+                     f"rate-limit pauses, {gaps} depth resyncs, {restarts} restarts")
         arch = sql("""SELECT to_char(ts, 'HH24:MI'), detail FROM rec_events WHERE kind = 'archive_ok'
                       ORDER BY ts DESC LIMIT 1""")
         if arch:

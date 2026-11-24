@@ -91,7 +91,10 @@ JSONL_SELECT: dict[str, str] = {
                d->>'pseudonym'                          AS pseudonym,
                d->>'transaction_hash'                   AS tx_hash,
                coalesce((d->>'backfill')::BOOLEAN, false) AS backfill
-        FROM src ORDER BY slug, ts_ms""",
+        FROM src
+        -- the recorder could write a page twice if a download failed mid-pagination (fixed 2026-11-24)
+        QUALIFY row_number() OVER (PARTITION BY slug, tx_hash, proxy_wallet, token_id, side, price, size, ts_ms ORDER BY recv_ms) = 1
+        ORDER BY slug, ts_ms""",
     "bn_depth_snapshot": """
         SELECT recv_ms,
                d->>'market'                             AS market,
