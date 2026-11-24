@@ -27,7 +27,8 @@ Code: `src/recorder/` · Verification: `scripts/recorder/verify.py` · Runs on t
   after their slot ends, so streams don't all rotate at the same instant.
 - zstd level 9. TSV files have a header row; every row starts with `recv_ms` (our receive time,
   ms since epoch, clock synced with chrony). JSONL rows are `{"recv_ms": ..., "d": <payload>}`.
-- Read with DuckDB, e.g.
+- For analysis use `polydata` ([analysis/README.md](../analysis/README.md)), which syncs these files,
+  converts them to Parquet and exposes them as DuckDB views. Raw files can also be read directly:
   `SELECT * FROM read_csv('raw/2026-11-23/*/bn_fut_bbo.*.tsv.zst', delim='\t', header=true)`
 
 ### Polymarket
@@ -126,5 +127,5 @@ systemctl start polytrader-archive                 # archive now (as root)
 python3 /opt/polytrader/app/verify.py /opt/polytrader/data --since-minutes 30
 ```
 
-Deploy: `npm run recorder:build`, rsync `dist/recorder package.json package-lock.json` to
+Deploy: `npm run build`, rsync `dist/recorder package.json package-lock.json` to
 `/opt/polytrader/app/`, `npm ci --omit=dev` if dependencies changed, restart the service.

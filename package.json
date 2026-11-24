@@ -1,66 +1,34 @@
 {
-  "name": "polymarket-discovery-bot",
+  "name": "polytrader",
   "version": "1.0.0",
-  "description": "Polymarket market discovery and opportunity detection bot",
-  "main": "dist/index.js",
+  "description": "Polymarket crypto Up/Down + Binance market data recorder and research toolkit",
+  "main": "dist/recorder/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "NODE_TLS_REJECT_UNAUTHORIZED=0 node --max-old-space-size=512 dist/index.js",
-    "dev": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts",
-    "scan-once": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts --scan-once",
-    "validate": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts validate",
-    "report": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts report",
-    "reset": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts reset",
-    "db-status": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/index.ts db-status",
-    "crypto": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/cryptoValidator.ts",
-    "crypto-test": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/cryptoValidator.ts test",
-    "crypto:build": "tsc",
-    "crypto:start": "NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/cryptoValidator.js",
-    "sell-trigger": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/priceTriggerWorker.ts",
-    "derive-key": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/deriveApiKey.ts",
-    "export-markets": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/exportSettledMarkets.ts",
-    "alpha-analysis": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/exportAlphaAnalysis.ts",
-    "no-trader": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts",
-    "no-trader:start": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts start",
-    "no-trader:status": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts status",
-    "no-trader:report": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts report",
-    "no-trader:reset": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts reset --force",
-    "no-trader:scan": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts scan",
-    "no-trader:monitor": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts monitor",
-    "no-trader:scan-once": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts scan-once",
-    "no-trader:monitor-once": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts monitor-once",
-    "no-trader:build": "tsc",
-    "no-trader:prod": "NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/noPaperTraderCli.js start",
-    "recorder:build": "tsc -p tsconfig.recorder.json",
     "recorder": "node dist/recorder/index.js",
     "recorder:dev": "ts-node src/recorder/index.ts"
   },
   "keywords": [
     "polymarket",
-    "trading",
-    "bot",
-    "arbitrage"
+    "binance",
+    "market-data",
+    "recorder"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@polymarket/clob-client": "^4.0.0",
-    "axios": "^1.6.0",
-    "chalk": "^4.1.2",
-    "cli-table3": "^0.6.3",
-    "commander": "^11.1.0",
     "dotenv": "^16.3.1",
-    "ethers": "^5.7.2",
     "pg": "^8.16.3",
-    "uuid": "^13.0.0",
     "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/pg": "^8.16.0",
-    "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

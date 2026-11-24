@@ -1,38 +1,26 @@
-# Environment
+# Secrets
 .env
 .env.local
 .mcp.json
 
-# Dependencies
+# Node
 node_modules/
-
-# Build output
 dist/
+*.tsbuildinfo
 
-# Data (keep structure, ignore contents)
-data/snapshots/*.json
-data/snapshots/*.json.gz
-data/opportunities/*.json
-data/opportunities/*.json.gz
+# Recorder data / analysis store (synced from Spaces, never committed)
+/data/
 
-# Logs (keep structure, ignore contents)
-logs/*.log
-logs/errors/*.json
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
 
-# IDE
+# IDE / OS
 .idea/
 .vscode/
 *.swp
-*.swo
 *~
-
-# OS
 .DS_Store
-Thumbs.db
-
-# TypeScript
-*.tsbuildinfo
-
-# Testing
-coverage/
-.nyc_output/
