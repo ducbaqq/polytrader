@@ -63,7 +63,7 @@ The fee in USDC is symmetric around 0.5. It's largest at 0.5 and tends to 0 near
 - `fee_rate_bps` in the CLOB `last_trade_price` messages (`pm_trade`) is always 0. Ignore it.
 - Fills routed through third-party apps carry the app's **builder fee** on top: observed 1 bp, 50 bp
   and 400 bp of notional. That's why some fees in on-chain data or `pm_api_trades` look too high.
-  Orders we place directly don't pay it.
+  Orders without a builder code don't pay it.
 - Fees are set by the protocol at match time and can change. Polymarket has run fee holidays and
   per-category changes. Re-run `uv run python tools/verify_fees.py` after any announcement, and keep
   `fee_rate` per market (from `markets`) rather than hard-coding it.
