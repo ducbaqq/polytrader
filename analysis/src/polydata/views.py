@@ -9,6 +9,7 @@ import duckdb
 from . import schema
 from .fees import SQL_MACRO as FEE_MACRO
 from .config import paths
+from .bt.splits import SEALED_SQL_FILTER, record_look, sealed_filter
 
 # One row per market: static fields from discovery (`pm_market_meta`), result from `pm_resolution`.
 # Either side may be missing (market discovered but not yet resolved, or vice versa during the
@@ -106,28 +107,40 @@ DERIVED: dict[str, tuple[list[str], str]] = {
 }
 
 
-def _stream_view(name: str, glob: str) -> str:
+def _stream_view(name: str, glob: str, include_sealed: bool = False) -> str:
     extra = ""
     if name in ("pm_book", "pm_price_change", "pm_best_bid_ask", "pm_trade"):
         extra = ", asset_slug(asset) AS slug, asset_outcome(asset) AS outcome"
     return (
         f"CREATE OR REPLACE VIEW {name} AS SELECT *{extra} "
         f"FROM read_parquet('{glob}', hive_partitioning=true, hive_types={{'date': DATE}})"
+        + ("" if include_sealed else f" WHERE {SEALED_SQL_FILTER}")
     )
 
 
-def create_views(con: duckdb.DuckDBPyConnection, parquet: Path | None = None) -> list[str]:
-    """(Re)create macros and one view per available stream. Returns the view names."""
+def _markets_view(root: str, include_sealed: bool) -> str:
+    where = ""
+    if not include_sealed:
+        # A market is hidden if its window starts or ends on a sealed day (NULL end: not hidden by it).
+        start, end = ("CAST(timezone('UTC', window_start) AS DATE)", "CAST(timezone('UTC', window_end) AS DATE)")
+        where = f" WHERE {sealed_filter(start)} AND ({end} IS NULL OR {sealed_filter(end)})"
+    return f"CREATE OR REPLACE VIEW markets AS SELECT * FROM read_parquet('{root}/markets.parquet'){where}"
+
+
+def create_views(con: duckdb.DuckDBPyConnection, parquet: Path | None = None, include_sealed: bool = False) -> list[str]:
+    """(Re)create macros and one view per available stream. Returns the view names.
+
+    Sealed days (see `polydata.bt.splits`) are left out of every view unless `include_sealed`."""
     root = (parquet or paths().parquet).as_posix()
     con.execute(MACROS)
     con.execute(FEE_MACRO)
     names: list[str] = []
     for stream in list(schema.TSV) + schema.JSONL:
         if list(Path(root, stream).glob("*/*.parquet")):
-            con.execute(_stream_view(stream, f"{root}/{stream}/*/*.parquet"))
+            con.execute(_stream_view(stream, f"{root}/{stream}/*/*.parquet", include_sealed))
             names.append(stream)
     if Path(root, "markets.parquet").exists():
-        con.execute(f"CREATE OR REPLACE VIEW markets AS SELECT * FROM read_parquet('{root}/markets.parquet')")
+        con.execute(_markets_view(root, include_sealed))
         names.append("markets")
     for view, (needs, sql) in DERIVED.items():
         if all(n in names for n in needs):
@@ -136,15 +149,23 @@ def create_views(con: duckdb.DuckDBPyConnection, parquet: Path | None = None) ->
     return names
 
 
-def connect(database: str | Path = ":memory:", read_only: bool = False, **config) -> duckdb.DuckDBPyConnection:
+def connect(database: str | Path = ":memory:", read_only: bool = False, include_sealed: bool = False,
+            purpose: str | None = None, **config) -> duckdb.DuckDBPyConnection:
     """DuckDB connection with every stream available as a view, e.g.
 
         import polydata
         con = polydata.connect()
         con.sql("SELECT coin, count(*) FROM markets GROUP BY 1").show()
+
+    Sealed test days are hidden. `include_sealed=True` needs a `purpose` and is recorded as a look
+    (purpose "health" for data-health checks).
     """
+    if include_sealed:
+        if not purpose:
+            raise ValueError("include_sealed=True requires a purpose (it is recorded as a look at sealed data)")
+        record_look(purpose, {"via": "polydata.connect"})
     con = duckdb.connect(str(database), read_only=read_only, config=config)
     con.execute("SET TimeZone = 'UTC'")
     if not read_only:
-        create_views(con)
+        create_views(con, include_sealed=include_sealed)
     return con
