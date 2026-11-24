@@ -578,7 +578,11 @@ class _Replay:
         marks = {}
         for slug in self.pf.held_slugs():
             m = self.by_slug[slug]
-            marks[slug] = _up_mid(m.md.top_at(t, "recv")) if m.md is not None else m.last_mid
+            if m.md is not None:
+                mid = _up_mid(m.md.top_at(t, "recv"))
+                if mid == mid:  # a one-sided book has no mid: keep the last finite one
+                    m.last_mid = mid
+            marks[slug] = m.last_mid
         locked = sum(self.pf.locked.values())
         free = sum(self.pf.cash.values()) - locked  # unlocked cash, profits above the budget included
         pend = self.pf.pending()
@@ -589,7 +593,9 @@ class _Replay:
         for ev in m.ex.close(t):
             self._on_ex(m, ev)
         self.live.pop(m.mi, None)
-        m.last_mid = _up_mid(m.md.top_at(t, "recv"))
+        mid = _up_mid(m.md.top_at(t, "recv"))
+        if mid == mid:
+            m.last_mid = mid
         m.closed = True
         self.open.pop(m.info.slug, None)
         if m in self.loaded:

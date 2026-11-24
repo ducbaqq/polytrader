@@ -71,4 +71,20 @@ def test_join_best_btc_5m_one_hour_no_lookahead():
     assert not s.bad
     assert s.reports and all(now == ts + 126 for now, ts in s.reports)
     f = res.fills
-    assert f.mid_at_fill.notna().all() and f.settle_value.isin([0.0, 1.0]).all()
+    assert len(f) and f.settle_value.isin([0.0, 1.0]).all()
+    # a one-sided book has no mid (NaN by design); anything else must have one
+    nan = f[f.mid_at_fill.isna()]
+    if len(nan):
+        from polydata.bt.marketdata import load_coin
+        from polydata.bt.types import NO_ASK_PX, NO_BID_PX
+        from polydata.views import connect
+
+        con = connect()
+        try:
+            mds = load_coin(con, "btc", ["5m"], START_MS - HOUR, START_MS + 2 * HOUR, slugs=set(nan.slug))
+        finally:
+            con.close()
+        for r in nan.itertuples():
+            top = mds[r.slug].top_at(int(r.ts_ms), "ts")
+            assert top.bid_px == NO_BID_PX or top.ask_px == NO_ASK_PX, (r.slug, r.ts_ms, top)
+    print(f"  fills without a mid (one-sided book): {len(nan)} of {len(f)}")

@@ -622,3 +622,21 @@ def test_fair_value_uses_computed_price_to_beat_when_official_is_none():
     assert late and all(k is not None and v is not None and 0 < v < 1 for k, v in late)
     assert all(v is None for t, k, v in s.vals if k is None)
 
+
+def test_equity_marks_hold_last_finite_mid_through_one_sided_book():
+    # the bid side empties for 20 s while we hold 10 Up: the position keeps its last two-sided mid (0.50),
+    # it is not valued at 0
+    md = mdata(M1, changes=[(T0 + 20_000, "BUY", 0.48, 0, 0.0, 0.52), (T0 + 40_000, "BUY", 0.48, 100, 0.48, 0.52)])
+
+    class Buy(Strategy):
+        name = "buy-hold-test"
+
+        def on_market_open(self, ctx, market):
+            ctx.take(market.slug, "Up", "BUY", 10, 0.99)
+
+    res = engine.run_coin(cfg(capital=100.0), "btc", lambda: make_con([M1], T0 - 1_200_000, T0 + 500_000),
+                          loader=loader_for({M1.slug: md}), strategy=Buy(), rec_events=NO_EVENTS)
+    eq = res.equity
+    one_sided = eq[(eq.ms > T0 + 21_000) & (eq.ms < T0 + 40_000)]
+    assert len(one_sided) > 5
+    assert one_sided.mtm.tolist() == pytest.approx([5.0] * len(one_sided))
