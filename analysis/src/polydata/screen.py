@@ -11,7 +11,7 @@ Pessimistic fills: a market buy at the ask `latency_ms` after t (latency 300 or 
 the snapshots carry), plus `taker_fee` on entry. Visible depth is NOT checked (snapshots have no sizes):
 every signal fills in full at `size` shares (default 10) unless the rule gives a size. Exit is resolution
 (`exit="hold"`) or a taker sale at the bid on the first snapshot row at or after t + 2 s (`exit="bid"`,
-second fee; held to resolution if no such row or no bid). The fee exponent is 1, as for every market today.
+second fee; held to resolution if that row is later than t + 10 s, or there is no bid). The fee exponent is 1, as for every market today.
 
 Uncertainty: block bootstrap over 15-minute blocks of window start (`window_start_ms // 900000`), 2000
 resamples, seed 0. Blocks are all blocks of the group's (non-voided) markets, with or without trades.
@@ -41,6 +41,7 @@ LATENCIES = (300, 1000)
 BLOCK_MS = 15 * 60_000
 N_BOOT = 2000
 EXIT_DELAY_MS = 2000
+MAX_EXIT_WAIT_MS = 10_000  # a bid exit whose first row is later than t + 10 s is held to resolution instead
 DEFAULT_SIZE = 10.0
 NOTE_DEPTH = "visible depth is not checked: every signal fills in full at its size"
 
@@ -65,10 +66,11 @@ def register(s: Screen) -> Screen:
 def endgame_favourite(snap: pd.DataFrame, lo: float = 0.80, hi: float = 0.99, max_tau_s: float = 60,
                       max_spread: float = 0.10) -> pd.DataFrame:
     """Buy the favourite (the token with the higher ask) when its ask is in [lo, hi], tau <= max_tau_s and the
-    Up spread <= max_spread. The first signal per market only. Uses only columns known at t."""
+    spread <= max_spread on the favourite's own token. The first signal per market only. Uses only columns known at t."""
     fav_up = snap.up_ask >= snap.dn_ask
     fav_ask = np.where(fav_up, snap.up_ask, snap.dn_ask)
-    ok = ((fav_ask >= lo) & (fav_ask <= hi) & (snap.tau_s <= max_tau_s) & ((snap.up_ask - snap.up_bid) <= max_spread))
+    spread = np.where(fav_up, snap.up_ask - snap.up_bid, snap.dn_ask - snap.dn_bid)  # the favourite's own token
+    ok = ((fav_ask >= lo) & (fav_ask <= hi) & (snap.tau_s <= max_tau_s) & (spread <= max_spread))
     s = snap[ok].assign(token=np.where(fav_up[ok], "Up", "Down"))
     s = s.sort_values(["slug", "t_ms"], kind="stable").drop_duplicates("slug")
     return s[["slug", "t_ms", "token"]].reset_index(drop=True)
@@ -105,7 +107,8 @@ def load_snapshots(rebuild: bool | None = None) -> tuple[pd.DataFrame, float | N
     import time
 
     f = snapshots_path()
-    newest = max((p.stat().st_mtime for p in paths().parquet.glob("**/*.parquet")), default=0.0)
+    newest = max((p.stat().st_mtime for p in paths().parquet.glob("**/*.parquet")
+                 if p.parent.name.startswith("date=") and _kind(p.parent.name[5:]) != "sealed"), default=0.0)
     secs = None
     if rebuild or (rebuild is None and (not f.exists() or f.stat().st_mtime < newest)):
         from .research import snapshots
@@ -158,7 +161,7 @@ def fills(snap: pd.DataFrame, signals: pd.DataFrame, latency_ms: int = 300, exit
     if exit == "bid" and len(f):
         grid = snap[["slug", "t_ms", "up_bid", "dn_bid"]].rename(columns={"t_ms": "exit_t", "up_bid": "xu", "dn_bid": "xd"})
         left = f.assign(exit_t=f.t_ms + EXIT_DELAY_MS, _i=np.arange(len(f))).sort_values("exit_t")
-        m = pd.merge_asof(left, grid.sort_values("exit_t"), on="exit_t", by="slug", direction="forward")
+        m = pd.merge_asof(left, grid.sort_values("exit_t"), on="exit_t", by="slug", direction="forward", tolerance=MAX_EXIT_WAIT_MS - EXIT_DELAY_MS)
         m = m.sort_values("_i")
         bid = np.where(m.token == "Up", m.xu, m.xd).astype(float)
         ok = np.isfinite(bid) & (bid > 0) & (bid < 1)
@@ -259,7 +262,7 @@ def run(name: str, latency_ms: int = 300, exit: str = "hold", size: float = DEFA
     from .bt.metrics import clean
 
     config = {"screen": name, "strategy": name, "latency_ms": latency_ms, "order_latency_ms": latency_ms, "exit": exit,
-              "size": size, "coins": sorted(set(snap.coin)), "timeframes": sorted(set(snap.timeframe)),
+              "size": size, "fee_exponent": 1, "coins": sorted(set(snap.coin)), "timeframes": sorted(set(snap.timeframe)),
               "tags": list(tags or []), "block_ms": BLOCK_MS, "n_boot": N_BOOT, "seed": 0}
     try:
         fp = runs.data_fingerprint(days)

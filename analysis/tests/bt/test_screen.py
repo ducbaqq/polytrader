@@ -175,3 +175,40 @@ def test_exit_bid_many_trades_keep_row_alignment():
     t = int(a.t_ms.iloc[0])
     r = screen.fills(s, pd.DataFrame([sig("b", t), sig("a", t)]), exit="bid").set_index("slug")
     assert r.loc["a", "exit_px"] == pytest.approx(0.20) and r.loc["b", "exit_px"] == pytest.approx(0.60)
+
+
+def test_spread_gate_uses_favourites_own_token():
+    # Down is the favourite (ask 0.87): wide Down spread must block even though the Up spread is narrow
+    s = pd.DataFrame(snap_rows("w", D_TRAIN, taus=(30,)) + snap_rows("n", D_TRAIN + 300_000, taus=(30,)))
+    s["up_ask"], s["up_bid"], s["dn_ask"], s["dn_bid"] = 0.15, 0.13, 0.87, 0.85
+    s.loc[s.slug == "w", "dn_bid"] = 0.60  # Down spread 0.27
+    out = screen.REGISTRY["endgame-favourite"].rule(s)
+    assert list(out.slug) == ["n"]
+    # wide Up spread but a tight Down favourite still signals
+    s.loc[s.slug == "w", ["dn_bid", "up_bid"]] = [0.85, 0.01]
+    assert set(screen.REGISTRY["endgame-favourite"].rule(s).slug) == {"w", "n"}
+
+
+def test_exit_bid_capped_at_10s_holds_to_resolution():
+    s = pd.DataFrame(snap_rows("m1", D_TRAIN + 1000, taus=(100, 80, 70)))  # next row is 20 s later
+    s["up_bid"] = 0.30
+    r = screen.fills(s, pd.DataFrame([sig("m1", int(s.t_ms.iloc[0]))]), exit="bid")
+    assert r.exit_px.iloc[0] == 1.0 and r.exit_fee.iloc[0] == 0.0
+
+
+def test_staleness_ignores_sealed_day_parquet(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setenv("POLYDATA_DIR", str(tmp_path))
+    f = tmp_path / "research" / "snapshots.parquet"
+    f.parent.mkdir(parents=True)
+    pd.DataFrame(snap_rows("a", D_TRAIN)).to_parquet(f)
+    old = tmp_path / "parquet" / "x" / "date=2026-11-27"
+    new = tmp_path / "parquet" / "x" / "date=2026-11-25"  # sealed
+    old.mkdir(parents=True), new.mkdir(parents=True)
+    (old / "1.parquet").write_text("")
+    (new / "1.parquet").write_text("")
+    os.utime(old / "1.parquet", (1, 1))
+    os.utime(f, (100, 100))
+    # the sealed-day file is newer than the snapshots but must not trigger a rebuild
+    _, secs = screen.load_snapshots()
+    assert secs is None
