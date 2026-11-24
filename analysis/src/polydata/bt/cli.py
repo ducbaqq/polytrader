@@ -14,8 +14,10 @@ from pathlib import Path
 
 import yaml
 
-from . import runs
+from . import metrics as bt_metrics
+from . import report, runs
 from .config import RunConfig
+from .splits import day_kind
 
 _FIELDS = set(RunConfig.__dataclass_fields__)
 
@@ -107,16 +109,24 @@ def execute(cfg: RunConfig, kind: str = "run", latency_sweep: tuple[int, ...] | 
                 sweep[str(ms)] = _brief(runs.summary(engine.run(c2, con_factory, workers), c2))
         metrics["latency_sweep"] = dict(sorted(sweep.items(), key=lambda kv: int(kv[0])))
     days = metrics["days"]
+    m = bt_metrics.compute(res, cfg, lambda d: day_kind(date.fromisoformat(d)))
+    m["latency_sweep"] = metrics.get("latency_sweep")
+    v = bt_metrics.verdict(m, "final" if kind == "final" else "provisional", (extra_prov or {}).get("final_looks", 0),
+                           runs.MIN_USD_PER_DAY)
+    e = m["eval"] or m
+    metrics.update(bt_metrics.clean({"metrics": m, "verdict": v["label"], "verdict_detail": v, "t_block": e["block_pnl_t"]}))
     prov = runs.provenance(cls, cfg.params, days, kind, elapsed_s=round(res.elapsed_s, 1), **(extra_prov or {}))
     d = runs.new_run_dir(cls.family or "unfiled", cls.name, datetime.now(timezone.utc))
     runs.write_run(d, cfg, res, metrics, prov)
     if rebuild:
         runs.rebuild_index()
+        report.render_run(d)
     return d, metrics
 
 
 def _print_run(d: Path, m: dict) -> None:
     print(f"run folder: {d}")
+    print(f"  verdict: {m['verdict']}; report: {d / 'report.html'}")
     print(f"  P&L ${m['pnl_usd']:.2f} over {m['n_days']} days (${m['usd_per_day']:.2f}/day), {m['orders']} orders, "
           f"{m['fills']} fills, {m['voided']}/{m['markets']} markets voided")
     for ms, s in m.get("latency_sweep", {}).items():
@@ -179,6 +189,8 @@ def cmd_sweep(a) -> None:
         with ProcessPoolExecutor(a.jobs) as ex:
             results = list(ex.map(_sweep_point, jobs))
     runs.rebuild_index()
+    for path, _ in results:  # now the siblings are in the index: render each run's robustness grid
+        report.render_run(Path(path))
     rows = sorted(zip(points, results), key=lambda r: -r[1][1]["usd_per_day"])
     for (combo, _), (path, m) in rows:
         label = " ".join(f"{k}={v}" for k, v in combo)
