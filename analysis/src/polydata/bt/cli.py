@@ -235,6 +235,22 @@ def cmd_runs(a) -> None:
     print(f"({len(df)} runs; folders under {runs.runs_dir()})", file=sys.stderr)
 
 
+def cmd_screen(a) -> None:
+    from .. import screen
+
+    if a.name not in screen.REGISTRY:
+        _fail(f"unknown screen {a.name!r}; known: {', '.join(sorted(screen.REGISTRY))}")
+    d, res = screen.run(a.name, a.latency_ms, a.exit, a.size, a.coins, a.timeframes)
+    o = res["metrics"]["overall"]
+    print(f"run folder: {d}")
+    print(f"  verdict: {res['verdict']} ({res['verdict_note']})")
+    c = o["cents_per_share"]
+    print(f"  overall: {o['n_trades']} trades over {o['n_days']} days, " + (f"{c:.2f} c/share CI {o['ci_cents']}, ${o['usd_per_day']:.2f}/day" if c is not None else "no trades"))
+    for k, v in res["metrics"]["by_day_kind"].items():
+        print(f"  {k}: {v['n_trades']} trades, " + (f"{v['cents_per_share']:.2f} c/share CI {v['ci_cents']}" if v["cents_per_share"] is not None else "none"))
+    print(f"  note: {res['metrics']['note']}")
+
+
 def cmd_push(a) -> None:
     print(f"uploaded {runs.push()} files")
 
@@ -276,6 +292,15 @@ def register(bt: argparse.ArgumentParser) -> None:
     sp.add_argument("--search", metavar="TEXT")
     sp.add_argument("--passed", action="store_true")
     sp.set_defaults(fn=cmd_runs)
+
+    sp = sub.add_parser("screen", help="screen a taker idea over snapshots in seconds (reject or promote)")
+    sp.add_argument("name", metavar="NAME")
+    sp.add_argument("--latency-ms", type=int, default=300, choices=[300, 1000])
+    sp.add_argument("--exit", choices=["hold", "bid"], default="hold")
+    sp.add_argument("--size", type=float, default=10.0, help="shares per signal (depth is not checked)")
+    sp.add_argument("--coins", nargs="+")
+    sp.add_argument("--timeframes", nargs="+")
+    sp.set_defaults(fn=cmd_screen)
 
     sub.add_parser("push", help="upload data/runs to the bucket, rebuild the index").set_defaults(fn=cmd_push)
     sub.add_parser("pull", help="download runs from the bucket, rebuild the index").set_defaults(fn=cmd_pull)
