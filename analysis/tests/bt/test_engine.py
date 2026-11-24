@@ -99,9 +99,14 @@ M1 = minfo(T0)
 
 
 def market_one() -> MarketData:
-    return mdata(M1, changes=[(T0 + 5_000, "BUY", 0.49, 50, 0.49, 0.52),
+    # each trade at a level price is echoed by the level decrease it caused, 10 ms or less before it
+    return mdata(M1, changes=[(T0 + 1_995, "SELL", 0.52, 97, 0.48, 0.52),
+                              (T0 + 5_000, "BUY", 0.49, 50, 0.49, 0.52),
                               (T0 + 9_000, "BUY", 0.49, 0, 0.48, 0.52),
-                              (T0 + 30_000, "SELL", 0.51, 40, 0.48, 0.51)],
+                              (T0 + 15_000, "BUY", 0.48, 200, 0.48, 0.52),
+                              (T0 + 19_990, "BUY", 0.48, 50, 0.48, 0.52),
+                              (T0 + 30_000, "SELL", 0.51, 40, 0.48, 0.51),
+                              (T0 + 39_995, "BUY", 0.48, 20, 0.48, 0.51)],
                  trades=[(T0 + 2_000, "Up", "BUY", 0.52, 3),
                          (T0 + 20_000, "Up", "SELL", 0.48, 150),
                          (T0 + 40_000, "Down", "BUY", 0.52, 30)])
@@ -579,7 +584,9 @@ def test_cash_capped_at_budget_after_a_win():
 
 
 def test_mid_10s_nan_within_10s_of_window_end():
-    md = mdata(M1, trades=[(M1.window_end_ms - 5_000, "Up", "SELL", 0.48, 500)])
+    end = M1.window_end_ms
+    md = mdata(M1, changes=[(end - 6_000, "BUY", 0.48, 600, 0.48, 0.52), (end - 5_010, "BUY", 0.48, 100, 0.48, 0.52)],
+               trades=[(end - 5_000, "Up", "SELL", 0.48, 500)])
 
     class Bid(Strategy):
         name = "bid-late-test"
@@ -614,3 +621,4 @@ def test_fair_value_uses_computed_price_to_beat_when_official_is_none():
     late = [(k, v) for t, k, v in s.vals if T0 + 105_000 < t < m.window_end_ms]
     assert late and all(k is not None and v is not None and 0 < v < 1 for k, v in late)
     assert all(v is None for t, k, v in s.vals if k is None)
+

@@ -144,7 +144,10 @@ def test_always_cross_loses_spread_plus_fees():
 
 
 def test_join_best_quotes_both_sides_and_settles():
-    r = Raw().market(M1, trades=[(T0 + 20_000, "Up", "SELL", 0.48, 150), (T0 + 40_000, "Up", "BUY", 0.52, 130)])
+    ch = [(T0 + 10_000, "BUY", 0.48, 200, 0.48, 0.52), (T0 + 19_990, "BUY", 0.48, 50, 0.48, 0.52),
+          (T0 + 30_000, "SELL", 0.52, 230, 0.48, 0.52), (T0 + 39_990, "SELL", 0.52, 100, 0.48, 0.52)]
+    r = Raw().market(M1, changes=ch,
+                     trades=[(T0 + 20_000, "Up", "SELL", 0.48, 150), (T0 + 40_000, "Up", "BUY", 0.52, 130)])
     res = run(r, "join-best")
     o = res.orders
     placed = o[o.event == "placed"]
@@ -238,7 +241,9 @@ def _jb_raw() -> Raw:
               (T0 + 31_000, "Down", "SELL", 0.47, 40),  # = Up BUY 0.53: through again, the rest 2
               (T0 + 80_000, "Up", "SELL", 0.46, 2),  # through our new bid (rejoined at 0.48): 2
               ]
-    ch = [(T0 + 50_000, "BUY", 0.48, 30, 0.48, 0.52)]
+    # each at-price trade is echoed by the level decrease it caused (the at-price cap)
+    ch = [(T0 + 19_995, "BUY", 0.48, 40, 0.48, 0.52), (T0 + 22_000, "BUY", 0.48, 60, 0.48, 0.52),
+          (T0 + 24_990, "BUY", 0.48, 10, 0.48, 0.52), (T0 + 50_000, "BUY", 0.48, 30, 0.48, 0.52)]
     return Raw().market(M1, trades=trades, changes=ch)
 
 
@@ -249,6 +254,39 @@ def test_fill_support_rederivation_matches_exchange():
     chk = validate.check_fill_support(r.con(), res, order_latency_ms=200)
     assert chk["passed"], chk
     assert chk["sim_fills"] == chk["ref_fills"] and chk["mismatches"] == 0 and chk["ahead_mismatches"] == 0
+
+
+def test_fill_support_rederivation_exercises_queue_fills():
+    res = run(_jb_raw(), "join-best")
+    f = res.fills
+    # the T0+25_000 trade fills our bid at its own price after eating the 40 still ahead
+    assert ((f.trade_ts_ms == T0 + 25_000) & (f["size"] == 5) & (f.queue_ahead_at_fill == 0)).any()
+
+
+def _sweep_raw() -> Raw:
+    # Our bid joins 0.48 behind 10. A new 0.49 bid appears; before our cancel arrives a taker SELL sweeps the
+    # 50 at 0.49 and 5 at 0.48, printed as ONE row at 0.48 for 55. Later a trade-through fills us.
+    ch = [(T0 + 20_000, "BUY", 0.49, 50, 0.49, 0.52), (T0 + 20_040, "BUY", 0.49, 0, 0.48, 0.52),
+          (T0 + 20_040, "BUY", 0.48, 5, 0.48, 0.52)]
+    trades = [(T0 + 20_050, "Up", "SELL", 0.48, 55), (T0 + 40_000, "Up", "SELL", 0.46, 10)]
+    return Raw().market(M1, bids="0.48:10", trades=trades, changes=ch)
+
+
+def test_fill_support_applies_the_at_price_cap(monkeypatch):
+    r = _sweep_raw()
+    res = run(r, "join-best")
+    assert not (res.fills.trade_ts_ms == T0 + 20_050).any()  # only 5 traded at 0.48: the 10 ahead absorb it
+    chk = validate.check_fill_support(r.con(), res, order_latency_ms=200)
+    assert chk["passed"], chk
+    # a simulator without the cap fills us from the sweep: the re-derivation must disagree
+    from polydata.bt.exchange import Exchange
+
+    monkeypatch.setattr(Exchange, "_level_decrease", lambda self, side, px, t0, t1: float("inf"))
+    r = _sweep_raw()
+    res = run(r, "join-best")
+    assert (res.fills.trade_ts_ms == T0 + 20_050).any()
+    chk = validate.check_fill_support(r.con(), res, order_latency_ms=200)
+    assert not chk["passed"] and chk["mismatches"] >= 1, chk
 
 
 def test_fill_support_detects_unsupported_fill():
@@ -327,17 +365,42 @@ def test_open_time_checked_against_the_raw_snapshots():
     assert not chk["passed"] and chk["failures"][0]["why"] == "open time"
 
 
-def test_sim_version_covers_fees(monkeypatch, tmp_path):
+def _fake_tree(V, tmp_path):
+    fake = tmp_path / "polydata"
+    (fake / "bt" / "strategies").mkdir(parents=True)
+    for f in V.BT_DIR.parent.glob("*.py"):
+        (fake / f.name).write_bytes(f.read_bytes())
+    for f in V.BT_DIR.glob("*.py"):
+        (fake / "bt" / f.name).write_bytes(f.read_bytes())
+    for f in (V.BT_DIR / "strategies").glob("*.py"):
+        (fake / "bt" / "strategies" / f.name).write_bytes(f.read_bytes())
+    return fake
+
+
+@pytest.mark.parametrize("rel", ["fees.py", "views.py", "build.py", "schema.py", "bt/strategies/sanity.py",
+                                 "bt/exchange.py", "bt/engine.py"])
+def test_sim_version_covers(rel, monkeypatch, tmp_path):
     import polydata.bt.validate as V
 
+    fake = _fake_tree(V, tmp_path)
+    monkeypatch.setattr(V, "BT_DIR", fake / "bt")
     v = V.sim_version()
-    fake = tmp_path / "bt"
-    fake.mkdir()
-    for f in V.BT_DIR.glob("*.py"):
-        (fake / f.name).write_bytes(f.read_bytes())
-    (tmp_path / "fees.py").write_text((V.BT_DIR.parent / "fees.py").read_text() + "\n# changed\n")
-    monkeypatch.setattr(V, "BT_DIR", fake)
+    f = fake / rel
+    f.write_text(f.read_text() + "\n# changed\n")
     assert V.sim_version() != v
+
+
+@pytest.mark.parametrize("rel", ["bt/report.py", "bt/runs.py", "bt/cli.py", "bt/strategies/mm_binance_pull.py",
+                                 "screen.py"])
+def test_sim_version_ignores(rel, monkeypatch, tmp_path):
+    import polydata.bt.validate as V
+
+    fake = _fake_tree(V, tmp_path)
+    monkeypatch.setattr(V, "BT_DIR", fake / "bt")
+    v = V.sim_version()
+    f = fake / rel
+    f.write_text(f.read_text() + "\n# changed\n")
+    assert V.sim_version() == v
 
 
 def test_average_maker_and_join_best_c_per_share():

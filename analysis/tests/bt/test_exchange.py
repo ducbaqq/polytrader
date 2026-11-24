@@ -47,8 +47,10 @@ def fills(events):
 # ------------------------------------------------------------------------------------------ makers
 
 def test_join_back_of_queue():
-    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.48, 60),
-                                                (T0 + 3000, "Up", "SELL", 0.48, 50)])
+    # each trade at our price is echoed by the recorded level decrease it caused (a few ms earlier)
+    md = market("0.48:100", "0.52:100", changes=[(T0 + 1990, "BUY", 0.48, 40), (T0 + 2500, "BUY", 0.48, 60),
+                                                 (T0 + 2990, "BUY", 0.48, 10)],
+                trades=[(T0 + 2000, "Up", "SELL", 0.48, 60), (T0 + 3000, "Up", "SELL", 0.48, 50)])
     ex = Exchange(md, ExchangeConfig())
     o = order(px=480, size=20)
     ex.submit(o)
@@ -59,6 +61,47 @@ def test_join_back_of_queue():
     assert len(f) == 1 and f[0].size == 10 and f[0].px == 480 and f[0].liquidity == "maker"
     assert f[0].fee == 0 and f[0].trade_ts_ms == T0 + 3000 and f[0].ts_ms == T0 + 3000
     assert o.filled == 10 and o.status == "open" and o.cost == pytest.approx(4.8)
+
+
+def test_sweep_printed_at_worst_price_does_not_fill_behind_queue():
+    # A taker SELL sweeps 50 at 0.49 and 30 at 0.48; Polymarket prints it as ONE row at 0.48, size 80.
+    # Our 0.48 bid sits behind 60 others: only the 30 that really traded at 0.48 eats that queue.
+    md = market("0.49:50|0.48:60", "0.52:100",
+                changes=[(T0 + 1980, "BUY", 0.49, 0), (T0 + 1980, "BUY", 0.48, 30)],
+                trades=[(T0 + 2000, "Up", "SELL", 0.48, 80)])
+    ex = Exchange(md, ExchangeConfig())
+    o = order(px=480, size=20)
+    ex.submit(o)
+    assert fills(ex.advance(T0 + 5000)) == []
+    assert o.queue_ahead == pytest.approx(30) and o.filled == 0
+
+
+def test_at_price_volume_capped_by_level_decrease_in_echo_window():
+    # The cap counts decreases of our level with ts in [trade ts - 150 ms, trade ts], per ms (the state at
+    # the end of each ms); increases do not offset them; a decrease before the window does not count.
+    md = market("0.48:100", "0.52:100",
+                changes=[(T0 + 1700, "BUY", 0.48, 95),  # 300 ms before the trade: outside the window
+                         (T0 + 1900, "BUY", 0.48, 55), (T0 + 1900, "BUY", 0.48, 85),  # same ms: net 95 -> 85
+                         (T0 + 1950, "BUY", 0.48, 125), (T0 + 1990, "BUY", 0.48, 105)],
+                trades=[(T0 + 2000, "Up", "SELL", 0.48, 500)])
+    ex = Exchange(md, ExchangeConfig())
+    o = order(px=480, size=10)
+    ex.submit(o)
+    assert fills(ex.advance(T0 + 5000)) == []
+    assert o.queue_ahead == pytest.approx(100 - 10 - 20)
+
+
+def test_at_price_cap_shared_by_own_orders():
+    # Two of our bids at 0.48 with nobody ahead; 12 shares join behind us. A 15-share trade whose level only
+    # dropped by 12 fills 10 + 2.
+    md = market("", "0.52:100", changes=[(T0 + 1200, "BUY", 0.48, 12), (T0 + 1995, "BUY", 0.48, 0)],
+                trades=[(T0 + 2000, "Up", "SELL", 0.48, 15)])
+    ex = Exchange(md, ExchangeConfig())
+    a, b = order(px=480, size=10, arrival=T0 + 1000), order(px=480, size=10, arrival=T0 + 1100)
+    ex.submit(a)
+    ex.submit(b)
+    f = fills(ex.advance(T0 + 5000))
+    assert [(x.order_id, x.size) for x in f] == [(a.id, 10), (b.id, 2)]
 
 
 def test_trade_through_fills_fully():
@@ -85,7 +128,8 @@ def test_trade_through_capped_by_trade_size():
 
 
 def test_down_order_filled_by_up_trade():
-    md = market("0.60:50", "0.65:50", trades=[(T0 + 2000, "Up", "BUY", 0.62, 10)])
+    md = market("0.60:50", "0.65:50", changes=[(T0 + 1500, "SELL", 0.62, 10), (T0 + 1995, "SELL", 0.62, 0)],
+                trades=[(T0 + 2000, "Up", "BUY", 0.62, 10)])
     ex = Exchange(md, ExchangeConfig())
     o = order(token="Down", side="BUY", px=380, size=20)
     assert (o.up_side, o.up_px) == ("SELL", 620)
@@ -108,7 +152,7 @@ def test_trade_on_same_side_never_fills():
 
 @pytest.mark.parametrize("model, ahead", [("behind", 70), ("proportional", 20)])
 def test_cancel_model_behind_vs_proportional(model, ahead):
-    md = market("0.48:100", "0.52:100", changes=[(T0 + 1500, "BUY", 0.48, 50)],
+    md = market("0.48:100", "0.52:100", changes=[(T0 + 1500, "BUY", 0.48, 50), (T0 + 1995, "BUY", 0.48, 20)],
                 trades=[(T0 + 2000, "Up", "SELL", 0.48, 30)])
     ex = Exchange(md, ExchangeConfig(cancel_model=model))
     o = order(px=480, size=10)
@@ -158,7 +202,8 @@ def test_proportional_decrease_explained_by_lagging_trade():
 def test_own_orders_fifo_and_share_trade_volume():
     # Two of our bids at 0.48 (10 each), nobody else ahead. A 15-share trade fills the first one fully
     # and only the 5 left over of the second: our earlier fills reduce what is left of the trade.
-    md = market("", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.48, 15)])
+    md = market("", "0.52:100", changes=[(T0 + 1500, "BUY", 0.48, 15), (T0 + 1995, "BUY", 0.48, 0)],
+                trades=[(T0 + 2000, "Up", "SELL", 0.48, 15)])
     ex = Exchange(md, ExchangeConfig())
     a, b = order(px=480, size=10, arrival=T0 + 1000), order(px=480, size=10, arrival=T0 + 1100)
     ex.submit(a)
@@ -170,7 +215,8 @@ def test_own_orders_fifo_and_share_trade_volume():
 def test_later_own_order_never_ahead_of_earlier():
     # a joins behind 100; the level then drops to 20 (cancels, "behind" model keeps a's ahead at 100).
     # b joins later at the same price and must still queue behind a.
-    md = market("0.48:100", "0.52:100", changes=[(T0 + 1500, "BUY", 0.48, 20)],
+    md = market("0.48:100", "0.52:100", changes=[(T0 + 1500, "BUY", 0.48, 20), (T0 + 2500, "BUY", 0.48, 40),
+                                                 (T0 + 2995, "BUY", 0.48, 10)],
                 trades=[(T0 + 3000, "Up", "SELL", 0.48, 30)])
     ex = Exchange(md, ExchangeConfig())
     a, b = order(px=480, size=10, arrival=T0 + 1000), order(px=480, size=10, arrival=T0 + 2000)
@@ -193,7 +239,8 @@ def test_trade_through_reduces_volume_left_for_worse_own_orders():
 
 
 def test_partial_fill_then_cancel():
-    md = market("", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.48, 4)])
+    md = market("", "0.52:100", changes=[(T0 + 1500, "BUY", 0.48, 4), (T0 + 1995, "BUY", 0.48, 0)],
+                trades=[(T0 + 2000, "Up", "SELL", 0.48, 4)])
     ex = Exchange(md, ExchangeConfig())
     o = order(px=480, size=10)
     ex.submit(o)

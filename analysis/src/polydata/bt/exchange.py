@@ -15,6 +15,12 @@ The model is deliberately pessimistic (spec: "Queue and fill model"):
   - at P: the trade first consumes `queue_ahead`, then fills us. `x`, the trade volume left for
     our later orders, shrinks by every fill of ours (trade-throughs included), never by the
     volume that consumed `queue_ahead` (each order's `queue_ahead` counts other traders only).
+  - **At-price cap.** At P the usable volume is also capped by the recorded decrease of level
+    (resting side, P) over the exchange-time window [ts - trade_echo_ms, ts]: the sum over the ms in
+    that window of max(0, size before the ms - size after it). A taker that sweeps several levels is
+    usually printed as ONE row at its worst price with the total size (2026-11-24 data), so `x` can
+    include volume executed at better levels that never reached P; the level decrease bounds what
+    really traded at P. Uses no data after the trade. Trade-throughs are not capped this way.
   - **Trade echo:** trades with `ts_ms <= arrival_ms + trade_echo_ms` never touch the order (no queue
     reduction, no fill): a trade's `ts_ms` lags the level change it caused (median 21 ms, p99 134 ms), so its
     volume may already be missing from the level we joined behind.
@@ -380,14 +386,18 @@ class Exchange:
             if px == P:
                 if self.cfg.cancel_model == "proportional":
                     self._apply_cancels((rest, px), ts)
+                xp = None  # the at-price volume: min(x, recorded level decrease), computed when first needed
                 for o in list(lv.get(px, ())):
                     if ts <= o.arrival_ms + echo:
                         continue
-                    d = min(o.queue_ahead, x)
+                    if xp is None:
+                        xp = min(x, self._level_decrease(rest, px, ts - echo, ts))
+                    d = min(o.queue_ahead, xp)
                     o.queue_ahead -= d
-                    q = min(o.remaining, x - d)
+                    q = min(o.remaining, xp - d)
                     if q > EPS:
                         x -= q
+                        xp -= q
                         self._fill(o, ts, px, q, "maker", ts, 0.0, out)
             elif (px < P) if rest == "SELL" else (px > P):
                 # Trade-through, capped at the trade volume left: had we been resting, the taker would
@@ -402,6 +412,16 @@ class Exchange:
                         self._fill(o, ts, px, q, "maker", ts, 0.0, out)
             else:
                 break  # worse than P for the taker: untouched, and so is everything after
+
+    def _level_decrease(self, side: str, px: int, t0: int, t1: int) -> float:
+        """Sum over the ms t in [t0, t1] of max(0, size at t - 1 - size at t) of level (side, px), ts clock."""
+        ts_arr, _, sizes = self.md.level_changes(side, px, t0 - 1, t1)
+        if not len(ts_arr):
+            return 0.0
+        last = np.r_[ts_arr[1:] != ts_arr[:-1], True]  # the state at the end of each ms
+        s = sizes[last]
+        prev = np.r_[self.md.size_at(side, px, t0 - 1, "ts"), s[:-1]]
+        return float(np.clip(prev - s, 0.0, None).sum())
 
     def _apply_cancels(self, key: tuple[str, int], t: int) -> None:
         """Proportional model: apply the level's unexplained decreases in (state.t, t] to our queue."""

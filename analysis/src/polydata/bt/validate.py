@@ -21,7 +21,9 @@ Checks:
    levels); anything else that prevents a comparison (no sell, wrong open time) fails.
 3. **fill_support**: every `join-best` maker fill re-derived from the raw trades with the fill model's
    rules (join behind the recorded level size at arrival; only trades with ts > arrival + 150 ms;
-   at our price the trade eats the queue ahead first; a trade-through fills up to the trade's size;
+   at our price the trade eats the queue ahead first, its volume capped by the recorded decrease of our
+   level over [ts - 150 ms, ts] (sum of the per-ms decreases; a sweep printed as one row at its worst price
+   must not fill us with volume executed at better levels); a trade-through fills up to the trade's size;
    nothing at or after the window end or after our cancel; cancel model "behind"). `join-best`
    keeps at most one order per side per market at a time, so each order is re-derived on its own
    (checked: `one_order_per_side`). Compared per (order, trade ts): filled size, fill price (the order's
@@ -47,6 +49,7 @@ import pandas as pd
 
 from ..config import paths
 from ..fees import taker_fee
+from .metrics import clean
 
 BT_DIR = Path(__file__).resolve().parent
 _VERSION_EXCLUDE = {"report.py", "runs.py", "cli.py"}
@@ -59,11 +62,17 @@ STRATEGIES = ("noop", "buy-and-hold-up", "always-cross", "join-best")
 
 # ---------------------------------------------------------------------------------------- version
 
+# outside polydata/bt/: the fee formula, the data layer (views, Parquet build, column types) and the sanity
+# strategies the validation suite runs
+_VERSION_EXTRA = ("fees.py", "views.py", "build.py", "schema.py", "bt/strategies/sanity.py")
+
+
 def sim_version() -> str:
-    """sha256 over every `polydata/bt/*.py` (not `strategies/`, report.py, runs.py, cli.py) and
-    `polydata/fees.py`, 12 hex."""
+    """sha256 over every `polydata/bt/*.py` (not report.py, runs.py, cli.py) plus `polydata/fees.py`,
+    `views.py`, `build.py`, `schema.py` and `bt/strategies/sanity.py`, 12 hex."""
     h = hashlib.sha256()
-    files = [f for f in sorted(BT_DIR.glob("*.py")) if f.name not in _VERSION_EXCLUDE] + [BT_DIR.parent / "fees.py"]
+    files = [f for f in sorted(BT_DIR.glob("*.py")) if f.name not in _VERSION_EXCLUDE]
+    files += [BT_DIR.parent / rel for rel in _VERSION_EXTRA]
     for f in files:
         h.update(f.relative_to(BT_DIR.parent).as_posix().encode() + b"\0" + f.read_bytes() + b"\0")
     return h.hexdigest()[:12]
@@ -392,13 +401,32 @@ def one_order_per_side(orders: pd.DataFrame, order_latency_ms: int = 200) -> boo
     return True
 
 
+_MATCH_SQL = f"""
+CREATE OR REPLACE TEMP TABLE _m AS
+SELECT o.slug, o.order_id, o.up_side, o.up_px, t.ts_ms, t.recv_ms, t.seq, t.size AS x, t.up_px = o.up_px AS at_px
+FROM _o o JOIN _v_tr t ON t.slug = o.slug AND t.taker_up_side <> o.up_side
+ AND t.ts_ms > o.arrival + {TRADE_ECHO_MS} AND t.ts_ms < o.window_end_ms
+ AND t.ts_ms <= coalesce(o.end_ms, o.window_end_ms)
+ AND ((o.up_side = 'BUY' AND t.up_px <= o.up_px) OR (o.up_side = 'SELL' AND t.up_px >= o.up_px))
+"""
+
+# Candidate ms where the level (slug, side, px) of an at-price trade can change inside [ts - echo, ts]:
+# its own change rows and every snapshot of the market.
+_CAP_EVENTS_SQL = f"""
+WITH a AS (SELECT DISTINCT slug, up_side AS side, up_px AS px, ts_ms AS trade_ts FROM _m WHERE at_px)
+SELECT a.*, c.ts_ms AS t FROM a JOIN _v_chg c ON c.slug = a.slug AND c.side = a.side AND c.px = a.px
+    AND c.ts_ms BETWEEN a.trade_ts - {TRADE_ECHO_MS} AND a.trade_ts
+UNION
+SELECT a.*, s.ts_ms FROM a JOIN _v_snap s ON s.slug = a.slug
+    AND s.ts_ms BETWEEN a.trade_ts - {TRADE_ECHO_MS} AND a.trade_ts
+"""
+
 _FILL_SQL = f"""
 WITH m AS (
-    SELECT o.slug, o.order_id, t.ts_ms, t.recv_ms, t.seq, t.size AS x, t.up_px = o.up_px AS at_px
-    FROM _o o JOIN _v_tr t ON t.slug = o.slug AND t.taker_up_side <> o.up_side
-     AND t.ts_ms > o.arrival + {TRADE_ECHO_MS} AND t.ts_ms < o.window_end_ms
-     AND t.ts_ms <= coalesce(o.end_ms, o.window_end_ms)
-     AND ((o.up_side = 'BUY' AND t.up_px <= o.up_px) OR (o.up_side = 'SELL' AND t.up_px >= o.up_px))),
+    -- at our price the usable volume is capped by the recorded decrease of our level in [ts - echo, ts]
+    SELECT _m.slug, _m.order_id, _m.ts_ms, _m.recv_ms, _m.seq, _m.at_px,
+           CASE WHEN _m.at_px THEN least(_m.x, coalesce(d.dec, 0)) ELSE _m.x END AS x
+    FROM _m LEFT JOIN _cap d ON d.slug = _m.slug AND d.side = _m.up_side AND d.px = _m.up_px AND d.trade_ts = _m.ts_ms),
 c AS (
     SELECT *, sum(CASE WHEN at_px THEN x ELSE 0 END) OVER w AS at_cum,
               sum(CASE WHEN at_px THEN 0 ELSE x END) OVER w AS thr_cum
@@ -415,6 +443,26 @@ g AS (
 SELECT slug, order_id, ts_ms, sum(q) AS size, min(ahead_left) FILTER (WHERE q > {SIZE_EPS}) AS ahead_left
 FROM g GROUP BY ALL HAVING sum(q) > {SIZE_EPS}
 """
+
+
+def _stage_cap(con) -> None:
+    """`_cap(slug, side, px, trade_ts, dec)`: for every at-price match in `_m`, the recorded decrease of the
+    level over [trade_ts - echo, trade_ts]: the sum over the ms t in it of max(0, size(t - 1) - size(t)),
+    sizes from the reference book (`_size_at`). Only ms with a change of the level or a snapshot can change it."""
+    ev = con.execute(_CAP_EVENTS_SQL).df()
+    if ev.empty:
+        con.execute("CREATE OR REPLACE TEMP TABLE _cap (slug VARCHAR, side VARCHAR, px BIGINT, trade_ts BIGINT, dec DOUBLE)")
+        return
+    ev["qid"] = np.arange(len(ev))
+    after = _size_at(con, ev)
+    before = _size_at(con, ev.assign(qid=ev.qid + len(ev), t=ev.t - 1))
+    ev["dec"] = np.clip(before.reindex(ev.qid + len(ev)).to_numpy() - after.reindex(ev.qid).to_numpy(), 0.0, None)
+    cap = ev.groupby(["slug", "side", "px", "trade_ts"], as_index=False).dec.sum()
+    con.register("_cap_df", cap.astype({"px": "int64", "trade_ts": "int64", "dec": float}))
+    try:
+        con.execute("CREATE OR REPLACE TEMP TABLE _cap AS SELECT * FROM _cap_df")
+    finally:
+        con.unregister("_cap_df")
 
 
 def rederive_fills(con, res, order_latency_ms: int = 200) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -434,6 +482,8 @@ def rederive_fills(con, res, order_latency_ms: int = 200) -> tuple[pd.DataFrame,
         con.execute("CREATE OR REPLACE TEMP TABLE _o AS SELECT * EXCLUDE (end_ms), end_ms::BIGINT AS end_ms FROM _o_df")
     finally:
         con.unregister("_o_df")
+    con.execute(_MATCH_SQL)
+    _stage_cap(con)
     ref = con.execute(_FILL_SQL).df()
     # a maker fill is at the order's own limit price, in its own token's terms
     ref["px"] = ref.set_index(["slug", "order_id"]).index.map(d.set_index(["slug", "order_id"]).px).astype(float)
@@ -536,20 +586,6 @@ def check_determinism(a, b) -> dict:
 
 # ---------------------------------------------------------------------------------------- suite
 
-def _clean(x):
-    if isinstance(x, dict):
-        return {str(k): _clean(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [_clean(v) for v in x]
-    if isinstance(x, (np.integer,)):
-        return int(x)
-    if isinstance(x, (float, np.floating)):
-        return None if math.isnan(x) else float(x)
-    if isinstance(x, np.bool_):
-        return bool(x)
-    return x
-
-
 def run_suite(days: list[str], coins=("btc", "sol"), timeframes=("5m",), *, con_factory: Callable | None = None,
               recon_rows: int = 1000, workers: int | None = None, write: bool = True) -> dict:
     """Run checks 1-4, write `<data>/runs/validation/<sim_version>.json` and return it."""
@@ -580,7 +616,7 @@ def run_suite(days: list[str], coins=("btc", "sol"), timeframes=("5m",), *, con_
     finally:
         con.close()
     v = sim_version()
-    out = _clean({"sim_version": v, "passed": all(c["passed"] for c in checks.values()),
+    out = clean({"sim_version": v, "passed": all(c["passed"] for c in checks.values()),
                   "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), "days": base["days"],
                   "coins": base["coins"], "timeframes": base["timeframes"], "run_seconds": timing,
                   "elapsed_s": round(time.perf_counter() - t0, 1), "checks": checks})
