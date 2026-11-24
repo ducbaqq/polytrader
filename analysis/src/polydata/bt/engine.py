@@ -486,7 +486,9 @@ class _Replay:
             px, size, qa = f.px / PX_SCALE, f.size, f.queue_ahead_at_fill
             m.raw_fills.append((f, o, rep, self._bn_move(sym_of(m.info.coin), f.ts_ms)))
         elif ev.kind == "accepted" and o.kind == "limit":
-            qa = m.md.size_at(o.up_side, o.up_px, ev.ts_ms, "ts")  # the level we join behind
+            # the exchange's own queue position at the join (no trade can have touched it yet: trades
+            # within trade_echo_ms of the arrival never do, and the exchange is advanced one time at a time)
+            qa = o.queue_ahead
         self.order_rows.append((ev.ts_ms, rep, o.id, o.slug, ev.kind, o.token, o.side, o.kind, o.post_only, px, size,
                                 ev.reason, qa))
         self.push(rep, P_REPORT, ("rep", m, ev))

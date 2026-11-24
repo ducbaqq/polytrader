@@ -350,7 +350,9 @@ class Exchange:
             return
         shares = sum(q for _, q in took)
         notional = sum(from_up(o.token, o.up_side, px)[1] * q for px, q in took) / PX_SCALE
-        fee = taker_fee(shares, notional / shares, self.md.info.fee_rate, self.md.info.fee_exponent)
+        # the average price rounded to 9 decimals: float noise (2.35 / 5 = 0.47000000000000003) must not
+        # flip the fee's 5-decimal rounding on a tie
+        fee = taker_fee(shares, round(notional / shares, 9), self.md.info.fee_rate, self.md.info.fee_exponent)
         for i, (px, q) in enumerate(took):
             self._fill(o, t, px, q, "taker", None, fee if i == len(took) - 1 else 0.0, out)
 

@@ -126,9 +126,9 @@ def test_buy_and_hold_up_hand_computed():
 def test_buy_and_hold_up_losing_side():
     r = Raw().market(M2, asks="0.47:100")
     pnl = run(r, "buy-and-hold-up").markets.set_index("slug").pnl[M2.slug]
-    # the fee is a rounding tie (5 * 0.05 * 0.47 * 0.53 = 0.062275): the simulator's average price
-    # 2.35 / 5 is one ulp above 0.47, so its fee rounds up by 0.00001
-    assert pnl == pytest.approx(-5 * 0.47 - taker_fee(5, 0.47, RATE), abs=2e-5)
+    # the fee is a rounding tie (5 * 0.05 * 0.47 * 0.53 = 0.062275): the exchange rounds the average price
+    # (2.35 / 5 = 0.47000000000000003 in floats) to 9 decimals, so it rounds like the hand value
+    assert pnl == pytest.approx(-5 * 0.47 - taker_fee(5, 0.47, RATE), abs=1e-9)
 
 
 def test_always_cross_loses_spread_plus_fees():
@@ -259,6 +259,85 @@ def test_fill_support_detects_unsupported_fill():
     res.fills = f
     chk = validate.check_fill_support(r.con(), res, order_latency_ms=200)
     assert not chk["passed"] and chk["mismatches"] >= 1
+
+
+def test_fill_support_detects_fills_at_the_trade_price(monkeypatch):
+    # a simulator that fills resting orders at the trade's price instead of the order's own price
+    from polydata.bt.exchange import Exchange
+
+    on_trade, fill = Exchange._on_trade, Exchange._fill
+
+    def at_trade_px(self, i, out):
+        self._trade_px = int(self._tpx[i])
+        on_trade(self, i, out)
+
+    def fill_at(self, o, ts, up_px, q, liq, trade_ts, fee, out):
+        fill(self, o, ts, self._trade_px if liq == "maker" else up_px, q, liq, trade_ts, fee, out)
+
+    monkeypatch.setattr(Exchange, "_on_trade", at_trade_px)
+    monkeypatch.setattr(Exchange, "_fill", fill_at)
+    r = _jb_raw()
+    res = run(r, "join-best")
+    chk = validate.check_fill_support(r.con(), res, order_latency_ms=200)
+    assert not chk["passed"] and chk["px_mismatches"] >= 1 and chk["mismatches"] == 0, chk
+
+
+def test_fill_support_detects_a_wrong_queue_at_join(monkeypatch):
+    from polydata.bt.exchange import Exchange
+
+    join = Exchange._join
+
+    def half(self, o, t):
+        join(self, o, t)
+        o.queue_ahead *= 0.5
+
+    monkeypatch.setattr(Exchange, "_join", half)
+    r = _jb_raw()
+    res = run(r, "join-best")
+    chk = validate.check_fill_support(r.con(), res, order_latency_ms=200)
+    assert not chk["passed"] and chk["ahead_mismatches"] >= 1, chk
+
+
+def test_always_cross_without_sell_fails():
+    from polydata.bt.strategies.sanity import AlwaysCross
+
+    class NoSell(AlwaysCross):
+        def on_order(self, ctx, order):
+            pass
+
+    r = Raw().market(M1)
+    res = engine.run_coin(cfg(strategy="always-cross", timeframes=["5m"]), "btc", r.con, rec_events=NO_EVENTS,
+                          strategy=NoSell())
+    chk = validate.check_always_cross(r.con(), res, order_latency_ms=200)
+    assert not chk["passed"] and chk["skipped"] == 0 and len(chk["failures"]) == 1, chk
+
+
+def test_open_time_checked_against_the_raw_snapshots():
+    r = Raw().market(M1)
+    res = run(r, "buy-and-hold-up")
+    chk = validate.check_buy_and_hold(r.con(), res, order_latency_ms=200)
+    assert chk["passed"] and not chk["failures"]
+    # the market opens when its first snapshot (ts ws - 60 s) is received, 100 ms later
+    placed = res.orders[res.orders.event == "placed"].ms.iloc[0]
+    assert placed == M1.window_start_ms - 60_000 + 100
+    o = res.orders.copy()
+    o.loc[o.event == "placed", "ms"] += 1
+    res.orders = o
+    chk = validate.check_buy_and_hold(r.con(), res, order_latency_ms=200)
+    assert not chk["passed"] and chk["failures"][0]["why"] == "open time"
+
+
+def test_sim_version_covers_fees(monkeypatch, tmp_path):
+    import polydata.bt.validate as V
+
+    v = V.sim_version()
+    fake = tmp_path / "bt"
+    fake.mkdir()
+    for f in V.BT_DIR.glob("*.py"):
+        (fake / f.name).write_bytes(f.read_bytes())
+    (tmp_path / "fees.py").write_text((V.BT_DIR.parent / "fees.py").read_text() + "\n# changed\n")
+    monkeypatch.setattr(V, "BT_DIR", fake)
+    assert V.sim_version() != v
 
 
 def test_average_maker_and_join_best_c_per_share():
