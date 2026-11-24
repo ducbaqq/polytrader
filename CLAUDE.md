@@ -36,8 +36,9 @@ Guide: `docs/BACKTESTER.md`. Journals: `docs/strategies/`.
   failures and the variant count.
 - **Run folders live under `data/runs`** (gitignored) and are shared with `polydata bt push`. Commit only
   journals, the glossary and `docs/runs-index.csv`.
-- **A change to `bt/` simulator files (or `fees.py`) changes `sim_version`**, so re-run `bt validate` before
-  trusting results or using `--final`.
+- **A change to `bt/` simulator files, `bt/strategies/sanity.py`, `fees.py` or the data layer (`views.py`,
+  `build.py`, `schema.py`) changes `sim_version`**, so re-run `bt validate` before trusting results or using
+  `--final`.
 - **Strategies use only `ctx`** and the handler arguments: no DuckDB, files, clocks or global state, so the same
   class can run in the live runner.
 - A screen can only reject or promote; only a simulator run can pass.

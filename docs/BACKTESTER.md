@@ -21,8 +21,8 @@ uv run polydata bt runs                        # all runs; filter: --strategy --
 
 | Command | What |
 |---|---|
-| `bt run CONFIG.yaml [--days A B..C] [--coins ...] [--set k=v ...] [--latency-sweep] [--final]` | Replay one strategy. `--days` takes ISO dates and `A..B` ranges. `--set params.x=1` (or `x=1`) overrides a strategy param; a `RunConfig` field name sets that field. `--latency-sweep` also runs at 100/200/400 ms. |
-| `bt sweep CONFIG.yaml --grid PARAM=V1,V2 [--grid ...] [--jobs N]` | One run per grid point, all tagged `sweep:<id>`. |
+| `bt run CONFIG.yaml [--days A B..C] [--coins ...] [--set k=v ...] [--latency-sweep] [--final]` | Replay one strategy. `--days` takes ISO dates and `A..B` ranges; a sealed day (or `day_kinds` with `sealed`) without `--final` is an error ("sealed days need --final"). `--set params.x=1` sets a strategy param; `x=1` works only if `x` is a `RunConfig` field or one of the strategy's `default_params` (anything else is an error, so a typo cannot become a silent param). `--latency-sweep` also runs at 100/200/400 ms. |
+| `bt sweep CONFIG.yaml --grid PARAM=V1,V2 [--grid ...] [--jobs N]` | One run per grid point, all tagged `sweep:<id>`. Ranked by $/day on the evaluation (validation) days when the runs have them, else on all days. |
 | `bt validate [--days ...]` | Validation suite (see below). Exit code 1 on failure. |
 | `bt runs [filters]` | List runs from `data/runs/index.parquet`. |
 | `bt screen NAME [--latency-ms 300\|1000] [--exit hold\|bid] [--size N] [--coins ...] [--timeframes ...]` | Run a screen. |
@@ -152,6 +152,9 @@ new parameters is a new version.
 | `min_usd_per_day` | 10.0 | Pass criterion, recorded with the run |
 | `tags` | `[]` | Free text, searchable with `bt runs --tag/--search` |
 
+Not config: `trade_echo_ms` (150) and `trade_explain_ms` (150) are `ExchangeConfig` constants
+(`bt/exchange.py`), not settable with `--set`; `final_min_days` is the constant `runs.FINAL_MIN_DAYS = 5`.
+
 ## The fill model in plain words
 
 Conservative by default: when in doubt, we do not get filled.
@@ -166,6 +169,13 @@ Conservative by default: when in doubt, we do not get filled.
 - **Trade-through, capped.** A trade at a price worse than ours, on the side that rests at our price, fills
   us, but only up to that trade's size, because a taker smaller than our order would have stopped at our
   price.
+- **At-price cap.** At our price, the volume that can eat the queue ahead and fill us is also capped by the
+  recorded decrease of that level over [trade `ts_ms` - 150 ms, trade `ts_ms`] (the sum over those ms of the
+  drops in its size; increases do not offset them). A taker that sweeps several levels is usually printed as
+  ONE `pm_trade` row at its worst price with the total size, so without the cap volume executed at better
+  levels would eat our queue at the worst one. Trade-throughs are not capped this way (already capped by the
+  trade's size). Deliberately pessimistic: a trade whose level change was recorded earlier than 150 ms before
+  its `ts_ms` fills nobody at its price.
 - **150 ms trade echo.** A trade's `ts_ms` lands after the level change it caused (median about 21 ms on BTC
   5m, p99 134 ms). Trades within `trade_echo_ms` = 150 of our arrival are never matched against our order, so
   the same volume is not counted twice.
@@ -185,7 +195,11 @@ Conservative by default: when in doubt, we do not get filled.
   `pm_book` snapshot inside the replay range has been received, because the book is untrusted before that.
 - **Validation of orders.** Off-tick, below-minimum or out-of-range orders are rejected with a reason.
 - **Gaps.** A window with a Polymarket gap over `max_gap_ms_pm` or a Binance gap over `max_gap_ms_bn` is
-  voided: not run, no P&L, counted in the report. Data before 2026-11-24 10:36 UTC is never replayed.
+  voided: not run, no P&L, counted in the report. Data before 2026-11-24 10:36 UTC is never replayed. Gaps
+  come from `gaps.gap_table()` / `gaps.voided_markets()` (there is no `gaps` SQL view): connection events in the
+  daily `rec_events` catalog (sealed days included: they are data-health information, and a reconnect on a
+  sealed day can leave the next day's start stale; each read is a `health` look) plus data silences (Binance
+  top of book, Polymarket streams while Data API trades happened).
 - **Ordering.** Same-`recv_ms` events are ordered by stream (Polymarket, Chainlink, Binance), then by `seq`
   (the raw arrival order kept in Parquet), so runs are deterministic.
 
@@ -225,16 +239,23 @@ Every recorded day has one permanent kind, set by its date: day number = days si
 - Sealed days are hidden in the data layer: the `polydata` views leave them out, so notebooks and screens
   cannot read them by accident. Reading them needs `include_sealed=True` with a `purpose`, and each read is
   appended to `data/runs/looks.jsonl`. **Do not tune on, or look at, sealed days.**
-- `bt run --final` evaluates the strategy version on all sealed days (at least 5, `final_min_days`; refused
-  before then, and you cannot pass `--days`). It is refused unless `bt validate` has passed for the current
-  `sim_version`.
+- `bt run --final` evaluates the strategy version on all sealed days (at least `runs.FINAL_MIN_DAYS` = 5, a
+  constant; refused before then, and you cannot pass `--days`). It is refused unless `bt validate` has passed
+  for the current `sim_version`, and refused (listing the fields) if the config changes any simulator,
+  capital or pass setting from its default: `order_latency_ms`, `latency_jitter_ms`, `fill_report_latency_ms`,
+  `cancel_model`, `impact_reset_ms`, `capital`, `capital_mode`, `redeem_delay_s`, `max_gap_ms_pm`,
+  `max_gap_ms_bn`, `bn_step_ms`, `min_usd_per_day`. Strategy params, coins, timeframes, tags and seed are free.
+- `--final` first runs `bt pull` so earlier finals and looks of other machines count. Offline use is allowed:
+  if the pull fails it warns and records `pulled: false` in `provenance.json`.
 - One final run per (strategy version, `sim_version`, data fingerprint). A simulator fix or re-synced data
   allows another; changing the strategy makes a new version. The report lists the earlier finals.
-- **Trial budget N.** Each final run is one look and N is the number of looks across all strategies. The
+- **Trial budget N.** N counts the final runs (in the index, across all strategies) plus every other look at
+  sealed data that is neither `health` nor `final` (a final run's own look is counted once, as the run). The
   pass threshold on block t is max(3, z(1 - 0.05/N)): 3 up to 37 looks, 3.29 at N = 100, 3.89 at N = 1,000.
-  Validation runs do not count.
-- `sim_version` is a hash of `bt/*.py` (excluding `report.py`, `runs.py`, `cli.py`, and `strategies/`) and
-  `fees.py`. Any change to the simulator changes it and means re-running `bt validate`.
+  Validation runs and `health` looks (gap detection reading sealed-day `rec_events`) do not count.
+- `sim_version` is a hash of `bt/*.py` (excluding `report.py`, `runs.py`, `cli.py`), `bt/strategies/sanity.py`
+  (the strategies the suite runs), `fees.py` and the data layer (`views.py`, `build.py`, `schema.py`). Any
+  change to them changes it and means re-running `bt validate`.
 
 ## How to read a report
 
@@ -295,7 +316,9 @@ register(Screen("my-screen", "momentum", my_rule))   # name, family, rule
 ```
 
 Signal inputs must be columns known at `t_ms` (`up_bid`, `up_ask`, `tau_s`, ...). The `*_300` and `*_1000`
-columns are execution prices that look ahead of `t_ms` and must never feed a rule. Add a test in
+columns are execution prices that look ahead of `t_ms`, and `outcome_up` is the result: `bt screen` passes the
+rule a frame without them (`screen.FORBIDDEN_RULE_COLUMNS`). Voided windows come from the gap table, computed
+per contiguous range of non-sealed days (a hidden sealed day would otherwise look like a 24 h silence). Add a test in
 `tests/bt/test_screen.py`, then `uv run polydata bt screen my-screen`.
 
 ## Validation suite
@@ -318,6 +341,13 @@ It is internal consistency only. It cannot say whether the queue and delay model
 
 - **Fill model: unverified.** Until our own real fills (minimum-size orders in the live project) are compared
   with the simulator's prediction, every report says so. Queue position in particular is an assumption.
+- **At-price volume cap.** A recorded trade fills or advances us at its own price only up to the recorded
+  drop of that level in the 150 ms before it (see the fill model). It guards against sweeps printed as one row
+  at the worst price (2026-11-24: for isolated BTC 5m trades with a better level cleared just before, only 44%
+  of the printed volume shows up as a drop at the printed price, against 94% otherwise). It is pessimistic
+  when a level change lags its trade by more than 150 ms, and the same drop can bound two trades in the window.
+- **Current-day connection gaps are unknown.** `rec_events` is exported to the catalog once a day, so a run
+  on today's data sees only data silences, not reconnects. Re-run once the day's catalog exists.
 - **Singapore receive times.** Every backtest is tied to the Singapore recorder's `recv_ms`. A strategy
   running elsewhere sees a different world and different latencies. Gaps are permanent.
 - **Screens use a fixed size and no depth.** Snapshots have no sizes, so every screen signal fills in full at

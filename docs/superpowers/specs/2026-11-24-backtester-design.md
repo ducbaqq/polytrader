@@ -135,8 +135,10 @@ Three clocks, all in milliseconds:
 A dropped Polymarket connection leaves a stale book, which gives fills that could never have
 happened.
 
-- **Gap table:** a `gaps` view (stream, series, from, to), built from `rec_events`, `rec_stats` and
-  the data quality log in `docs/RECORDER.md`.
+- **Gap table:** `gaps.gap_table()` (stream, key, from, to, source; there is no SQL view), built from the
+  connection events in `rec_events` (sealed days included: data-health information, logged as a
+  `health` look) and from data silences (Binance top of book; Polymarket streams while Data API trades
+  happened). `rec_stats` is not used; the data quality log's incidents end before the replay start.
 - **A market window is voided** when a gap overlaps it: longer than `max_gap_ms` on its Polymarket
   streams (default 5,000) or on its coin's Binance top of book (default 1,000).
   - The strategy isn't run on a voided window, and the window has no P&L.
@@ -161,6 +163,14 @@ exchange book at arrival time. We join at the back.
 up to the trade's size (after our earlier orders). The book can't trade through us without filling us,
 but a taker smaller than our order would have stopped at our price, so we never claim more than the
 volume the taker brought.
+
+**At-price cap.** At our price, the volume that eats "ahead" and fills us is capped by the recorded
+decrease of that level over [trade `ts_ms` - `trade_echo_ms`, trade `ts_ms`] (sum of the per-ms size
+drops; no data after the trade). A taker sweeping several levels is mostly printed as one `pm_trade` row
+at its worst price with the total size (2026-11-24: ~25.7% of trades coincide with a better level being
+cleared, 7.9% in a control; for isolated trades with a better level cleared only 44% of the printed
+volume is a drop at the printed price, 94% otherwise), so the volume executed at better levels must not
+consume our queue at the worst one. Deliberately pessimistic; trade-throughs keep their own cap (the trade's size).
 
 **Trade echo.** A trade's `ts_ms` lands after the level change it caused (BTC 5m: median 21 ms, p95
 40 ms, p99 134 ms). Trades within `trade_echo_ms` (150) after our order's arrival are never matched against it, so the same
@@ -407,6 +417,10 @@ no queue model.
   relayer, to be confirmed in the live project.
 - **Trade-throughs are capped at the trade's size, and trades within 150 ms after our arrival are
   ignored** (both pessimistic; see the queue model).
+- **At-price volume is capped by the recorded level decrease** in the 150 ms up to the trade (sweeps print
+  as one row at the worst price; pessimistic; see the queue model).
+- **`--final` keeps simulator, capital and pass settings at their defaults** (it refuses otherwise), and
+  pulls shared runs first (offline allowed, recorded as `pulled: false`).
 - **Parquet keeps the raw arrival order** (`seq`) so same-millisecond book changes replay in order.
 - **Run artifacts are not committed.** Only journals, the glossary and the index CSV are.
 - **Budgets per coin** instead of one shared balance: it makes the replay parallel, and the
@@ -415,8 +429,8 @@ no queue model.
   5m/15m.
 - **Same-millisecond events are ordered by rule**, without a new recorder column. The recorder
   stays untouched.
-- **Trial budget by Bonferroni:** simple and strict. It counts final looks only; validation runs are
-  free.
+- **Trial budget by Bonferroni:** simple and strict. It counts final runs plus other looks at sealed data
+  that are not `health` looks; validation runs are free.
 
 ## Risks
 

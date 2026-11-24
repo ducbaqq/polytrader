@@ -50,7 +50,9 @@ In this order:
   - Deribit implied volatility, for the fair-value model
   - Kalshi's short-dated crypto markets, for a cross-venue strategy family
   - On-chain fills (maker and taker wallets) can be fetched from the chain later; not urgent.
-- [x] `gaps` from `rec_events` / `rec_stats` / the data quality log (2026-11-25)
+- [x] gaps from `rec_events` (connection events, sealed days included as `health` looks) plus data silences
+  (Binance top of book, Polymarket streams with Data API trades inside); `rec_stats` is not used and
+  `gaps.KNOWN_GAPS` is empty (the logged restart truncations end before `REPLAY_START_MS`) (2026-11-25)
 
 ### 2. Strategy research (when there are about 7–10 days of data)
 - [ ] Market making (lead candidate): quote in tight books, pull or reprice quotes on Binance moves,
