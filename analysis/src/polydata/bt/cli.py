@@ -41,12 +41,22 @@ def parse_days(tokens: list[str] | None) -> list[str] | None:
 
 
 def apply_set(d: dict, key: str, value) -> None:
-    """`params.x=v` or an unknown name sets a strategy param; a RunConfig field name sets that field."""
+    """`params.x=v` sets a strategy param; a RunConfig field name sets that field; any other name must be one
+    of the strategy's `default_params` (ValueError otherwise: a typo must not become a silent param)."""
     if key.startswith("params."):
         d.setdefault("params", {})[key[7:]] = value
     elif key in _FIELDS:
         d[key] = value
     else:
+        from .strategy import get_strategy
+
+        try:
+            known = set(get_strategy(d.get("strategy", "")).default_params)
+        except (KeyError, ValueError):
+            known = set()
+        if key not in known:
+            raise ValueError(f"unknown setting {key!r}: not a config field nor a param of strategy "
+                             f"{d.get('strategy')!r} (use params.{key}=... to set it anyway)")
         d.setdefault("params", {})[key] = value
 
 
@@ -63,10 +73,10 @@ def load_config(path: str, days=None, coins=None, sets=()) -> RunConfig:
         d["days"] = parse_days(days)
     if coins:
         d["coins"] = coins
-    for s in sets:
-        k, v = _kv(s)
-        apply_set(d, k, yaml.safe_load(v))
     try:
+        for s in sets:
+            k, v = _kv(s)
+            apply_set(d, k, yaml.safe_load(v))
         return RunConfig.from_dict(d)
     except (ValueError, TypeError) as e:
         _fail(str(e))
@@ -135,16 +145,42 @@ def _print_run(d: Path, m: dict) -> None:
         print(f"  latency {ms} ms: P&L ${s['pnl_usd']:.2f}, {s['fills']} fills")
 
 
+def _refuse_sealed(d: dict) -> None:
+    """Only `--final` may replay sealed days (they are hidden from ordinary runs anyway: fail fast)."""
+    kinds = d.get("day_kinds") or []
+    days = d.get("days") or []
+    if "sealed" in kinds or any(day_kind(date.fromisoformat(str(x))) == "sealed" for x in days):
+        _fail("sealed days need --final")
+
+
+def _try_pull() -> bool:
+    """`--final` first syncs the runs from the bucket (earlier finals and looks of other machines). Offline use is
+    allowed: on failure warn and go on."""
+    try:
+        runs.pull()
+        return True
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - spaces_client() exits when credentials are missing
+        print(f"warning: could not pull runs from the bucket ({e}); earlier finals and looks of other machines "
+              "may be missing from N and the repeat check", file=sys.stderr)
+        return False
+
+
 def cmd_run(a) -> None:
     cfg = load_config(a.config, a.days, a.coins, a.set)
     sweep = runs.LATENCY_SWEEP_MS if a.latency_sweep else None
     if not a.final:
+        _refuse_sealed(cfg.to_dict())
         d, m = execute(cfg, "run", sweep)
         return _print_run(d, m)
     if a.days:
         _fail("--final always evaluates every sealed day; do not pass --days")
     from .strategy import get_strategy
 
+    try:
+        runs.check_final_config(cfg)
+    except runs.FinalRefused as e:
+        _fail(f"--final refused: {e}")
+    pulled = _try_pull()
     cls = get_strategy(cfg.strategy)
     days = runs.days_of_kinds({"sealed"})
     try:
@@ -155,9 +191,9 @@ def cmd_run(a) -> None:
 
     connect(include_sealed=True, purpose="final").close()  # the recorded look
     n = runs.final_looks()
-    cfg = replace(cfg, day_kinds=["sealed"], days=days, tags=[*cfg.tags, "final"], order_latency_ms=200)
+    cfg = replace(cfg, day_kinds=["sealed"], days=days, tags=[*cfg.tags, "final"])
     d, m = execute(cfg, "final", runs.LATENCY_SWEEP_MS, con_factory=sealed_con,
-                   extra_prov={"earlier_finals": list(earlier.run_id), "final_looks": n})
+                   extra_prov={"earlier_finals": list(earlier.run_id), "final_looks": n, "pulled": pulled})
     _print_run(d, m)
     print(f"  final looks so far (N): {n}")
     print(f"  earlier finals of this version: {', '.join(earlier.run_id) if len(earlier) else 'none'}")
@@ -169,8 +205,20 @@ def _sweep_point(args) -> tuple[str, dict]:
     return str(d), m
 
 
+def _eval_usd_per_day(m: dict) -> float | None:
+    e = (m.get("metrics") or {}).get("eval")
+    return e.get("usd_per_day") if e else None
+
+
+def _rank_usd_per_day(m: dict) -> float:
+    """Sweeps rank on the evaluation (validation) days when the run has them, else on all days."""
+    e = _eval_usd_per_day(m)
+    return e if e is not None else m["usd_per_day"]
+
+
 def cmd_sweep(a) -> None:
     base = load_config(a.config, a.days, a.coins, a.set).to_dict()
+    _refuse_sealed(base)
     grid = []
     for g in a.grid:
         k, v = _kv(g)
@@ -179,8 +227,12 @@ def cmd_sweep(a) -> None:
     points = []
     for combo in itertools.product(*grid):
         d = {**base, "params": dict(base.get("params") or {}), "tags": [*base.get("tags", []), f"sweep:{sweep_id}"]}
-        for k, v in combo:
-            apply_set(d, k, v)
+        try:
+            for k, v in combo:
+                apply_set(d, k, v)
+        except ValueError as e:
+            _fail(str(e))
+        _refuse_sealed(d)
         points.append((combo, d))
     workers = max(1, (os.cpu_count() or 4) // a.jobs)
     print(f"sweep {sweep_id}: {len(points)} runs, {a.jobs} at a time")
@@ -193,10 +245,12 @@ def cmd_sweep(a) -> None:
     runs.rebuild_index()
     for path, _ in results:  # now the siblings are in the index: render each run's robustness grid
         report.render_run(Path(path))
-    rows = sorted(zip(points, results), key=lambda r: -r[1][1]["usd_per_day"])
+    rows = sorted(zip(points, results), key=lambda r: -_rank_usd_per_day(r[1][1]))
     for (combo, _), (path, m) in rows:
         label = " ".join(f"{k}={v}" for k, v in combo)
-        print(f"  {label:<40} ${m['usd_per_day']:>9.2f}/day  P&L ${m['pnl_usd']:>9.2f}  {Path(path).name}")
+        e = _eval_usd_per_day(m)
+        ev = f"  eval ${e:>9.2f}/day" if e is not None else ""
+        print(f"  {label:<40} ${m['usd_per_day']:>9.2f}/day{ev}  P&L ${m['pnl_usd']:>9.2f}  {Path(path).name}")
     print(f"find them again: polydata bt runs --tag sweep:{sweep_id}")
 
 

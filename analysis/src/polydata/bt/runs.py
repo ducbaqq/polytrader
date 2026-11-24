@@ -42,9 +42,7 @@ from .engine import RunResult
 from .splits import day_kind
 
 FINAL_MIN_DAYS = 5
-MIN_USD_PER_DAY = 10
 LATENCY_SWEEP_MS = (100, 200, 400)
-KINDS = ("run", "final", "sweep", "screen")
 INDEX_COLUMNS = ["run_id", "created_utc", "family", "strategy", "version", "kind", "days", "n_days", "coins",
                  "timeframes", "order_latency_ms", "pnl_usd", "usd_per_day", "t_block", "verdict", "tags", "path"]
 _NOT_SHARED = {"index.parquet", "looks.jsonl"}  # derived / local audit trail
@@ -52,6 +50,23 @@ _NOT_SHARED = {"index.parquet", "looks.jsonl"}  # derived / local audit trail
 
 class FinalRefused(Exception):
     """A `--final` run that the rules do not allow."""
+
+
+# Simulator, capital and pass-criterion settings a `--final` run must leave at their defaults: changing any of
+# them could loosen the evaluation. Strategy params, coins, timeframes, tags and seed are free.
+FINAL_FIXED_FIELDS = ("order_latency_ms", "latency_jitter_ms", "fill_report_latency_ms", "cancel_model",
+                      "impact_reset_ms", "capital", "capital_mode", "redeem_delay_s", "max_gap_ms_pm", "max_gap_ms_bn",
+                      "bn_step_ms", "min_usd_per_day")
+
+
+def check_final_config(cfg: RunConfig) -> None:
+    """Raise FinalRefused, naming the fields, if `cfg` changes any of FINAL_FIXED_FIELDS from its default."""
+    default = RunConfig(strategy=cfg.strategy)
+    bad = [f"{k}={getattr(cfg, k)!r} (default {getattr(default, k)!r})" for k in FINAL_FIXED_FIELDS
+           if getattr(cfg, k) != getattr(default, k)]
+    if bad:
+        raise FinalRefused("--final keeps the simulator and capital settings at their defaults; non-default: "
+                           + ", ".join(bad))
 
 
 def runs_dir() -> Path:

@@ -252,19 +252,21 @@ def test_cli_parsing(tmp_path):
     from polydata.bt import cli
 
     assert cli.parse_days(["2026-11-24", "2026-11-26..2026-11-28"]) == ["2026-11-24", "2026-11-26", "2026-11-27", "2026-11-28"]
-    d = {}
+    d = {"strategy": "join-best"}
     cli.apply_set(d, "capital", 10)
     cli.apply_set(d, "size", 7)
     cli.apply_set(d, "params.stop_s", 9)
-    assert d == {"capital": 10, "params": {"size": 7, "stop_s": 9}}
+    assert d == {"strategy": "join-best", "capital": 10, "params": {"size": 7, "stop_s": 9}}
     f = tmp_path / "c.yaml"
     f.write_text("strategy: join-best\ncoins: [btc]\ndays: [2026-11-24]\nparams: {size: 5}\n")
     c = cli.load_config(str(f), None, ["eth"], ["size=8", "capital=100"])
     assert c.coins == ["eth"] and c.params == {"size": 8} and c.capital == 100 and c.days == ["2026-11-24"]
 
 
-def test_cli_final_refused_end_to_end(pdir):
+def test_cli_final_refused_end_to_end(pdir, monkeypatch):
     from polydata.cli import main
+
+    monkeypatch.setattr(runs, "pull", lambda *a, **k: 0)  # never touch the real bucket from a test
 
     (pdir / "c.yaml").write_text("strategy: noop\ncoins: [btc]\n")
     with pytest.raises(SystemExit, match="--final refused"):
@@ -344,3 +346,106 @@ def test_push_skips_tmp_files(pdir):
     s3 = FakeS3()
     runs.push(client=s3, bucket_name="b")
     assert not any(k.endswith(".tmp") for k in s3.objs) and any(k.endswith("results.json") for k in s3.objs)
+
+
+def test_apply_set_rejects_unknown_keys(tmp_path):
+    from polydata.bt import cli
+
+    d = {"strategy": "join-best"}
+    with pytest.raises(ValueError, match="sizee"):
+        cli.apply_set(d, "sizee", 7)  # a typo is neither a RunConfig field nor a join-best param
+    cli.apply_set(d, "params.anything", 1)  # explicit params.x is always allowed
+    assert d["params"] == {"anything": 1}
+    f = tmp_path / "c.yaml"
+    f.write_text("strategy: join-best\ncoins: [btc]\n")
+    with pytest.raises(SystemExit, match="sizee"):
+        cli.load_config(str(f), None, None, ["sizee=8"])
+
+
+@pytest.mark.parametrize("field, value", [("order_latency_ms", 100), ("latency_jitter_ms", 50),
+                                          ("fill_report_latency_ms", 50), ("cancel_model", "proportional"),
+                                          ("impact_reset_ms", 1000), ("capital", 1e6), ("capital_mode", "global"),
+                                          ("redeem_delay_s", 0), ("max_gap_ms_pm", 60_000), ("max_gap_ms_bn", 60_000),
+                                          ("bn_step_ms", 100), ("min_usd_per_day", 0.0)])
+def test_final_refuses_loosened_settings(field, value):
+    c = RunConfig(strategy="join-best", **{field: value})
+    with pytest.raises(runs.FinalRefused, match=field):
+        runs.check_final_config(c)
+
+
+def test_final_allows_params_coins_timeframes_tags_seed():
+    runs.check_final_config(RunConfig(strategy="join-best", params={"size": 9}, coins=["btc"], timeframes=["5m"],
+                                      tags=["x"], seed=3))
+    with pytest.raises(runs.FinalRefused, match="capital.*order_latency_ms|order_latency_ms.*capital"):
+        runs.check_final_config(RunConfig(strategy="join-best", capital=1.0, order_latency_ms=1))
+
+
+def test_cli_final_refuses_loosened_config_without_a_look(pdir):
+    from polydata.cli import main
+
+    (pdir / "c.yaml").write_text("strategy: noop\ncoins: [btc]\nmax_gap_ms_pm: 600000\n")
+    with pytest.raises(SystemExit, match="max_gap_ms_pm"):
+        main(["bt", "run", str(pdir / "c.yaml"), "--final"])
+    assert not (pdir / "runs" / "looks.jsonl").exists()
+
+
+@pytest.mark.parametrize("pull_ok", [True, False])
+def test_cli_final_pulls_first_and_records_it(pdir, monkeypatch, capsys, pull_ok):
+    from polydata.bt import cli
+    from polydata.cli import main
+
+    mark_validated(pdir)
+    build_manifests(pdir, sealed_days())
+    calls, seen = [], {}
+
+    def pull(*a, **k):
+        calls.append("pull")
+        if not pull_ok:
+            raise RuntimeError("no credentials")
+        return 0
+
+    def execute(cfg, kind="run", latency_sweep=None, workers=None, con_factory=None, extra_prov=None, rebuild=True):
+        seen.update(extra_prov or {})
+        return pdir, {}
+
+    monkeypatch.setattr(runs, "pull", pull)
+    monkeypatch.setattr(cli, "execute", execute)
+    monkeypatch.setattr(cli, "_print_run", lambda d, m: None)
+    (pdir / "c.yaml").write_text("strategy: noop\ncoins: [btc]\n")
+    main(["bt", "run", str(pdir / "c.yaml"), "--final"])
+    assert calls == ["pull"] and seen["pulled"] is pull_ok
+    err = capsys.readouterr().err
+    assert ("could not pull" in err) is (not pull_ok)
+
+
+@pytest.mark.parametrize("extra", [["--days", "2026-11-24", "2026-11-25"], ["--set", "day_kinds=[sealed]"]])
+def test_cli_non_final_run_refuses_sealed_days(pdir, extra):
+    from polydata.cli import main
+
+    (pdir / "c.yaml").write_text("strategy: noop\ncoins: [btc]\n")
+    with pytest.raises(SystemExit, match="sealed days need --final"):
+        main(["bt", "run", str(pdir / "c.yaml"), *extra])
+    with pytest.raises(SystemExit, match="sealed days need --final"):
+        main(["bt", "sweep", str(pdir / "c.yaml"), "--grid", "seed=1,2", *extra])
+
+
+@pytest.mark.parametrize("evals, order", [((-5.0, 7.0, 1.0), ["seed=2", "seed=3", "seed=1"]),
+                                           ((None, None, None), ["seed=1", "seed=3", "seed=2"])])
+def test_sweep_ranks_on_eval_usd_per_day(pdir, monkeypatch, capsys, evals, order):
+    from polydata.bt import cli, report
+    from polydata.cli import main
+
+    vals = {1: (50.0, evals[0]), 2: (10.0, evals[1]), 3: (30.0, evals[2])}  # seed -> (usd_per_day, eval usd_per_day)
+
+    def point(args):
+        d, _ = args
+        u, e = vals[d["seed"]]
+        return f"/x/seed{d['seed']}", {"usd_per_day": u, "pnl_usd": u,
+                                       "metrics": {"eval": None if e is None else {"usd_per_day": e}}}
+
+    monkeypatch.setattr(cli, "_sweep_point", point)
+    monkeypatch.setattr(report, "render_run", lambda d: None)
+    (pdir / "c.yaml").write_text("strategy: noop\ncoins: [btc]\n")
+    main(["bt", "sweep", str(pdir / "c.yaml"), "--grid", "seed=1,2,3"])
+    out = [x for x in capsys.readouterr().out.splitlines() if "seed=" in x and "/day" in x]
+    assert [x.split()[0] for x in out] == order
