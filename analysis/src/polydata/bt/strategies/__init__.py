@@ -1,3 +1,3 @@
 """Bundled strategies. Importing this package registers them (`strategy.get_strategy` does it)."""
 
-from . import sanity  # noqa: F401
+from . import mm_binance_pull, sanity  # noqa: F401

@@ -1,7 +1,8 @@
 # mm-binance-pull
 
 **Family:** market-making | **Status:** testing
-**Current version:** not yet implemented (baseline strategy of the backtester; see the design spec)
+**Current version:** bca155741816 (`analysis/src/polydata/bt/strategies/mm_binance_pull.py`, config
+`analysis/configs/mm-binance-pull.yaml`)
 
 ## Hypothesis
 Providing liquidity is profitable on average: makers' losses come mostly from trades that follow
@@ -13,18 +14,37 @@ informed flow. Quotes are skewed against inventory, inventory is capped per mark
 [calibration study](../research/calibration-study.md).
 
 ## Variants tried
-Count: 0.
+Count: 1 (the defaults in the config). The `pull_k=1e6` run below is a diagnostic ablation (pulls
+off), not a candidate.
 | Version | What changed | Why |
 |---|---|---|
+| bca155741816 | first implementation, default params | baseline |
 
 ## Results
-No results yet (the sanity strategy `join-best` exists to test the fill model; its runs are under the
-`sanity` family). Placeholder: results will be listed here, with links to run folders, once the
-strategy has been implemented and run.
+All on train data only: 2026-11-24 10:36-17:50 UTC (~7.2 h, one train day), sim_version a0f42186e4cc.
+Attribution per share is over settled fills (spread / adverse / inventory, metrics.attribution).
+"After move" = share of fills with a > 2 sigma Binance move in the second before the fill.
+
+| Run | Scope | Kind | P&L | Fills (shares) | Spread / adverse / inventory, cents per share | After move | Notes |
+|---|---|---|---|---|---|---|---|
+| `data/runs/market-making/mm-binance-pull/2026-11-24T2233-c82aee` | 8 coins x 5m/15m/1h | train | -$351 | 5,336 (36.3k) | +0.67 / -1.87 / +0.23 | 2.7% | defaults; 85/946 markets voided |
+| `data/runs/market-making/mm-binance-pull/2026-11-24T2241-b1a1de` | same | train | -$763 | 8,040 (54.3k) | +0.68 / -2.32 / +0.23 | 13.0% | ablation: pulls off (`pull_k=1e6`) |
+| `data/runs/sanity/join-best/2026-11-24T2237-fcfc8b` | same | train | -$637 | 13,533 (59.0k) | +0.36 / -1.77 / +0.32 | 11.1% | join-best (size 5), for reference |
+| `data/runs/market-making/mm-binance-pull/2026-11-24T2229-674f91` | btc+eth x 5m/15m | train | -$266 | 4,421 | totals +$196 / -$564 / +$102 | 2.6% btc, 3.6% eth | speed check: 76.6 s for 7.2 h |
+
+By timeframe (defaults run): 5m -$377, 15m +$9, 1h +$17. BTC carries most of the fills (3,855 of 5,336).
 
 ## Lessons
-None yet.
+- **Pulling works on the flow it targets.** Against the same strategy with pulls off, it cuts the
+  fills that follow a Binance move from 13% to 2.7%, adverse selection from -2.32 to -1.87 cents
+  per share, and the loss from -$763 to -$351.
+- **It is not enough.** The remaining fills are still adversely selected (-1.8 cents per share on
+  fills with no 2 sigma move before them) against +0.67 cents of spread. Quiet-looking flow is
+  informed too, at least at a 1-tick-inside-the-touch quote on 5m markets; 15m and 1h are about
+  flat. One train day only: no conclusion about the edge yet.
+- Churn is high: ~515k orders in 7.2 h over 8 coins (requote at every 1-tick target move, plus
+  pulls). Fine in the simulator; the live runner will need a rate budget.
 
 ## Next
-Implement the strategy, run it on train days, then sweep `half_spread`, `k`, `pull_window_ms` and
+More train days first. Then sweep `half_spread`, `k`, `pull_window_ms` and
 `cooldown_ms` on the validation days.
