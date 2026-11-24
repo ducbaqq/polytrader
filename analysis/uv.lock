@@ -1721,6 +1721,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pycryptodome" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "scipy" },
     { name = "zstandard" },
 ]
@@ -1741,6 +1742,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=26.0.1" },
     { name = "pycryptodome", specifier = ">=4.6.0" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
+    { name = "pyyaml", specifier = ">=6.0.4" },
     { name = "scipy", specifier = ">=1.18.1" },
     { name = "zstandard", specifier = ">=0.25.0" },
 ]

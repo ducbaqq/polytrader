@@ -164,6 +164,10 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("db", help=f"(re)write views into data/polytrader.duckdb").set_defaults(fn=cmd_db)
     sub.add_parser("notebook", help="start Jupyter Lab in analysis/notebooks").set_defaults(fn=cmd_notebook)
 
+    from .bt.cli import register
+
+    register(sub.add_parser("bt", help="backtester: run, sweep, validate, runs, push, pull"))
+
     a = ap.parse_args(argv)
     a.fn(a)
 
