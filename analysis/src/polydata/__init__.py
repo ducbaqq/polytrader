@@ -6,6 +6,7 @@
 """
 
 from .config import paths
+from .fees import taker_fee
 from .views import connect, create_views
 
-__all__ = ["connect", "create_views", "paths"]
+__all__ = ["connect", "create_views", "paths", "taker_fee"]

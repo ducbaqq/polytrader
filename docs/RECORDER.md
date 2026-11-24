@@ -91,8 +91,8 @@ Unix seconds, e.g. `btc-updown-5m-1795452900` (5m, 15m, 1h, 4h, 1d).
   closing TWAP ≥ priceToBeat.
 - **4h markets have no `priceToBeat` in Gamma** (`eventMetadata` is null even after resolution);
   reconstruct it from `rtds_price` the same way.
-- **Fees:** taker-only fee, `feeSchedule = {rate: 0.05, exponent: 1, takerOnly: true, rebateRate: 0.2}`
-  on 5m/15m crypto markets; makers get rebates.
+- **Fees:** taker only, `shares × rate × p(1 − p)`; rate 0.05 on BTC 5m/15m, 0.01 on all other
+  Up/Down markets. Verified on-chain; see [FEES.md](FEES.md) (rebates need $200k+ monthly volume).
 - **Binance futures WebSocket is split:** `/public` serves bookTicker/depth, `/market` serves
   aggTrade/markPrice/forceOrder. The legacy `fstream.binance.com/stream` URL silently drops the
   `/market` streams.
