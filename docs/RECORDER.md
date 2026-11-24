@@ -115,6 +115,7 @@ Use this when backtesting across these periods. All times UTC.
 | same | Polymarket CLOB: 4× "1013 slow consumer" (BTC 5m/15m), a few 60 s stale timeouts | Missing book updates and trades for those series for up to ~60 s (e.g. eth-updown-15m 06:45 window: 222 of 277 trades via WS; Data API has all) | Mitigated: per-market connections for BTC 5m/15m and ETH 5m, 25 s stale timeout |
 | Every restart before 2026-11-24 14:16 | Markets that ended shortly before a restart were forgotten: no outcome, no Data API trades (66 unresolved, 16 without trades) | Outcomes and trades fetched late on 2026-11-24 14:16–14:20 (`pm_resolution` / `pm_api_trades` rows with late `recv_ms`); no data lost | Fixed: on startup the recorder resumes ended markets missing outcome/trades (7 days back) |
 | Parquet built before build format 2 (analysis side, all dates) | `polydata build` sorted each hour by `(asset, recv_ms)` with an unstable sort, so rows sharing `(asset, recv_ms)` lost their arrival order (~38% of `pm_price_change` rows moved; same-ms changes to one level could apply in the wrong order) | Raw TSV files are unaffected. Order same-ms rows by `seq` | Fixed: Parquet format 2 adds `seq` (raw arrival order) and sorts by `(asset, recv_ms, seq)`; run `polydata build` to rebuild old hours |
+| Before 2026-11-24 10:36 (backtester) | Late `recv_ms` at 5-minute boundaries (see above) and backfilled resolutions with late `recv_ms` | `polydata.bt` never replays data before 2026-11-24 10:36 UTC. A backfilled resolution delays the simulated payout cash (credited `redeem_delay_s` after its `recv_ms`); see [BACKTESTER.md](BACKTESTER.md#known-limitations) | Handled in the backtester |
 
 No HTTP 429/418 rate limiting has occurred. One Gamma HTTP 500 (retried on the next discovery cycle).
 
@@ -159,5 +160,3 @@ systemd units: `scripts/recorder/systemd/` (copy to `/etc/systemd/system/`).
 
 Deploy: `npm run build`, rsync `dist/recorder package.json package-lock.json` to
 `/opt/polytrader/app/`, `npm ci --omit=dev` if dependencies changed, restart the service.
-| Before 2026-11-24 10:36 (backtester) | Late `recv_ms` at 5-minute boundaries (see above) and backfilled resolutions with late `recv_ms` | `polydata.bt` never replays data before 2026-11-24 10:36 UTC. A backfilled resolution delays the simulated payout cash (credited `redeem_delay_s` after its `recv_ms`); see [BACKTESTER.md](BACKTESTER.md#known-limitations) | Handled in the backtester |
-
