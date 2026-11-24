@@ -34,6 +34,21 @@ Path from the data we're collecting to tested strategies. Update this file as it
   - capacity: size actually fillable
   - sensitivity to latency and fill assumptions
 
+### 1b. Data and servers (from the backtester design review, 2026-11-24)
+In this order:
+- [ ] Locate Polymarket's matching engine: run short probes in a few regions and compare the minimum
+  `recv_ms − ts_ms` on the Polymarket feed (no orders needed). Unverified assumption: Binance
+  matches in Tokyo, Polymarket's order book in London.
+- [ ] Second recorder in the region we'd trade from: at least the Polymarket streams and Binance top
+  of book. One box in Singapore is a single point of failure, gaps are permanent, and every backtest
+  is tied to Singapore's receive times.
+- [ ] More feeds that can't be fetched later, by value:
+  - Coinbase and one more perp venue: top of book and trades
+  - Deribit implied volatility, for the fair-value model
+  - Kalshi's short-dated crypto markets, for a cross-venue strategy family
+  - On-chain fills (maker and taker wallets) can be fetched from the chain later; not urgent.
+- [ ] `gaps` view from `rec_events` / `rec_stats` / the data quality log (the backtester needs it).
+
 ### 2. Strategy research (when there are about 7–10 days of data)
 - [ ] Market making (lead candidate): quote in tight books, pull or reprice quotes on Binance moves,
   inventory limits. Measure what *we* would earn with a back-of-queue fill model.
