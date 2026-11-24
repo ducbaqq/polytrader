@@ -177,36 +177,21 @@ def test_empty_market():
         md.trade(0)
 
 
-def test_same_ms_level_ties_follow_monotone_path():
-    # Rows sharing ts_ms, recv_ms and seq have lost their order (Parquet sorts by (asset, recv_ms)).
-    b = books([(T0, "Up", "0.48:180", "0.52:80")])
-    c = changes(mirror([(T0 + 1000, "BUY", 0.48, 60.0, 0.48, 0.52), (T0 + 1000, "BUY", 0.48, 120.0, 0.48, 0.52),
-                        (T0 + 2000, "BUY", 0.47, 30.0, 0.48, 0.52), (T0 + 2000, "BUY", 0.47, 15.0, 0.48, 0.52)]))
-    c["seq"] = 0
-    md = MarketData.from_frames(info(), c, b, EMPTY_T, ticks())
-    assert md.size_at("BUY", 480, T0 + 1000) == 60  # 180 -> 120 -> 60
-    assert md.size_at("BUY", 470, T0 + 2000) == 30  # 0 -> 15 -> 30
-
-
-def test_same_ms_top_candidates_resolved_by_book():
-    # A SELL at 0.58 crosses the 0.58 bid and rests 10: the final top is (0.57, 0.58), whichever
-    # order the two same-ms rows come in.
+def test_same_ms_rows_follow_seq():
+    # Rows sharing ts_ms and recv_ms apply in `seq` order (the raw arrival order kept by the
+    # Parquet build), not in frame order.
     b = books([(T0, "Up", "0.58:50|0.57:20", "0.59:10")])
-    for order in (1, -1):
-        rows = [(T0 + 1000, "SELL", 0.58, 10.0, 0.57, 0.58), (T0 + 1000, "BUY", 0.58, 0.0, 0.57, 0.59)][::order]
-        c = changes(mirror(rows))
-        c["seq"] = 0
-        md = MarketData.from_frames(info(), c, b, EMPTY_T, ticks())
-        assert md.book_at(T0 + 1000) == ([(570, 20)], [(580, 10), (590, 10)])
-        top = md.top_at(T0 + 1000, clock="ts")
-        assert (top.bid_px, top.ask_px, top.ask_size) == (570, 580, 10)
-        assert list(md.tops.ask_px) == [590, 580]
-
-
-def test_same_ms_tie_back_to_previous_size_is_last():
-    # 0 -> {5.56, 0}: an order added and filled in one message; the 0 cannot be first.
-    b = books([(T0, "Up", "0.48:100", "0.52:80")])
-    c = changes(mirror([(T0 + 1000, "SELL", 0.82, 0.0, 0.48, 0.52), (T0 + 1000, "SELL", 0.82, 5.56, 0.48, 0.52)]))
-    c["seq"] = 0
+    rows = [(T0 + 1000, "BUY", 0.58, 0.0, 0.57, 0.59),      # seq 0: the 0.58 bid is taken
+            (T0 + 1000, "SELL", 0.58, 10.0, 0.57, 0.58),    # seq 1: the rest of the sell order rests
+            (T0 + 2000, "BUY", 0.47, 30.0, 0.57, 0.58),     # seq 2..4: 30 -> 15 -> 0 at one ms
+            (T0 + 2000, "BUY", 0.47, 15.0, 0.57, 0.58),
+            (T0 + 2000, "BUY", 0.47, 0.0, 0.57, 0.58)]
+    c = changes(mirror(rows))
+    c["seq"] = [i for i in range(len(rows)) for _ in (0, 1)]
+    c = c.iloc[::-1].reset_index(drop=True)  # frame order reversed
     md = MarketData.from_frames(info(), c, b, EMPTY_T, ticks())
-    assert md.size_at("SELL", 820, T0 + 1000) == 0
+    assert md.book_at(T0 + 1000) == ([(570, 20)], [(580, 10), (590, 10)])
+    top = md.top_at(T0 + 1000, clock="ts")
+    assert (top.bid_px, top.ask_px, top.ask_size) == (570, 580, 10)
+    assert list(zip(md.tops.bid_px.tolist(), md.tops.ask_px.tolist())) == [(580, 590), (570, 590), (570, 580)]
+    assert md.size_at("BUY", 470, T0 + 2000) == 0

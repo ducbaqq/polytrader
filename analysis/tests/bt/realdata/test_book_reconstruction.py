@@ -42,6 +42,9 @@ def test_down_rows_have_up_mirror(con):
     assert n > 0 and mirrored / n >= 0.999
 
 
+# Gate: the default (lenient) rate >= 99.5 %: a row also matches a book state within the same ts_ms,
+# because pm_best_bid_ask is published per change and can show the book halfway through a message
+# that changes several levels at once (or before same-ms changes). The strict rate is printed too.
 # 1000 rows per market rather than 200: at 200 a single miss is 0.5 %, so the 99.5 % gate would
 # flip on sampling noise (seed 0 at n=200 gives 199/200 on one market; every market is >= 99.7 % at 1000).
 N_ROWS = 1000

@@ -121,3 +121,38 @@ def test_incremental(data, capsys):
     from polydata.views import connect
 
     assert connect().sql("SELECT count(*) FROM bn_fut_bbo").fetchall()[0][0] == 6
+
+
+def test_seq_keeps_raw_order(data):
+    """Rows sharing (asset, recv_ms) keep their raw order through `seq` (file order, then row order)."""
+    from polydata.build import build
+    from polydata.views import connect
+
+    hdr = ["recv_ms", "ts_ms", "asset", "side", "price", "size", "best_bid", "best_ask"]
+    t = 1795518000500
+    a = [[t, t - 100, f"{SLUG}|U", "BUY", 0.48, s, 0.48, 0.52] for s in (180, 120, 60, 30, 90, 10, 0, 40)]
+    b = [[t + 1, t - 99, f"{SLUG}|D", "SELL", 0.52, s, 0.48, 0.52] for s in (5, 3)] + \
+        [[t, t - 100, f"{SLUG}|U", "BUY", 0.48, s, 0.48, 0.52] for s in (7, 8)]
+    raw = data / "raw" / HOUR
+    write_tsv(raw / "pm_price_change.1795518000000.tsv.zst", hdr, a)
+    write_tsv(raw / "pm_price_change.1795518300000.tsv.zst", hdr, b)
+    build()
+    con = connect()
+    rows = con.sql("SELECT seq, asset, size FROM pm_price_change ORDER BY seq").fetchall()
+    assert [r[0] for r in rows] == list(range(12))
+    assert [r[2] for r in rows] == [180, 120, 60, 30, 90, 10, 0, 40, 5, 3, 7, 8]
+    f = next((data / "parquet" / "pm_price_change").glob("*/*.parquet"))
+    phys = duckdb.sql(f"SELECT asset, recv_ms, seq FROM read_parquet('{f}')").fetchall()
+    assert phys == sorted(phys)  # physical order (asset, recv_ms, seq)
+    assert con.sql("SELECT count(*) FROM bn_fut_bbo WHERE seq IS NULL").fetchall()[0][0] == 0
+
+
+def test_old_format_manifest_rebuilds(data, capsys):
+    from polydata.build import build
+
+    build()
+    capsys.readouterr()
+    src = next((data / "parquet" / "bn_fut_bbo").glob("*/*.src"))
+    src.write_text("\n".join(l for l in src.read_text().splitlines() if not l.startswith("#")))
+    build()
+    assert "built 1," in capsys.readouterr().out

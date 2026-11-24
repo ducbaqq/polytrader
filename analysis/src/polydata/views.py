@@ -113,7 +113,8 @@ def _stream_view(name: str, glob: str, include_sealed: bool = False) -> str:
         extra = ", asset_slug(asset) AS slug, asset_outcome(asset) AS outcome"
     return (
         f"CREATE OR REPLACE VIEW {name} AS SELECT *{extra} "
-        f"FROM read_parquet('{glob}', hive_partitioning=true, hive_types={{'date': DATE}})"
+        # union_by_name: hours built before a column was added (e.g. `seq`, build format 2) read as NULL
+        f"FROM read_parquet('{glob}', hive_partitioning=true, hive_types={{'date': DATE}}, union_by_name=true)"
         + ("" if include_sealed else f" WHERE {SEALED_SQL_FILTER}")
     )
 

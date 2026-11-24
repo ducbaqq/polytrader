@@ -70,7 +70,12 @@ JSONL = [
     "bn_depth_snapshot", "bn_fut_stats", "bn_other", "rtds_other",
 ]
 
+# Every TSV stream's Parquet also has a derived `seq BIGINT` (raw arrival order within the
+# stream-hour, see polydata.build); it is not a recorder column.
+SEQ_COLUMN = "seq"
+
 # Sort key inside each Parquet file: groups rows per instrument so filters on it skip row groups.
+# Files are sorted by (SORT key, recv_ms, seq).
 SORT = {name: ("asset" if name.startswith("pm_") else "symbol" if name == "rtds_price" else "sym") for name in TSV}
 
 # Typed conversions for JSONL streams (SELECT over `src` = read_json(... recv_ms, d)).

@@ -16,10 +16,8 @@ token the taker traded. `MarketData` keeps one combined book in Up terms (see `t
 - **Trades** keep the token and the taker side, plus the taker side/price in Up terms. Verified on
   2026-11-24 data: the consumed-side level drops within +-50 ms of a trade for ~82 % of trades,
   the opposite side for < 1 %. Trade `ts_ms` lags the level change by a few ms (median ~4 ms).
-- **Lost same-ms order.** The Parquet files sort by (asset, recv_ms) with no stable tie order, so
-  rows sharing (asset, recv_ms) lose their recorded order. Ordering by ts_ms first recovers most
-  of it; same-level rows with equal ts_ms and recv_ms are ordered by `_order_ties`, and a message
-  group with several reported tops is resolved against the level book (`MarketData._pick_top`).
+- **Same-ms order.** Rows are ordered by (ts_ms, recv_ms, seq): `seq` is the raw arrival order the
+  Parquet build keeps (`polydata.build`), so changes sharing a millisecond apply in recorded order.
 
 Everything is built in DuckDB (one query per stream for all of a coin's markets) and sliced into
 numpy arrays; nothing iterates over price-change rows in Python. Time `t` is inclusive: the state
@@ -126,43 +124,15 @@ FROM l;
 _ORDER = "k, recv_ms, seq, src, size"
 
 _SQL_LEVELS = f"""
--- Same-level rows sharing (ts_ms, recv_ms, seq) have lost their order. Hint at the final state
--- from the top reported by the next message (when it does not touch the level): 1 = the level is
--- empty after the group (the best price on its side is worse), 2 = it is the best price (> 0).
-CREATE OR REPLACE TEMP TABLE _hint AS
-WITH g AS (
-    SELECT mi, ts_ms, recv_ms, seq, min(bb) AS bb_lo, max(bb) AS bb_hi, min(ba) AS ba_lo, max(ba) AS ba_hi
-    FROM _chg GROUP BY ALL),
-gn AS (
-    SELECT mi, ts_ms, recv_ms, seq,
-           lead(ts_ms) OVER w AS nts, lead(recv_ms) OVER w AS nrecv, lead(seq) OVER w AS nseq,
-           lead(bb_lo) OVER w AS nbb_lo, lead(bb_hi) OVER w AS nbb_hi,
-           lead(ba_lo) OVER w AS nba_lo, lead(ba_hi) OVER w AS nba_hi
-    FROM g WINDOW w AS (PARTITION BY mi ORDER BY ts_ms, recv_ms, seq)),
-ties AS (
-    SELECT mi, up_side, px, ts_ms, recv_ms, seq FROM _chg
-    GROUP BY ALL HAVING count(*) > 1 AND count(DISTINCT size) > 1)
-SELECT t.*, CASE
-        WHEN t.up_side = 'SELL' AND gn.nba_lo > t.px THEN 1
-        WHEN t.up_side = 'SELL' AND gn.nba_lo = t.px AND gn.nba_hi = t.px THEN 2
-        WHEN t.up_side = 'BUY' AND gn.nbb_hi < t.px THEN 1
-        WHEN t.up_side = 'BUY' AND gn.nbb_lo = t.px AND gn.nbb_hi = t.px THEN 2
-        ELSE 0 END::TINYINT AS hint
-FROM ties t JOIN gn USING (mi, ts_ms, recv_ms, seq)
-WHERE NOT EXISTS (SELECT 1 FROM _chg c WHERE c.mi = t.mi AND c.up_side = t.up_side AND c.px = t.px
-                  AND c.ts_ms = gn.nts AND c.recv_ms = gn.nrecv AND c.seq = gn.nseq);
-
 CREATE OR REPLACE TEMP TABLE _ev AS
-SELECT c.mi, c.up_side, c.px, c.ts_ms * 2 AS k, c.ts_ms, c.recv_ms, c.seq, 0 AS src, c.size, coalesce(h.hint, 0) AS hint
-FROM _chg c LEFT JOIN _hint h USING (mi, up_side, px, ts_ms, recv_ms, seq)
+SELECT mi, up_side, px, ts_ms * 2 AS k, ts_ms, recv_ms, seq, 0 AS src, size FROM _chg
 UNION ALL
-SELECT mi, up_side, px, k, ts_ms, recv_ms, seq, 1, size, 0 FROM _sl;
+SELECT mi, up_side, px, k, ts_ms, recv_ms, seq, 1, size FROM _sl;
 
--- A level > 0 at key k whose next event at a later key comes after the next snapshot (or never)
--- is absent from that snapshot: it gets a size-0 entry at the snapshot. (Using the next *key*
--- keeps this independent of the order of same-key rows, which is fixed up later.)
+-- A level > 0 after key k whose next event at a later key comes after the next snapshot (or never)
+-- is absent from that snapshot: it gets a size-0 entry at the snapshot.
 CREATE OR REPLACE TEMP TABLE _zero AS
-WITH g AS (SELECT mi, up_side, px, k, max(size) > 0 AS pos FROM _ev GROUP BY ALL),
+WITH g AS (SELECT mi, up_side, px, k, arg_max(size, (recv_ms, seq, src)) > 0 AS pos FROM _ev GROUP BY ALL),
 e AS (SELECT *, lead(k) OVER (PARTITION BY mi, up_side, px ORDER BY k) AS nk FROM g),
 s AS (SELECT mi, k, ts_ms, recv_ms, seq FROM _snap)
 SELECT e.mi, e.up_side, e.px, s.k, s.ts_ms, s.recv_ms, s.seq, 2 AS src, 0.0 AS size
@@ -171,9 +141,8 @@ WHERE e.pos AND (e.nk IS NULL OR e.nk > s.k);
 """
 
 _SQL_LEVELS_OUT = f"""
-SELECT mi, (up_side = 'SELL')::TINYINT AS side, px::SMALLINT AS px, ts_ms, recv_ms, size, seq, src::TINYINT AS src,
-       hint::TINYINT AS hint
-FROM (SELECT * FROM _ev UNION ALL SELECT mi, up_side, px, k, ts_ms, recv_ms, seq, src, size, 0 FROM _zero)
+SELECT mi, (up_side = 'SELL')::TINYINT AS side, px::SMALLINT AS px, ts_ms, recv_ms, size
+FROM (SELECT * FROM _ev UNION ALL SELECT mi, up_side, px, k, ts_ms, recv_ms, seq, src, size FROM _zero)
 ORDER BY mi, side, px, {_ORDER}
 """
 
@@ -186,23 +155,17 @@ SELECT s.mi, s.k, s.ts_ms, s.recv_ms, s.seq,
        coalesce(min(l.px) FILTER (WHERE l.up_side = 'SELL' AND l.size > 0), 1000)
 FROM _snap s LEFT JOIN _sl l ON l.mi = s.mi AND l.k = s.k
 GROUP BY s.mi, s.k, s.ts_ms, s.recv_ms, s.seq;
-
-CREATE OR REPLACE TEMP TABLE _topg AS
-SELECT *, count(*) OVER (PARTITION BY mi, k, recv_ms, seq) AS nc
-FROM (SELECT DISTINCT mi, k, ts_ms, recv_ms, seq, bb, ba FROM _top);
 """
 
 
 def _sql_tops_out(order: str) -> str:
-    """Top rows per message group (k, recv_ms, seq), in `order`. A group with one top keeps a row
-    only if it differs from the previous one; a group with several distinct tops (same-ms rows
-    whose order is lost) keeps all candidates, resolved against the level book in Python."""
+    """Top rows in `order`, keeping a row only where (bid, ask) changes."""
     return f"""
-    SELECT mi, k, ts_ms, recv_ms, seq, bb::SMALLINT AS bid_px, ba::SMALLINT AS ask_px, nc FROM (
-        SELECT *, lag(bb) OVER w AS pb, lag(ba) OVER w AS pa, lag(nc) OVER w AS pn FROM _topg
-        WINDOW w AS (PARTITION BY mi ORDER BY {order}, bb, ba))
-    WHERE nc > 1 OR pn > 1 OR pb IS NULL OR pb <> bb OR pa <> ba
-    ORDER BY mi, {order}, bb, ba"""
+    SELECT mi, ts_ms, recv_ms, bb::SMALLINT AS bid_px, ba::SMALLINT AS ask_px FROM (
+        SELECT *, lag(bb) OVER w AS pb, lag(ba) OVER w AS pa FROM _top
+        WINDOW w AS (PARTITION BY mi ORDER BY {order}))
+    WHERE pb IS NULL OR pb <> bb OR pa <> ba
+    ORDER BY mi, {order}"""
 
 
 _SQL_TRADES_OUT = """
@@ -231,7 +194,7 @@ def _build(con, n_markets: int) -> list[dict]:
         "trades": con.execute(_SQL_TRADES_OUT).fetchnumpy(),
         "ticks": con.execute(_SQL_TICKS_OUT).fetchnumpy(),
     }
-    for t in ("_chg", "_snap", "_sl", "_hint", "_ev", "_zero", "_top", "_topg"):
+    for t in ("_chg", "_snap", "_sl", "_ev", "_zero", "_top"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     out: list[dict] = [{} for _ in range(n_markets)]
     for name, cols in parts.items():
@@ -246,38 +209,6 @@ def _build(con, n_markets: int) -> list[dict]:
 
 # ------------------------------------------------------------------------------------- MarketData
 
-def _order_ties(side, px, ts, recv, seq, src, size, hint) -> np.ndarray:
-    """Order same-level changes that share ts_ms, recv_ms and seq (their true order is lost in the
-    Parquet files, which sort by (asset, recv_ms) without a stable tie order) as a monotone path
-    from the level's previous size: the size farthest from it is the final one. One message that
-    changes a level several times (several fills, several orders added) moves it one way. A row
-    equal to the previous size goes last. `hint` (from the next message's top, see _SQL_LEVELS)
-    overrides whether the final size is 0."""
-    n = len(size)
-    if n < 2:
-        return size
-    same = ((side[1:] == side[:-1]) & (px[1:] == px[:-1]) & (ts[1:] == ts[:-1]) & (recv[1:] == recv[:-1])
-            & (seq[1:] == seq[:-1]) & (src[1:] == 0) & (src[:-1] == 0))
-    if not same.any():
-        return size
-    size = size.copy()
-    d = np.diff(np.r_[0, same.astype(np.int8), 0])
-    for a, b in zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist()):  # run [a, b]
-        prev = size[a - 1] if a > 0 and side[a - 1] == side[a] and px[a - 1] == px[a] else 0.0
-        seg = size[a:b + 1]
-        dist = np.abs(seg - prev)
-        # A row equal to the previous size cannot come first (it would be a no-op), so the level
-        # went away and came back to it: put it last.
-        seg = seg[np.argsort(np.where(dist == 0, np.inf, dist), kind="stable")]
-        zero = seg == 0
-        if hint[a] == 1 and seg[-1] != 0 and zero.any():
-            seg = np.r_[seg[~zero], seg[zero]]
-        elif hint[a] == 2 and seg[-1] == 0 and (~zero).any():
-            seg = np.r_[seg[zero], seg[~zero]]
-        size[a:b + 1] = seg
-    return size
-
-
 def _search(arr: np.ndarray, t: int) -> int:
     """Index of the last element <= t, or -1."""
     return int(np.searchsorted(arr, t, side="right")) - 1
@@ -291,7 +222,6 @@ class MarketData:
         lv = arrays["levels"]
         side, px = lv["side"].astype(np.int8), lv["px"].astype(np.int64)
         ts, recv, size = lv["ts_ms"].astype(np.int64), lv["recv_ms"].astype(np.int64), lv["size"].astype(np.float64)
-        size = _order_ties(side, px, ts, recv, lv["seq"], lv["src"], size, lv["hint"])
         n = len(ts)
         self._levels: dict[tuple[str, int], _Level] = {}
         self._keys: dict[str, list[int]] = {"BUY": [], "SELL": []}
@@ -322,41 +252,10 @@ class MarketData:
         o = np.argsort(tk_recv, kind="stable")
         self._ticks_recv = Ticks(tk_ts[o], tk_recv[o], tk_px[o])
 
-    def _tops(self, d: dict) -> Tops:
-        """Resolve multi-candidate groups to the top consistent with the level book at the group's
-        ts_ms, then keep only rows where the top changes."""
-        k, recv, seq = d["k"].astype(np.int64), d["recv_ms"].astype(np.int64), d["seq"].astype(np.int64)
-        ts, bid, ask = d["ts_ms"].astype(np.int64), d["bid_px"].astype(np.int64), d["ask_px"].astype(np.int64)
-        n = len(k)
-        keep = np.ones(n, dtype=bool)
-        multi = np.flatnonzero(d["nc"] > 1)
-        if len(multi):
-            new = np.r_[True, (k[1:] != k[:-1]) | (recv[1:] != recv[:-1]) | (seq[1:] != seq[:-1])]
-            starts = np.flatnonzero(new)
-            ends = np.r_[starts[1:], n]
-            for a, b in zip(starts.tolist(), ends.tolist()):
-                if b - a < 2:
-                    continue
-                keep[a:b] = False
-                keep[a + self._pick_top(int(ts[a]), bid[a:b].tolist(), ask[a:b].tolist())] = True
-        ts, recv, bid, ask = ts[keep], recv[keep], bid[keep], ask[keep]
-        chg = np.r_[True, (bid[1:] != bid[:-1]) | (ask[1:] != ask[:-1])] if len(bid) else np.zeros(0, bool)
-        return Tops(ts[chg], recv[chg], bid[chg], ask[chg])
-
-    def _pick_top(self, t: int, bids: list[int], asks: list[int]) -> int:
-        """Index of the candidate (bid, ask) whose levels are live at t while every better candidate
-        price is empty; the last candidate if none fits."""
-        for i, (b, a) in enumerate(zip(bids, asks)):
-            if b != NO_BID_PX and self.size_at("BUY", b, t) <= 0:
-                continue
-            if a != NO_ASK_PX and self.size_at("SELL", a, t) <= 0:
-                continue
-            if any(ob > b and self.size_at("BUY", ob, t) > 0 for ob in bids):
-                continue
-            if any(oa < a and self.size_at("SELL", oa, t) > 0 for oa in asks):
-                continue
-            return i
-        return len(bids) - 1
+    @staticmethod
+    def _tops(d: dict) -> Tops:
+        return Tops(d["ts_ms"].astype(np.int64), d["recv_ms"].astype(np.int64),
+                    d["bid_px"].astype(np.int64), d["ask_px"].astype(np.int64))
 
     def __repr__(self) -> str:
         return (f"MarketData({self.info.slug}: {len(self._levels)} levels, "
@@ -438,9 +337,8 @@ class MarketData:
     def from_frames(cls, info: MarketInfo, changes: pd.DataFrame, books: pd.DataFrame, trades: pd.DataFrame,
                     ticks: pd.DataFrame) -> MarketData:
         """Build from raw-shaped frames (view columns of pm_price_change / pm_book / pm_trade /
-        pm_tick_size_change, with `outcome`). Row order within a frame is the tie order, unless
-        a frame has a `seq` column (rows with equal ts_ms, recv_ms and seq are then treated as having
-        lost their order, as in the Parquet files)."""
+        pm_tick_size_change, with `outcome`). Same-ms rows apply in the frame's `seq` column
+        order if it has one (as in the Parquet files), else in row order."""
         import duckdb
 
         from ..views import MACROS
@@ -502,6 +400,9 @@ def load_coin(con, coin: str, timeframes: list[str], start_ms: int, end_ms: int,
     """Every market of `coin` in `timeframes` whose window overlaps [start_ms, end_ms), with all its
     Polymarket data (from subscription, ~2 windows before the open, to the end of the recording).
     One DuckDB pass per stream for all the markets. Returns {slug: MarketData}."""
+    for v in ("pm_price_change", "pm_book", "pm_trade"):
+        if "seq" not in {r[0] for r in con.execute(f"DESCRIBE {v}").fetchall()}:
+            raise RuntimeError(f"{v} has no `seq` column: the Parquet predates build format 2; run `polydata build --force`")
     mk = con.execute(_MARKETS_SQL, [coin, list(timeframes), end_ms, start_ms]).df()
     if slugs is not None:
         mk = mk[mk.slug.isin(slugs)]
@@ -518,13 +419,13 @@ def load_coin(con, coin: str, timeframes: list[str], start_ms: int, end_ms: int,
     where = "s.asset IN (SELECT unnest(?)) AND s.date BETWEEN ? AND ? AND s.ts_ms BETWEEN ? AND ?"
     params = [assets, d0, d1, lo, hi]
     con.execute(f"""CREATE OR REPLACE TEMP TABLE _pc AS
-        SELECT m.mi, s.ts_ms, s.recv_ms, 0::BIGINT AS seq, s.outcome, s.side, s.price, s.size, s.best_bid, s.best_ask
+        SELECT m.mi, s.ts_ms, s.recv_ms, s.seq, s.outcome, s.side, s.price, s.size, s.best_bid, s.best_ask
         FROM pm_price_change s JOIN _mk m USING (slug) WHERE {where}""", params)
     con.execute(f"""CREATE OR REPLACE TEMP TABLE _bk AS
-        SELECT m.mi, s.ts_ms, s.recv_ms, 0::BIGINT AS seq, s.outcome, s.bids, s.asks
+        SELECT m.mi, s.ts_ms, s.recv_ms, s.seq, s.outcome, s.bids, s.asks
         FROM pm_book s JOIN _mk m USING (slug) WHERE {where}""", params)
     con.execute(f"""CREATE OR REPLACE TEMP TABLE _tr AS
-        SELECT m.mi, s.ts_ms, s.recv_ms, row_number() OVER (ORDER BY s.ts_ms, s.recv_ms, s.tx_hash, s.size) AS seq,
+        SELECT m.mi, s.ts_ms, s.recv_ms, s.seq,
                s.outcome, s.side, s.price, s.size
         FROM pm_trade s JOIN _mk m USING (slug) WHERE {where}""", params)
     has_ticks = "pm_tick_size_change" in {r[0] for r in con.execute("SHOW TABLES").fetchall()}
@@ -535,6 +436,10 @@ def load_coin(con, coin: str, timeframes: list[str], start_ms: int, end_ms: int,
         con.unregister("_cid_df")
     else:
         con.execute("CREATE OR REPLACE TEMP TABLE _tk (mi INTEGER, ts_ms BIGINT, recv_ms BIGINT, new_tick_size DOUBLE)")
+    for t_ in ("_pc", "_bk", "_tr"):
+        if con.execute(f"SELECT count(*) FROM {t_} WHERE seq IS NULL").fetchall()[0][0]:
+            raise RuntimeError(f"{t_[1:]}: rows without `seq` (hours built before build format 2); "
+                               "rebuild them with `polydata build --force`")
     arrays = _build(con, len(mk))
     for t_ in ("_pc", "_bk", "_tr", "_tk", "_mk"):
         con.execute(f"DROP TABLE IF EXISTS {t_}")
