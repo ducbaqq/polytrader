@@ -1,7 +1,8 @@
 # Polymarket fees
 
 Verified 2026-11-24 against [Polymarket's fee docs](https://docs.polymarket.com/trading/fees.md) and
-against on-chain fills (`analysis/tools/verify_fees.py`). Code: `polydata.fees.taker_fee()` in Python,
+against on-chain fills (`analysis/tools/verify_fees.py`): every taker fill without an app fee matched
+(236/236 and 147/147 in two samples, both sides, prices 0.003–0.992, both rates). Code: `polydata.fees.taker_fee()` in Python,
 `taker_fee(shares, price, rate)` in SQL.
 
 ## Formula
@@ -10,9 +11,16 @@ against on-chain fills (`analysis/tools/verify_fees.py`). Code: `polydata.fees.t
 fee (USDC) = shares × rate × (p × (1 − p)) ^ exponent      rounded to 5 decimals
 ```
 
-- **Takers only.** Makers pay nothing. Settlement and redemption of winning shares are free.
-- **Paid in USDC on top of the trade.** Example: buying 15.625 shares at 0.32 transferred 5.17
-  USDC, 5.00 for the shares and a 0.17 fee (tx `0x17cbc1ed…992f`).
+- **Takers only.** Makers pay nothing: 423 of 423 maker fills; the only non-zero maker fees were
+  app builder fees. Settlement and redemption of winning shares are free.
+- **Buys pay the fee on top.** Buying 15.625 shares at 0.32 transferred 5.17 USDC: 5.00 for the
+  shares plus a 0.17 fee (tx `0x17cbc1ed…992f`).
+- **Sells have it deducted from the proceeds.** Selling 15 shares for 1.95 paid out 1.93304, i.e.
+  1.95 − 0.01696.
+- **One fee per taker order, on its average fill price.** When an order sweeps several price levels,
+  the fee is `total shares × rate × p̄(1 − p̄)` with p̄ = total USDC / total shares, not a sum per
+  fill. This matched 24 of 24 multi-price orders; the per-fill sum matched only 17. The difference
+  is tiny.
 - `rate` and `exponent` come from each market's `feeSchedule`, in `markets.fee_rate` and
   `markets.fee_exponent`. Today `exponent` is always 1:
 
@@ -43,6 +51,12 @@ The fee in USDC is symmetric around 0.5. It's largest at 0.5 and tends to 0 near
 - The market's `feeSchedule.rebateRate` (0.2) is **not** our rebate. Per the docs, rebates depend on
   the account's tier, not on the market's configuration.
 - Backtests therefore use **0% rebates**. Treat any rebate as upside once volume justifies it.
+
+## Not verified (needs our own orders, at the paper/live stage)
+
+- That orders placed through the official API/SDK carry **no builder fee** by default.
+- That our account gets the standard schedule, i.e. no special tier or fee holiday applies.
+- Everything above about rebates comes from the docs; we assume 0% anyway.
 
 ## Gotchas
 

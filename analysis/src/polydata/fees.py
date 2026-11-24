@@ -3,7 +3,8 @@
     fee (USDC) = shares * rate * (p * (1 - p)) ** exponent,  rounded to 5 decimals
 
 - Taker only; makers pay nothing. Settlement/redemption is free.
-- Paid in USDC (pUSD) on top of the trade: buying 15.625 shares at 0.32 costs 5.00 + 0.17 fee.
+- Paid in USDC: added to the cost of a buy (15.625 @ 0.32 costs 5.00 + 0.17), deducted from a
+  sell's proceeds. One fee per taker order, computed on its average fill price.
 - rate/exponent per market: `markets.fee_rate`, `markets.fee_exponent` (BTC 5m/15m 0.05, other crypto 0.01).
 - Rebates: 0% for us until 30-day weighted volume reaches $200k (maker or taker tier). The market's
   `rebateRate` field is NOT our rebate.
