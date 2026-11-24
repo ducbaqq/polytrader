@@ -163,8 +163,13 @@ def check_db() -> dict:
                                     AND (kind IN ({", ".join(f"'{k}'" for k in thresholds)})
                                          OR detail ~ '\\m(429|418)\\M')
                                   GROUP BY 1"""):
-        if "429" in sample or "418" in sample:
-            out["ratelimit"] = (f"RATE LIMITED ({n}x in 10 min): {sample}", 5)
+        if "418" in sample:  # Binance IP ban: actionable immediately
+            out["ipban"] = (f"IP BANNED (HTTP 418, {n}x in 10 min): {sample}", 1)
+        elif "429" in sample and int(n) >= 20:
+            # Scattered 429s (often alongside 5xx when Polymarket's Data API struggles) are retried and
+            # self-heal; only heavy, sustained limiting is actionable. Lasting damage shows up in the
+            # "trades" / "coverage" checks.
+            out["ratelimit"] = (f"RATE LIMITED, sustained ({n}x in 10 min): {sample}", 10)
         elif int(n) >= thresholds.get(kind, 10):
             label = {"seq_gap": "Binance depth sequence gaps", "parse_error": "unparseable messages (format change?)"}.get(kind, kind)
             out[f"errors:{kind}"] = (f"{n}x {label} in 10 min, e.g. {sample}", 3)
