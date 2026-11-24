@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the polytrader recorder and alert on Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=polytrader
+Group=polytrader
+ExecStart=/usr/bin/python3 /opt/polytrader/app/watchdog.py
+TimeoutStartSec=50

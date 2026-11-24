@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly upload of polytrader recorder data to Spaces
+
+[Timer]
+OnCalendar=*-*-* *:07:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

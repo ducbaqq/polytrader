@@ -113,8 +113,35 @@ Use this when backtesting across these periods. All times UTC.
 | 2026-11-23 17:21 – 2026-11-24 10:36 | All streams rotated files at once; the event loop stalled 1.5–4 s at almost every 5-min boundary | **No data lost** (sequence numbers continuous, 1 row/s streams complete), but `recv_ms` is late by up to ~4 s within ~5 s after each :x0/:x5 boundary. Use exchange timestamps there, not `recv_ms` | Fixed: staggered rotation, zstd at lower priority. Lag p99 now ~45 ms |
 | 2026-11-23 17:46 – 2026-11-24 10:12 | Single RTDS connection stalled 59× (30 s detection) | Chainlink gaps 1.5% of time; 48 of 2,181 priceToBeat windows incomplete (Gamma's priceToBeat still available for them) | Fixed: 2 redundant connections, 5 s detection. Upstream gaps (both connections, e.g. 8 s at 11-24 10:45:07) remain |
 | same | Polymarket CLOB: 4× "1013 slow consumer" (BTC 5m/15m), a few 60 s stale timeouts | Missing book updates and trades for those series for up to ~60 s (e.g. eth-updown-15m 06:45 window: 222 of 277 trades via WS; Data API has all) | Mitigated: per-market connections for BTC 5m/15m and ETH 5m, 25 s stale timeout |
+| Every restart before 2026-11-24 14:16 | Markets that ended shortly before a restart were forgotten: no outcome, no Data API trades (66 unresolved, 16 without trades) | Outcomes and trades fetched late on 2026-11-24 14:16–14:20 (`pm_resolution` / `pm_api_trades` rows with late `recv_ms`); no data lost | Fixed: on startup the recorder resumes ended markets missing outcome/trades (7 days back) |
 
 No HTTP 429/418 rate limiting has occurred. One Gamma HTTP 500 (retried on the next discovery cycle).
+
+## Alerting (Telegram)
+
+`scripts/recorder/watchdog.py` runs every minute (`polytrader-watchdog.timer`) and messages Telegram
+**only for problems that need action**. A check must fail continuously for its threshold before it
+pings. Self-healing blips never alert: dropped connections that reconnect, short upstream gaps,
+transient REST errors, depth resyncs and single restarts. They are counted in the daily summary
+(07:00 UTC). Each alert repeats every 3 h while it lasts, and a ✅ message is sent when it clears.
+
+| Alert | Fires when |
+|---|---|
+| Recorder not running | service inactive for 2 min, or ≥ 3 restarts within an hour |
+| Data stopped | a core stream (Binance trades/BBO/depth/mark, Polymarket book updates, Chainlink) has no rows for 5 min, or no stats at all for 5 min |
+| Feed degraded | Chainlink or mark-price rate below normal for 15 min |
+| Connection stuck | a WebSocket hasn't reconnected for 5 min |
+| Coverage | a series' current market isn't subscribed for 5 min |
+| Rate limited | HTTP 429/418 for 5 min |
+| Format change | parse errors or unexpected outcomes (Polymarket changed something) |
+| Resolutions | markets without outcome/trades more than 1 h after their end, for 30 min |
+| Archive | no successful Spaces upload for 2 h 15 min |
+| Host | < 10 GB disk free, clock not synchronized for 30 min, memory > 900 MB for 15 min |
+
+Send `/status` to the bot for a report. Config: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (and
+optionally `HEALTHCHECK_URL`, pinged every run, so an external service can alert if the whole droplet
+dies) in `/opt/polytrader/.env`. Test with `python3 /opt/polytrader/app/watchdog.py --test`;
+`--dry-run` shows what would be sent.
 
 ## Operations
 
@@ -126,6 +153,8 @@ journalctl -u polytrader-archive -n 20             # archive runs (as root)
 systemctl start polytrader-archive                 # archive now (as root)
 python3 /opt/polytrader/app/verify.py /opt/polytrader/data --since-minutes 30
 ```
+
+systemd units: `scripts/recorder/systemd/` (copy to `/etc/systemd/system/`).
 
 Deploy: `npm run build`, rsync `dist/recorder package.json package-lock.json` to
 `/opt/polytrader/app/`, `npm ci --omit=dev` if dependencies changed, restart the service.

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the polytrader watchdog every minute
+
+[Timer]
+# :30 so the recorder's per-minute stats (flushed at :00) are in Postgres.
+OnCalendar=*-*-* *:*:30
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

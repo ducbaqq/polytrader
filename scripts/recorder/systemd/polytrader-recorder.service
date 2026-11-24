@@ -1,0 +1,24 @@
+[Unit]
+Description=Polytrader market data recorder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=polytrader
+Group=polytrader
+WorkingDirectory=/opt/polytrader/app
+EnvironmentFile=/opt/polytrader/.env
+Environment=RECORDER_DATA_DIR=/opt/polytrader/data
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node --max-old-space-size=768 dist/recorder/index.js
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=75
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+Nice=-5
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target

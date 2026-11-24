@@ -13,7 +13,7 @@ import { CONFIG, RECURRENCE_MS, SERIES, SeriesDef } from './config';
 import { tsv, jsonl } from './sink';
 import { ReconnectingWs } from './wsClient';
 import { logEvent } from './stats';
-import { bg } from './db';
+import { bg, getPool } from './db';
 
 interface Market {
   slug: string;
@@ -240,18 +240,19 @@ async function resolveEnded(): Promise<void> {
     const now = Date.now();
     for (const m of markets.values()) {
       if (now < m.end + 30_000) continue;
-      if (now > m.end + CONFIG.resolutionGiveUpMs && !m.resolved) {
-        logEvent('pm_unresolved', m.slug, 'gave up waiting for resolution');
-        markets.delete(m.slug);
-        continue;
-      }
       try {
         if (!m.resolved) {
           const [e] = await getJson(`${CONFIG.gammaUrl}/events?slug=${m.slug}`);
           const mm = e?.markets?.[0];
-          if (!mm?.closed) continue;
-          const prices = JSON.parse(mm.outcomePrices || '[]').map(Number);
-          if (!(prices[0] === 1 || prices[1] === 1)) continue; // not settled yet
+          const prices = JSON.parse(mm?.outcomePrices || '[]').map(Number);
+          if (!mm?.closed || !(prices[0] === 1 || prices[1] === 1)) {
+            // not settled yet; check once more before giving up so resumed old markets still resolve
+            if (now > m.end + CONFIG.resolutionGiveUpMs) {
+              logEvent('pm_unresolved', m.slug, 'gave up waiting for resolution');
+              markets.delete(m.slug);
+            }
+            continue;
+          }
           const outcome = prices[0] === 1 ? 'Up' : 'Down';
           resolution({ slug: m.slug, outcome, event: e }, Date.now());
           bg(
@@ -275,7 +276,37 @@ async function resolveEnded(): Promise<void> {
   }
 }
 
+/**
+ * After a restart, pick up markets that already ended but whose outcome or Data API trades were
+ * not recorded yet (discovery only returns markets that haven't ended). Without this, every
+ * restart lost the resolutions and trade lists of the markets that ended shortly before it.
+ */
+async function resumePending(): Promise<void> {
+  const p = getPool();
+  if (!p) return;
+  const r = await p.query(
+    `SELECT slug, series_slug, condition_id, up_token_id, down_token_id, window_start, window_end,
+            outcome IS NOT NULL AS resolved
+     FROM rec_markets
+     WHERE window_end <= now() AND window_end > now() - interval '7 days'
+       AND (outcome IS NULL OR api_trades IS NULL)`,
+  );
+  for (const row of r.rows) {
+    const series = SERIES.find((s) => s.slug === row.series_slug);
+    if (!series || markets.has(row.slug)) continue;
+    markets.set(row.slug, {
+      slug: row.slug, series, conditionId: row.condition_id, upToken: row.up_token_id, downToken: row.down_token_id,
+      start: new Date(row.window_start).getTime(), end: new Date(row.window_end).getTime(),
+      subscribed: true, done: true, resolved: row.resolved, tradesFetched: false,
+    });
+    tokenKey.set(row.up_token_id, `${row.slug}|U`);
+    tokenKey.set(row.down_token_id, `${row.slug}|D`);
+  }
+  if (r.rows.length) logEvent('pm_resume', 'polymarket', `${r.rows.length} ended markets pending resolution/trades`);
+}
+
 export async function startPolymarket(): Promise<{ stop: () => void }> {
+  await resumePending().catch((e) => logEvent('error', 'pm_resume', (e as Error).message));
   await discover(); // opens one connection per series with markets in range
   setInterval(() => discover().catch((e) => logEvent('error', 'pm_discover', e.message)), CONFIG.discoveryIntervalMs);
   setInterval(updateSubscriptions, 5_000);
