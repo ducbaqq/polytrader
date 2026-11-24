@@ -322,6 +322,88 @@ refused until it passes for the current simulator version.
   relayer, to be confirmed in the live project.
 - **Run artifacts are not committed.** Only journals, the glossary and the index CSV are.
 
+## Proposed additions (review 2026-11-24, not yet approved)
+
+From a review of this draft. Each item is a proposal; where it conflicts with a section above, the
+section above stands until the user approves the change.
+
+### Fixes to the design above
+
+- **Enforce the sealed period in the data layer, not only in the replay.** The DuckDB views,
+  notebooks and `polydata.research.study` reruns would otherwise read sealed days. The views exclude
+  sealed days by default; only `--final` runs open them.
+- **Start the day count at the first clean day.** 2026-11-23 is day 0, so it's sealed, and it's the
+  development day (restarts, gaps; see the data quality log). Proposed epoch: 2026-11-25. Days
+  before it are train only.
+- **Make the validation split truly permanent.** "The most recent 30% of the remaining days" moves
+  as data grows, so validation days turn into train days. Proposed: a fixed pattern by day number,
+  like the sealed days (e.g. day number mod 3 = 1 is validation, mod 3 = 2 is train).
+- **Data gaps.** A dropped Polymarket connection leaves a stale book, which gives fills that could
+  never have happened.
+  - Build a machine-readable gap table from `rec_events`, `rec_stats` and the data quality log.
+  - The simulator cancels our orders and voids a market window that overlaps a gap; the report
+    counts the voided windows.
+  - Until 2026-11-24 10:36, `recv_ms` is up to 4 s late at every 5-minute boundary, i.e. at the
+    open and close of 5m markets. Exclude that period from runs.
+- **Minimal self-impact.** Median ask depth on BTC 5m is 121 shares, so our orders are a meaningful
+  part of a level. Liquidity we take stays removed until that level's next recorded update.
+- **Capital per market.** A single global cash limit forces one serial replay of all markets.
+  Proposed default: a fixed budget per market (summing to at most the $5,000), so markets are
+  independent, run in parallel and can be cached. The global limit stays as an option.
+- **Event order.** Events from different streams with the same `recv_ms` have no defined order.
+  Define a tie-break (stream priority, then row number), or append a `recv_seq` column in the
+  recorder. Needed for the determinism check.
+
+### Additions
+
+1. **Fast screening tier (`polydata.screen`).** At 10 minutes per day of data, a 50-point sweep over
+   30 days takes about 250 hours. Most families (endgame, momentum, wallet-following,
+   cross-timeframe) need no queue model.
+   - Screen them in DuckDB in seconds: taker fills at the ask after the order delay, with the fee.
+   - Only survivors go to the event simulator.
+   - Screens are indexed and counted like runs, and obey the same day splits.
+2. **Trial budget.** With hundreds of strategies, some pass t > 3 on the sealed days by luck.
+   - Count every final look across all strategies in the runs index.
+   - Raise the bar as the count N grows (e.g. the t threshold for a Bonferroni-corrected 5% level
+     over N looks). The report shows N and the threshold used.
+3. **Recency test.** The latency trade's edge decayed within 20 hours; interleaved sealed days can't
+   detect decay.
+   - The report plots edge per day.
+   - Pass criterion: profit > 0 on the most recent third of the evaluated days as well.
+4. **Ground truth for fills.** Every check in the validation suite is internal consistency, and
+   paper trading can't validate queue position either.
+   - At the live stage, place minimum-size real orders (5 shares) and compare each fill, and its
+     timing, with the simulator's prediction for the same order.
+   - `orders.parquet` uses the same schema in the simulator and live, so the comparison is a join.
+   - Until this is done, reports label the fill model as unverified.
+5. **Dollars per day.** All makers together earned about $84k in 20 hours, and a back-of-queue
+   newcomer gets a small slice of that.
+   - The report shows expected $ per day and return on capital, against running costs.
+   - Pass criterion: $ per day above a configured minimum.
+6. **Wider baseline.** BTC/ETH 5m is a speed contest. In the study, makers earned 1–2.6¢ per share
+   on SOL, DOGE, BNB and HYPE, on small volume, which suits $5k. Run `mm-binance-pull` on all coins
+   and timeframes, with the `max_book_spread` filter (wide books are a trap).
+
+### Data and servers (recorder work, outside `polydata.bt`)
+
+- **Locate the matching engine.** Run short probes in a few regions and compare the minimum
+  `recv_ms − ts_ms` on the Polymarket feed; no orders needed. Unverified assumption: Binance
+  matches in Tokyo, Polymarket's order book in London.
+- **Second recorder** in the region we'd trade from: at least the Polymarket streams and Binance
+  top of book. One box in Singapore is a single point of failure, gaps are permanent, and every
+  backtest is tied to Singapore's `recv_ms`.
+- **More feeds that can't be fetched later** (order by value):
+  - Coinbase and one more perp venue: top of book and trades
+  - Deribit implied volatility, for the fair-value model
+  - Kalshi's short-dated crypto markets, for a cross-venue family
+  - On-chain fills (maker and taker wallets) can be fetched from the chain later; not urgent.
+
+### Open risks
+
+- Everything so far rests on about 20 hours of data in one down-trend.
+- Whether the user can trade on Polymarket from their location decides if any result can be used.
+  Settle it before the live project.
+
 ## Left to the builder
 
 - Internal data structures, chunking of the replay (e.g. per hour), and any acceleration needed to
