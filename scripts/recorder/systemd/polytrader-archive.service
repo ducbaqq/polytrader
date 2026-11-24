@@ -1,0 +1,14 @@
+[Unit]
+Description=Upload polytrader recorder data to DigitalOcean Spaces and prune old local copies
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=polytrader
+Group=polytrader
+EnvironmentFile=/opt/polytrader/.env
+Environment=RECORDER_DATA_DIR=/opt/polytrader/data
+ExecStart=/bin/bash /opt/polytrader/app/archive.sh
+Nice=10
+IOSchedulingClass=idle
