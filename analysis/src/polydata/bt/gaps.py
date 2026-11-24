@@ -31,12 +31,16 @@ def _empty() -> pd.DataFrame:
         {"stream": object, "key": object, "from_ms": "int64", "to_ms": "int64", "source": object})
 
 
-def load_rec_events(days: Iterable[date]) -> pd.DataFrame:
+def load_rec_events(days: Iterable[date], include_sealed: bool = False) -> pd.DataFrame:
     """Read the daily `rec_events.csv.zst` catalog exports. Missing days are skipped with one warning."""
     import duckdb
 
+    from .splits import day_kind
+
     files, missing = [], []
     for d in days:
+        if not include_sealed and day_kind(d) == "sealed":
+            continue
         f = paths().catalog / d.isoformat() / "rec_events.csv.zst"
         (files if f.exists() else missing).append(f.as_posix() if f.exists() else d.isoformat())
     if missing:
@@ -88,7 +92,7 @@ def event_gaps(events: pd.DataFrame, end_ms: int, bn_syms: Iterable[str] = ()) -
 
 
 def bn_silences(con, start_ms: int, end_ms: int, max_gap_ms_bn: int = 1000, min_syms: int = 3) -> pd.DataFrame:
-    """Silences of `bn_fut_bbo.recv_ms` per sym longer than `max_gap_ms_bn` that mean missing data:
+    """Silences (clipped to the range; found with a 60 s lookback) of `bn_fut_bbo.recv_ms` per sym longer than `max_gap_ms_bn` that mean missing data:
     (a) `bn_fut_trade` has a row for the sym strictly inside the silence (it traded, so top-of-book
     updates were missing), or (b) at least `min_syms` syms are silent at once (connection drop).
     A quiet top of book on a slow symbol is not a gap. `source` says which rule fired."""
@@ -100,17 +104,20 @@ def bn_silences(con, start_ms: int, end_ms: int, max_gap_ms_bn: int = 1000, min_
         WITH s AS (
             SELECT sym, prev AS from_ms, recv_ms AS to_ms
             FROM (SELECT sym, recv_ms, lag(recv_ms) OVER (PARTITION BY sym ORDER BY recv_ms) AS prev
-                  FROM bn_fut_bbo WHERE recv_ms BETWEEN ? AND ?)
+                  FROM (SELECT sym, recv_ms FROM bn_fut_bbo WHERE recv_ms BETWEEN ? - 60000 AND ?
+                        UNION ALL  -- tail sentinel: a feed that never returns is silent until end_ms
+                        SELECT DISTINCT sym, ? FROM bn_fut_bbo WHERE recv_ms BETWEEN ? - 60000 AND ?))
             WHERE recv_ms - prev > ?),
         f AS (SELECT s.*, {a} AS by_trade,
                      (SELECT count(DISTINCT o.sym) FROM s o WHERE o.from_ms < s.to_ms AND o.to_ms > s.from_ms) >= ? AS by_multi
               FROM s)
-        SELECT 'bn' AS stream, sym AS key, from_ms, to_ms,
+        SELECT 'bn' AS stream, sym AS key, greatest(from_ms, ?) AS from_ms, least(to_ms, ?) AS to_ms,
                CASE WHEN by_trade AND by_multi THEN 'bn_fut_bbo silence (trades inside, multi-symbol)'
                     WHEN by_trade THEN 'bn_fut_bbo silence (trades inside)'
                     ELSE 'bn_fut_bbo silence (multi-symbol)' END AS source
-        FROM f WHERE by_trade OR by_multi
-        ORDER BY sym, from_ms""", [start_ms, end_ms, max_gap_ms_bn, min_syms]).df()
+        FROM f WHERE (by_trade OR by_multi) AND to_ms > ? AND from_ms < ?
+        ORDER BY sym, from_ms""",
+        [start_ms, end_ms, end_ms, start_ms, end_ms, max_gap_ms_bn, min_syms, start_ms, end_ms, start_ms, end_ms]).df()
 
 
 def pm_silences(con, start_ms: int, end_ms: int, max_gap_ms_pm: int = 5000) -> pd.DataFrame:
@@ -120,17 +127,18 @@ def pm_silences(con, start_ms: int, end_ms: int, max_gap_ms_pm: int = 5000) -> p
     if "markets" not in names or "pm_api_trades" not in names:
         return _empty()
     streams = [s for s in _PM_STREAMS if s in names]
-    ev = " UNION ALL ".join(f"SELECT slug, recv_ms FROM {s} WHERE recv_ms BETWEEN {start_ms} AND {end_ms}"
-                            for s in streams)
+    # Events are loaded over each market's own window, not clipped to [start_ms, end_ms]; otherwise a
+    # market straddling the range edge would get a spurious silence between the edge and its window bound.
+    ev = " UNION ALL ".join(
+        f"SELECT p.slug, p.recv_ms FROM {s} p JOIN m ON p.slug = m.slug "
+        f"AND p.recv_ms BETWEEN m.window_start_ms AND m.window_end_ms" for s in streams)
     ev = f"{ev} UNION ALL " if ev else ""
     return con.execute(
         f"""
         WITH m AS (SELECT slug, series, window_start_ms, window_end_ms FROM markets
                    WHERE window_end_ms > ? AND window_start_ms < ?),
         e AS ({ev}SELECT slug, window_start_ms AS recv_ms FROM m UNION ALL SELECT slug, window_end_ms FROM m),
-        e2 AS (SELECT e.slug, e.recv_ms FROM e JOIN m USING (slug)
-               WHERE e.recv_ms BETWEEN m.window_start_ms AND m.window_end_ms),
-        s AS (SELECT slug, lag(recv_ms) OVER (PARTITION BY slug ORDER BY recv_ms) AS from_ms, recv_ms AS to_ms FROM e2)
+        s AS (SELECT slug, lag(recv_ms) OVER (PARTITION BY slug ORDER BY recv_ms) AS from_ms, recv_ms AS to_ms FROM e)
         SELECT 'pm' AS stream, m.series AS key, s.from_ms, s.to_ms, 'pm silence' AS source
         FROM s JOIN m USING (slug)
         WHERE s.to_ms - s.from_ms > ?
@@ -139,15 +147,16 @@ def pm_silences(con, start_ms: int, end_ms: int, max_gap_ms_pm: int = 5000) -> p
 
 
 def gap_table(con, start_ms: int, end_ms: int, events: pd.DataFrame | None = None,
-              max_gap_ms_pm: int = 5000, max_gap_ms_bn: int = 1000) -> pd.DataFrame:
+              max_gap_ms_pm: int = 5000, max_gap_ms_bn: int = 1000, include_sealed: bool = False) -> pd.DataFrame:
     """All known gaps overlapping [start_ms, end_ms): columns stream ('pm'|'bn'|'cl'), key (series,
     '*', Binance sym or coin), from_ms, to_ms, source. `events` defaults to the daily catalog."""
     from datetime import datetime, timedelta, timezone
 
     if events is None:
-        d0 = datetime.fromtimestamp(start_ms / 1000, timezone.utc).date()
+        # one day earlier: a ws_close the day before may have its ws_open inside the range
+        d0 = datetime.fromtimestamp(start_ms / 1000, timezone.utc).date() - timedelta(days=1)
         d1 = datetime.fromtimestamp(end_ms / 1000, timezone.utc).date()
-        events = load_rec_events([d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)])
+        events = load_rec_events([d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)], include_sealed)
     syms = [r[0] for r in con.execute(
         "SELECT DISTINCT sym FROM bn_fut_bbo WHERE recv_ms BETWEEN ? AND ?", [start_ms, end_ms]).fetchall()]
     parts = [event_gaps(events, end_ms, syms), bn_silences(con, start_ms, end_ms, max_gap_ms_bn),

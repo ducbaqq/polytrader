@@ -102,8 +102,31 @@ def test_silence_with_trade_inside_is_a_gap():
 
 
 def test_three_symbols_silent_together_is_a_gap():
-    con = bn_con([(s, [T0, T0 + 2000 + i * 100]) for i, s in enumerate(["A", "B", "C"])])
+    con = bn_con([(s, [T0, T0 + 2000 + i * 100] + [T0 + 2500 + 500 * k for k in range(15)]) for i, s in enumerate(["A", "B", "C"])])
     g = G.bn_silences(con, T0, T0 + 10_000)
-    assert sorted(g.key) == ["A", "B", "C"] and all("multi-symbol" in x for x in g.source)
-    con = bn_con([(s, [T0, T0 + 2000]) for s in ["A", "B"]])
+    assert sorted(g.key) == ["A", "B", "C"]  # 9500 vs end 10000: no tail gap
+    assert all("multi-symbol" in x for x in g.source)
+    con = bn_con([(s, [T0, T0 + 2000] + [T0 + 2500 + 500 * k for k in range(15)]) for s in ["A", "B"]])
     assert G.bn_silences(con, T0, T0 + 10_000).empty
+
+
+def test_bn_silence_straddling_start_and_dead_feed():
+    # silence T0-3000 .. T0+500 straddles start (trade inside); BNB feed dies at T0+1000, trade later
+    con = bn_con([("BNBUSDT", [T0 - 3000, T0 + 500, T0 + 1000]), ("BTCUSDT", [T0 - 100, T0 + 9500])],
+                 trades=[("BNBUSDT", T0 - 1000), ("BNBUSDT", T0 + 5000)])
+    g = G.bn_silences(con, T0, T0 + 10_000)
+    rows = [(r.key, r.from_ms, r.to_ms) for r in g.itertuples()]
+    assert ("BNBUSDT", T0, T0 + 500) in rows  # clipped to the range
+    assert ("BNBUSDT", T0 + 1000, T0 + 10_000) in rows  # never came back: runs to end_ms
+
+
+def test_pm_silence_not_spurious_at_range_edges():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE markets(slug VARCHAR, series VARCHAR, window_start_ms BIGINT, window_end_ms BIGINT)")
+    con.execute("CREATE TABLE pm_book(slug VARCHAR, recv_ms BIGINT)")
+    con.execute("CREATE TABLE pm_api_trades(slug VARCHAR, ts_ms BIGINT)")
+    con.execute("INSERT INTO markets VALUES ('h','btc-up-or-down-hourly',?,?)", [T0 - 1_800_000, T0 + 1_800_000])
+    # events every second from window start, including before start_ms
+    con.execute("INSERT INTO pm_book SELECT 'h', ? + i*1000 FROM range(0, 3600) t(i)", [T0 - 1_800_000])
+    con.execute("INSERT INTO pm_api_trades VALUES ('h', ?), ('h', ?)", [T0 - 500_000, T0 + 500_000])
+    assert G.pm_silences(con, T0, T0 + 600_000).empty
