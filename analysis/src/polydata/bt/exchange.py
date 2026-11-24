@@ -192,6 +192,18 @@ class Exchange:
         self._now = max(self._now, t_ms)
         return out
 
+    def next_event_ms(self) -> float:
+        """A lower bound on the exchange time of the next event `advance` could produce (inf if none):
+        the next order or cancel arrival, and while orders rest, the next recorded trade and the
+        window end. The engine skips `advance` calls before it."""
+        t = min(self._arrivals[0][0] if self._arrivals else _INF, self._cancels[0][0] if self._cancels else _INF)
+        if self._n_open:
+            if self._cur < self._n:
+                t = min(t, int(self._ts[self._cur]))
+            if not self._expired:
+                t = min(t, self._end)
+        return t
+
     def close(self, t_ms: int) -> list[ExEvent]:
         """Advance to `t_ms` (normally the window end), expire what is still open and cancel orders
         that have not arrived yet. Idempotent."""
