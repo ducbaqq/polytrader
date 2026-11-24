@@ -1,6 +1,7 @@
 """Cash, locks, positions and settlement (spec: "Capital and positions").
 
-- Budgets are per coin (`"*"` = one global budget). Free cash = cash - cash locked by open buys.
+- Budgets are per coin (`"*"` = one global budget) and fixed: profits don't grow them. Free cash =
+  min(cash, budget) - cash locked by open buys (losses do shrink it).
 - **Buying** a token at q locks q x size; a buy that can take liquidity (a `take`, or a limit that is
   not post-only) also locks a fee bound. Fees peak at p = 0.5, so the bound is the fee at
   min(limit, 0.5): fills happen at or below the limit.
@@ -24,7 +25,8 @@ EPS = 1e-9
 
 class Portfolio:
     def __init__(self, budgets: dict[str, float], redeem_delay_ms: int = 60_000):
-        self.cash: dict[str, float] = {k: float(v) for k, v in budgets.items()}  # includes locked cash
+        self.budget: dict[str, float] = {k: float(v) for k, v in budgets.items()}
+        self.cash: dict[str, float] = dict(self.budget)  # includes locked cash
         self.locked: dict[str, float] = {k: 0.0 for k in budgets}
         self.redeem_delay_ms = int(redeem_delay_ms)
         self.positions: dict[str, tuple[float, float]] = {}  # slug -> (Up, Down) shares
@@ -49,7 +51,7 @@ class Portfolio:
 
     # ------------------------------------------------------------------------------------- cash
     def free_cash(self, key: str) -> float:
-        return self.cash[key] - self.locked[key]
+        return min(self.cash[key], self.budget[key]) - self.locked[key]
 
     def pending(self, key: str | None = None) -> float:
         return sum(a for _, k, a in self._pending if key is None or k == key)

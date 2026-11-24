@@ -228,10 +228,23 @@ def test_cancel_before_arrival_is_rejected_and_order_rests():
     ex = Exchange(md, ExchangeConfig())
     o = order(px=480, size=10, arrival=T0 + 1000)
     ex.submit(o)
-    ex.request_cancel(o.id, T0 + 1000)  # same ms: the cancel is processed first
+    ex.request_cancel(o.id, T0 + 999)  # strictly before the order: nothing to cancel yet
     ev = ex.advance(T0 + 5000)
     assert [e.kind for e in ev] == ["cancel_rejected", "accepted"] and o.status == "open"
     assert ev[0].reason == "pending"
+
+
+def test_cancel_same_ms_as_its_order_cancels_it():
+    md = market("0.48:100", "0.52:100")
+    ex = Exchange(md, ExchangeConfig())
+    other = order(px=470, size=10, arrival=T0 + 1000)
+    o = order(px=480, size=10, arrival=T0 + 1000)
+    ex.submit(other)
+    ex.submit(o)
+    ex.request_cancel(o.id, T0 + 1000)  # same ms: its order arrives first, then the cancel
+    ev = ex.advance(T0 + 5000)
+    assert [(e.kind, e.order_id) for e in ev] == [("accepted", o.id), ("cancelled", o.id), ("accepted", other.id)]
+    assert o.status == "cancelled" and other.status == "open"
 
 
 def test_close_expires_open_orders():

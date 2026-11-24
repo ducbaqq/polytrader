@@ -43,8 +43,8 @@ class RunConfig:
         for name in ("order_latency_ms", "latency_jitter_ms", "fill_report_latency_ms", "redeem_delay_s"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0")
-        if self.bn_step_ms <= 0 or 3_600_000 % self.bn_step_ms:
-            raise ValueError("bn_step_ms must divide one hour")
+        if self.bn_step_ms <= 0 or 1000 % self.bn_step_ms:
+            raise ValueError("bn_step_ms must divide one second")
         if not self.coins:
             raise ValueError("no coins")
 

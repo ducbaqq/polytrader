@@ -31,10 +31,10 @@ def minfo(ws: int, tf: str = "5m", outcome: str | None = "Up", coin: str = "btc"
                       resolution_recv_ms=None if outcome is None else ws + LEN[tf] + 30_000)
 
 
-def mdata(info: MarketInfo, bids="0.48:100", asks="0.52:100", changes=(), trades=()) -> MarketData:
-    """Up snapshot 60 s before the window; Up change rows (ts, side, price, size, best_bid, best_ask),
-    recv = ts + 100; trades (ts, outcome, side, price, size), recv = ts + 120."""
-    bt = info.window_start_ms - 60_000
+def mdata(info: MarketInfo, bids="0.48:100", asks="0.52:100", changes=(), trades=(), book_ts=None) -> MarketData:
+    """Up snapshot at `book_ts` (default 60 s before the window); Up change rows (ts, side, price, size,
+    best_bid, best_ask), recv = ts + 100; trades (ts, outcome, side, price, size), recv = ts + 120."""
+    bt = info.window_start_ms - 60_000 if book_ts is None else book_ts
     b = pd.DataFrame([(bt, bt + 100, "Up", bids, asks)], columns=["ts_ms", "recv_ms", "outcome", "bids", "asks"])
     c = pd.DataFrame([(ts, ts + 100, "Up", s, p, q, bb, ba) for ts, s, p, q, bb, ba in changes],
                      columns=["ts_ms", "recv_ms", "outcome", "side", "price", "size", "best_bid", "best_ask"])
@@ -118,13 +118,13 @@ class Recorder(Strategy):
         self.seen: list[tuple[int, int]] = []  # (now, recv_ms of a delivered or queried value)
         self.fill_reports: list[tuple[int, int]] = []  # (now, fill ts_ms)
         self.infos: list[MarketInfo] = []
-        self.ptb: list[int] = []  # times at which a market's price_to_beat was visible
+        self.ptb: list[tuple[int, float]] = []  # (now, price_to_beat) whenever it was visible
         self.done = False
 
     def _look(self, ctx):
         for m in ctx.markets():
             if m.price_to_beat is not None:
-                self.ptb.append(ctx.now)
+                self.ptb.append((ctx.now, m.price_to_beat))
             top = ctx.top(m.slug)
             self.tops.append((ctx.now, top.recv_ms))
             ctx.book(m.slug).bids  # noqa: B018 (forces the level lookup)
@@ -199,9 +199,15 @@ def test_engine_no_lookahead():
     assert all(now >= ts + 126 for now, ts in s.fill_reports)
     # the strategy never sees the outcome or the resolution time
     assert s.infos and all(i.outcome is None and i.resolution_recv_ms is None for i in s.infos)
-    # price_to_beat is the Chainlink price at the window start: unknown when the market opens before it
+    # price_to_beat = mean of the received Chainlink ticks with ts in [start - 60 s, start), revealed
+    # when the first tick with ts >= start is received: unknown when the market opens before that
     assert all(i.price_to_beat is None for i in s.infos)
-    assert s.ptb and min(s.ptb) >= T0 + 1_500  # first Chainlink tick with ts >= start is received at T0 + 1.5 s
+    bn_from = T0 - 1_200_000  # make_con: tick k is received at bn_from + k s, ts 1.5 s earlier, price 60000 + k % 7
+    ks = [k for k in range(2000) if T0 - 60_000 <= bn_from + k * 1000 - 1500 < T0]
+    want = sum(60000.0 + k % 7 for k in ks) / len(ks)
+    # revealed at T0 + 2 s (the tick with ts T0 + 0.5 s), after the data events of that ms: first seen just after
+    assert len(ks) == 60 and s.ptb and T0 + 2_000 < min(t for t, _ in s.ptb) < T0 + 2_200
+    assert all(v == pytest.approx(want) for _, v in s.ptb)
     # events reach the strategy in time order
     times = [e[0] for e in s.events]
     assert times == sorted(times)
@@ -451,3 +457,136 @@ def test_reports_exact_without_other_events():
     open_ms = M1.window_start_ms - 60_000 + 100
     assert s.reports == [(open_ms + 200 + 126, "accepted", None), (T0 + 20_126, "fill", T0 + 20_000),
                          (T0 + 20_126 + 200 + 126, "accepted", None), (M1.window_end_ms + 126, "expired", None)]
+
+
+def test_market_opens_only_after_first_in_range_snapshot():
+    """Price changes before any in-range book snapshot leave the book untrusted: the market opens (and
+    takes orders) only once the first snapshot in the replay range has been received."""
+    snap = T0 + 10_000
+    md = mdata(M1, book_ts=snap, changes=[(T0 - 50_000, "BUY", 0.48, 100, 0.48, 0.52),
+                                           (T0 - 40_000, "SELL", 0.52, 100, 0.48, 0.52)])
+
+    class Early(Strategy):
+        name = "early-test"
+
+        def __init__(self):
+            super().__init__({})
+            self.seen: list[tuple[int, str]] = []
+
+        def on_start(self, ctx):
+            ctx.set_timer("try", T0 - 30_000 - ctx.now)
+
+        def on_timer(self, ctx, name):
+            ctx.place(M1.slug, "Up", "BUY", 0.48, 10)
+
+        def on_market_open(self, ctx, market):
+            self.seen.append((ctx.now, "open"))
+
+        def on_book(self, ctx, market, book):
+            self.seen.append((ctx.now, "book"))
+
+        def on_order(self, ctx, order):
+            self.seen.append((ctx.now, f"{order.event}:{order.reason}"))
+
+    s = Early()
+    engine.run_coin(cfg(), "btc", lambda: make_con([M1], T0 - 1_200_000, T0 + 500_000), loader=loader_for({M1.slug: md}),
+                    strategy=s, rec_events=NO_EVENTS)
+    assert s.seen[0] == (T0 - 30_000, "rejected:market not open")
+    assert s.seen[1] == (snap + 100, "open")
+    assert all(t >= snap + 100 for t, _ in s.seen[1:])
+
+
+class PlaceCancel(Strategy):
+    name = "place-cancel-test"
+
+    def __init__(self):
+        super().__init__({})
+        self.events: list[tuple[int, str, str]] = []
+
+    def on_market_open(self, ctx, market):
+        for _ in range(20):
+            oid = ctx.place(market.slug, "Up", "BUY", 0.30, 10)
+            ctx.cancel(oid)  # same handler, sent after the order
+
+    def on_order(self, ctx, order):
+        self.events.append((order.id, order.event, order.reason))
+
+
+@pytest.mark.parametrize("jitter", [0, 50])
+def test_place_then_cancel_in_one_handler_cancels(jitter):
+    s = PlaceCancel()
+    res = engine.run_coin(cfg(latency_jitter_ms=jitter, seed=3), "btc",
+                          lambda: make_con([M1], T0 - 1_200_000, T0 + 500_000),
+                          loader=loader_for({M1.slug: market_one()}), strategy=s, rec_events=NO_EVENTS)
+    by = {}
+    for oid, ev, reason in s.events:
+        by.setdefault(oid, []).append((ev, reason))
+    assert len(by) == 20
+    for evs in by.values():
+        assert evs == [("accepted", ""), ("cancelled", "cancel request")], evs
+    assert "expired" not in set(res.orders.event)
+
+
+def test_cancel_on_closed_market_reports_cancel_rejected():
+    class Late(Strategy):
+        name = "late-cancel-test"
+
+        def __init__(self):
+            super().__init__({})
+            self.events: list[tuple[int, str, str]] = []
+
+        def on_market_open(self, ctx, market):
+            ctx.place(market.slug, "Up", "BUY", 0.30, 10)
+
+        def on_market_close(self, ctx, market):
+            ctx.cancel_all(market.slug)
+
+        def on_order(self, ctx, order):
+            self.events.append((ctx.now, order.event, order.reason))
+
+    s = Late()
+    engine.run_coin(cfg(), "btc", lambda: make_con([M1], T0 - 1_200_000, T0 + 500_000),
+                    loader=loader_for({M1.slug: market_one()}), strategy=s, rec_events=NO_EVENTS)
+    E = M1.window_end_ms
+    assert s.events[1:] == [(E, "cancel_rejected", "market closed"), (E + 126, "expired", "window end")]
+
+
+def test_cash_capped_at_budget_after_a_win():
+    class Win(Strategy):
+        name = "win-test"
+
+        def __init__(self):
+            super().__init__({})
+            self.cash: list[float] = []
+
+        def on_market_open(self, ctx, market):
+            ctx.take(market.slug, "Up", "BUY", 50, 0.99)  # Up wins
+
+        def on_timer(self, ctx, name):
+            self.cash.append(ctx.cash())
+
+        def on_order(self, ctx, order):
+            ctx.set_timer("later", M1.resolution_recv_ms + 61_000 - ctx.now)
+
+    s = Win()
+    res = engine.run_coin(cfg(capital=100.0), "btc", lambda: make_con([M1], T0 - 1_200_000, T0 + 500_000),
+                          loader=loader_for({M1.slug: market_one()}), strategy=s, rec_events=NO_EVENTS)
+    pnl = res.markets.set_index("slug").loc[M1.slug].pnl
+    assert pnl > 20
+    assert s.cash and s.cash[-1] == pytest.approx(100.0)  # profits don't grow the budget
+    assert res.equity.equity.iloc[-1] == pytest.approx(100 + pnl)
+
+
+def test_mid_10s_nan_within_10s_of_window_end():
+    md = mdata(M1, trades=[(M1.window_end_ms - 5_000, "Up", "SELL", 0.48, 500)])
+
+    class Bid(Strategy):
+        name = "bid-late-test"
+
+        def on_market_open(self, ctx, market):
+            ctx.place(market.slug, "Up", "BUY", 0.48, 10)
+
+    res = engine.run_coin(cfg(), "btc", lambda: make_con([M1], T0 - 1_200_000, T0 + 500_000),
+                          loader=loader_for({M1.slug: md}), strategy=Bid(), rec_events=NO_EVENTS)
+    f = res.fills
+    assert len(f) == 1 and math.isnan(f.mid_10s.iloc[0]) and f.mid_at_fill.iloc[0] == pytest.approx(0.5)

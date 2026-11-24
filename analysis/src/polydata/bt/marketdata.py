@@ -199,6 +199,7 @@ def _build(con, n_markets: int) -> list[dict]:
         "tops_recv": con.execute(_sql_tops_out("recv_ms, k, seq")).fetchnumpy(),
         "trades": con.execute(_SQL_TRADES_OUT).fetchnumpy(),
         "ticks": con.execute(_SQL_TICKS_OUT).fetchnumpy(),
+        "snaps": con.execute("SELECT mi, recv_ms FROM _snap ORDER BY mi, recv_ms").fetchnumpy(),
     }
     for t in ("_snap", "_ev", "_zero", "_top"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
@@ -268,6 +269,10 @@ class MarketData:
         self.ticks = Ticks(tk_ts, tk_recv, tk_px)
         o = np.argsort(tk_recv, kind="stable")
         self._ticks_recv = Ticks(tk_ts[o], tk_recv[o], tk_px[o])
+        # receive times of the book snapshots (sorted): the book is trusted from the first one on
+        sn = arrays.get("snaps")
+        self.snaps_recv = (np.sort(sn["recv_ms"].astype(np.int64)) if sn is not None
+                           else np.empty(0, np.int64))
 
     @staticmethod
     def _tops(d: dict) -> Tops:

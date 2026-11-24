@@ -50,7 +50,8 @@ def test_portfolio_locks_and_merge():
     assert p.positions[SLUG] == (10.0, 10.0)
     assert p.merge(SLUG) == pytest.approx(10.0)
     assert p.positions[SLUG] == (0.0, 0.0)
-    assert p.free_cash("btc") == pytest.approx(100.5)  # 100 - 9.5 + 10
+    assert p.cash["btc"] == pytest.approx(100.5)  # 100 - 9.5 + 10
+    assert p.free_cash("btc") == pytest.approx(100.0)  # the budget doesn't grow with profits
     assert p.pnl[SLUG] == pytest.approx(0.5)
     assert p.equity({}) == pytest.approx(100.5)
 
@@ -107,7 +108,7 @@ def test_sell_unheld_rejected():
     p.apply_fill(s, fill(s))
     p.release(s)
     assert p.positions[SLUG] == (0.0, 0.0)
-    assert p.free_cash("btc") == pytest.approx(101.0)
+    assert p.cash["btc"] == pytest.approx(101.0) and p.free_cash("btc") == pytest.approx(100.0)
 
 
 def test_release_unlocks_cash_and_shares():
@@ -138,8 +139,28 @@ def test_settlement_after_redeem_delay():
     p.redeem(T0 + 419_999)
     assert p.free_cash("btc") == pytest.approx(96.0)  # still locked until the redeem delay passes
     p.redeem(T0 + 420_000)
-    assert p.free_cash("btc") == pytest.approx(106.0)
-    assert p.equity({}) == pytest.approx(106.0)
+    assert p.cash["btc"] == pytest.approx(106.0) and p.equity({}) == pytest.approx(106.0)
+    assert p.free_cash("btc") == pytest.approx(100.0)  # capped at the budget
+
+
+def test_budget_fixed_profits_do_not_grow_it_losses_shrink_it():
+    p = pf(10.0)
+    o = order("Up", "BUY", 400, 25)
+    assert p.reserve_buy(o)
+    p.apply_fill(o, fill(o))
+    p.release(o)
+    p.settle(SLUG, "Up", T0)
+    p.redeem(T0 + 10**9)
+    assert p.cash["btc"] == pytest.approx(25.0) and p.free_cash("btc") == pytest.approx(10.0)
+    assert not p.reserve_buy(order("Up", "BUY", 500, 21))  # 10.50 > budget, though cash is 25
+    q = pf(10.0)
+    o = order("Down", "BUY", 400, 10)
+    assert q.reserve_buy(o)
+    q.apply_fill(o, fill(o))
+    q.release(o)
+    q.settle(SLUG, "Up", T0)
+    q.redeem(T0 + 10**9)
+    assert q.free_cash("btc") == pytest.approx(6.0)  # losses reduce it
 
 
 def test_losing_side_settles_at_zero():

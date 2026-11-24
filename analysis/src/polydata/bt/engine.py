@@ -24,8 +24,10 @@ never touched) and it isn't voided (`gaps.voided_markets`: data gaps, or no outc
 - Fills hit the portfolio when they are reported, so `ctx.cash` / `ctx.position` never run ahead of
   what the strategy knows; the cash for an order is locked when it is placed.
 
-**Markets.** `on_market_open` fires at the market's first top event in the replay range (markets are
-subscribed ~2 windows before they start and are tradable then). At `window_end_ms` the exchange is
+**Markets.** A market opens (`on_market_open`; orders accepted from then on) once its first
+`pm_book` snapshot inside the replay range has been received: before that its book is untrusted.
+Markets are subscribed ~2 windows before they start and are tradable then. Its `price_to_beat`
+is hidden until the strategy could know it (see `_schedule_ptb`). At `window_end_ms` the exchange is
 closed (resting orders expire, orders in flight are cancelled as "never arrived"), then
 `on_market_close`; the market's data is freed. Settlement happens once the resolution was received
 and every report is in; the payout is credited `redeem_delay_s` after the resolution.
@@ -81,7 +83,7 @@ ORDER_COLS = ["ms", "report_ms", "order_id", "slug", "event", "token", "side", "
 FILL_COLS = ["slug", "coin", "order_id", "ts_ms", "report_ms", "token", "side", "kind", "px", "size", "fee",
              "liquidity", "queue_ahead_at_fill", "trade_ts_ms", "mid_at_fill", "mid_10s", "settle_value",
              "bn_move_1s"]
-EQUITY_COLS = ["ms", "cash", "locked", "pending", "mtm", "equity"]
+EQUITY_COLS = ["ms", "cash", "locked", "pending", "mtm", "equity"]  # cash: unlocked, not capped at the budget
 MARKET_COLS = ["slug", "coin", "timeframe", "window_start_ms", "window_end_ms", "voided", "reason", "pnl",
                "settle_ms", "outcome"]
 
@@ -221,10 +223,10 @@ class _Mkt:
 
     def __init__(self, info: MarketInfo, mi: int, md: MarketData, ex: Exchange, rs: int):
         self.info = info
-        # What the strategy may see: no outcome; price_to_beat (the Chainlink price at the window start)
-        # only once that tick has been received.
+        # What the strategy may see: no outcome, and price_to_beat only once computed from received
+        # Chainlink ticks (see _Replay._schedule_ptb).
         self.pub = replace(info, outcome=None, resolution_recv_ms=None, price_to_beat=None)
-        self.ptb_sched = info.price_to_beat is None
+        self.ptb_sched = False
         self.mi, self.md, self.ex, self.rs = mi, md, ex, rs
         self.open_ms: int | None = None
         self.opened = self.closed = False
@@ -232,8 +234,8 @@ class _Mkt:
         self.raw_fills: list[tuple] = []
         self.settle_ms: int | None = None
 
-    def reveal_ptb(self) -> None:
-        self.pub = replace(self.pub, price_to_beat=self.info.price_to_beat)
+    def reveal_ptb(self, value: float) -> None:
+        self.pub = replace(self.pub, price_to_beat=value)
 
 
 @dataclass
@@ -452,10 +454,15 @@ class _Replay:
         if o is None:
             return  # unknown, or done as far as the strategy knows
         m = self.by_slug.get(o.slug)
-        if m is None or m.closed or m.ex is None:
-            return  # the market is closed: the order has expired (its report may still be in flight)
+        if m is None or m.closed or m.ex is None:  # its expiry report may still be in flight
+            now = self.ctx.now
+            self.order_rows.append((now, now, oid, o.slug, "cancel_rejected", o.token, o.side, o.kind, o.post_only,
+                                    o.px / PX_SCALE, o.size, "market closed", math.nan))
+            self.push(now, P_REPORT, ("lcrej", oid))
+            return
         self.cancel_sent.add(oid)
-        m.ex.request_cancel(oid, self._arrival())
+        # a cancel never reaches the exchange before its own order (jitter could reorder them)
+        m.ex.request_cancel(oid, max(self._arrival(), o.arrival_ms))
         self._mark_live(m)
 
     def set_timer(self, name: str, ms: int) -> None:
@@ -517,8 +524,9 @@ class _Replay:
             v.status, v.reason = k, ev.reason
             self.pf.release(o)
             self._done(v.id)
-        else:  # cancel_rejected: the order is unaffected
+        else:  # cancel_rejected: the order is unaffected; a later cancel_all may try again
             v.reason = ev.reason
+            self.cancel_sent.discard(v.id)
         self.strategy.on_order(self.ctx, v)
 
     # ------------------------------------------------------------------------------- internal events
@@ -542,7 +550,12 @@ class _Replay:
         elif kind == "redeem":
             self.pf.redeem(t)
         elif kind == "ptb":
-            p[1].reveal_ptb()
+            p[1].reveal_ptb(p[2])
+        elif kind == "lcrej":
+            v = self.views.get(p[1])
+            if v is not None:
+                v.event, v.reason, v.last_fill = "cancel_rejected", "market closed", None
+                self.strategy.on_order(self.ctx, v)
         elif kind == "eq":
             self._equity_sample(t)
             if self.pf.has_exposure() and not (self.ending and not self.heap):  # nothing left to change it
@@ -560,8 +573,8 @@ class _Replay:
         for slug in self.pf.held_slugs():
             m = self.by_slug[slug]
             marks[slug] = _up_mid(m.md.top_at(t, "recv")) if m.md is not None else m.last_mid
-        free = sum(self.pf.free_cash(k) for k in self.pf.cash)
         locked = sum(self.pf.locked.values())
+        free = sum(self.pf.cash.values()) - locked  # unlocked cash, profits above the budget included
         pend = self.pf.pending()
         eq = self.pf.equity(marks)
         self.equity_rows.append((t, free, locked, pend, eq - free - locked - pend, eq))
@@ -600,7 +613,7 @@ class _Replay:
         end = info.window_end_ms
         for f, o, rep, bn_move in m.raw_fills:
             up = _up_mid(md.top_at(f.ts_ms, "ts"))
-            up10 = _up_mid(md.top_at(min(f.ts_ms + 10_000, end - 1), "ts"))
+            up10 = _up_mid(md.top_at(f.ts_ms + 10_000, "ts")) if f.ts_ms + 10_000 < end else math.nan
             dn = o.token == "Down"
             self.fill_rows.append((
                 info.slug, info.coin, o.id, f.ts_ms, rep, o.token, o.side, o.kind, f.px / PX_SCALE, f.size, f.fee,
@@ -630,7 +643,8 @@ class _Replay:
         return float(bn.bid[i] + bn.ask[i]) / 2
 
     def _bn_move(self, sym: str, t: int) -> bool:
-        """|ln(mid_t / mid_{t-1s})| > 2 sig15 (Binance as received)."""
+        """|ln(mid_t / mid_{t-1s})| > 2 sig15, with the Binance mid as received (recv clock) at the
+        fill's exchange time t and 1 s before."""
         g = self.grid.get(sym)
         sig = g.sig15(t) if g is not None else None
         a, b = self._bn_mid(sym, t), self._bn_mid(sym, t - 1000)
@@ -720,8 +734,7 @@ class _Replay:
         chunks: dict[int, _Chunk] = {}
         for rs, re in ranges:
             mk = con.execute(
-                """SELECT slug, coin, timeframe, series, window_start_ms, window_end_ms, outcome,
-                          epoch_ms(resolution_seen_at) AS resolution_recv_ms
+                """SELECT slug, coin, timeframe, series, window_start_ms, window_end_ms, outcome
                    FROM markets WHERE list_contains(?, coin) AND list_contains(?, timeframe)
                      AND window_start_ms >= ? AND window_end_ms <= ?
                    ORDER BY window_start_ms, slug""", [self.coins, list(cfg.timeframes), rs, re]).df()
@@ -762,12 +775,12 @@ class _Replay:
                     continue
                 info = md.info
                 m = _Mkt(info, len(self.mkts), md, Exchange(md, self.exc), c.rs)
-                tr = md.tops_recv.recv_ms
-                i = int(np.searchsorted(tr, max(c.rs, seg_start)))
-                if i >= len(tr) or tr[i] >= info.window_end_ms:
-                    self.market_rows[r.slug].update(voided=True, reason="no book events", pnl=math.nan)
+                sn = md.snaps_recv
+                i = int(np.searchsorted(sn, max(c.rs, seg_start)))
+                if i >= len(sn) or sn[i] >= info.window_end_ms:
+                    self.market_rows[r.slug].update(voided=True, reason="no book snapshot", pnl=math.nan)
                     continue
-                m.open_ms = int(tr[i])
+                m.open_ms = int(sn[i])  # the first snapshot in range: the book is trusted from here
                 self.mkts.append(m)
                 self.by_slug[info.slug] = m
                 self.loaded.append(m)
@@ -834,14 +847,10 @@ class _Replay:
                 continue
             tr = m.md.tops_recv.recv_ms
             a, b = (int(x) for x in np.searchsorted(tr, [lo, hi]))
-            opening = not m.opened and s <= m.open_ms < e
+            if not m.opened and s <= m.open_ms < e:
+                add(np.array([m.open_ms], np.int64), K_OPEN, m.mi, np.array([-1]))
             if want["on_book"] and b > a:
-                k = np.full(b - a, K_TOP, np.int8)
-                if opening:
-                    k[0] = K_OPEN
-                add(tr[a:b], k, m.mi, np.arange(a, b))
-            elif opening:
-                add(tr[a:a + 1], K_OPEN, m.mi, np.arange(a, a + 1))
+                add(tr[a:b], K_TOP, m.mi, np.arange(a, b))
             if want["on_trade"]:
                 rr = m.md.trades_recv.recv_ms
                 a, b = (int(x) for x in np.searchsorted(rr, [lo, hi]))
@@ -873,22 +882,29 @@ class _Replay:
         self.stats["segments"] += 1
 
     def _schedule_ptb(self, s: int, e: int) -> None:
-        """Reveal price_to_beat when the first Chainlink tick of the window (ts >= start) is received."""
+        """The strategy's price_to_beat is the mean of the received Chainlink ticks with ts in
+        [window_start - 60 s, window_start) (the settlement rule, docs/RECORDER.md), revealed when the
+        first tick with ts >= window_start is received. It stays None when no tick fell in that span
+        or the span starts before the replay range (the live runner computes it the same way)."""
         for m in self.loaded:
             ws = m.info.window_start_ms
             if m.ptb_sched or ws >= e:
                 continue
             c = self.cl.get(m.info.coin)
             hit = np.flatnonzero(c[1] >= ws) if c is not None else []
-            if len(hit):
-                m.ptb_sched = True
-                self.push(max(int(c[0][hit[0]]), s), P_TIMER, ("ptb", m))
+            if not len(hit):
+                continue  # not revealed yet: look again next hour
+            m.ptb_sched = True
+            r = int(c[0][hit[0]])
+            sel = (c[1] >= ws - 60_000) & (c[1] < ws) & (c[0] <= r)
+            if ws - 60_000 < m.rs or not sel.any():
+                continue
+            self.push(max(r, s), P_TIMER, ("ptb", m, float(c[2][sel].mean())))
 
     def _dispatch(self, recv, kind, mi, idx, bn_lists, cl_lists) -> None:
         """The hot loop: one iteration per data event."""
         heap, R, ctx, S, mkts, open_ = self.heap, self.R, self.ctx, self.strategy, self.mkts, self.open
         on_book, on_trade, on_bn, on_cl = S.on_book, S.on_trade, S.on_binance, S.on_chainlink
-        want_book = self.want["on_book"]
         catch_up = self._catch_up
         self.stats["events"] += len(recv)
         for t, k, j, i in zip(recv, kind, mi, idx):
@@ -919,8 +935,6 @@ class _Replay:
                 m.opened = True
                 open_[m.info.slug] = m
                 S.on_market_open(ctx, m.pub)
-                if want_book and not m.closed:
-                    on_book(ctx, m.pub, BookView(loader=_book_loader(m.md, t)))
 
     # ------------------------------------------------------------------------------- run
     def run(self, con) -> CoinResult:

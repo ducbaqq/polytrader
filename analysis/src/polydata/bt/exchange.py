@@ -30,7 +30,8 @@ The model is deliberately pessimistic (spec: "Queue and fill model"):
 **Window end.** When the clock reaches `window_end_ms`, every open order expires there, whether or
 not the engine calls `close()`: trades with `ts_ms >= window_end_ms` never match.
 
-Same-ms order: recorded trades, then our cancels, then our arrivals. `advance` returns `ExEvent`s in
+Same-ms order: recorded trades, then our cancels, then our arrivals; except that a cancel never
+overtakes its own order: an order arriving in the same ms as its cancel is processed first. `advance` returns `ExEvent`s in
 exchange-time order; the engine adds report latency. Order ids are assigned by the caller.
 """
 
@@ -184,6 +185,16 @@ class Exchange:
                 self._on_trade(self._cur, out)
                 self._cur += 1
             elif tc <= ta:
+                oid = self._cancels[0][2]
+                o = self.orders.get(oid)
+                if o is not None and o.status == "pending" and o.arrival_ms <= tc:
+                    # its own order arrives at the same ms: the order (sent first) is processed first
+                    i = next(i for i, x in enumerate(self._arrivals) if x[2] is o)
+                    self._arrivals[i] = self._arrivals[-1]
+                    self._arrivals.pop()
+                    heapq.heapify(self._arrivals)
+                    self._on_arrival(o, out)
+                    continue
                 t, _, oid = heapq.heappop(self._cancels)
                 self._on_cancel(oid, t, out)
             else:
