@@ -19,7 +19,15 @@ from polydata.bt.strategy import get_strategy
 @pytest.fixture
 def pdir(tmp_path, monkeypatch):
     monkeypatch.setenv("POLYDATA_DIR", str(tmp_path))
+    monkeypatch.setenv("POLYDATA_RUNS_CSV", str(tmp_path / "runs-index.csv"))  # never touch docs/runs-index.csv
     return tmp_path
+
+
+def build_manifests(pdir, days, body="pm_trade.tsv.zst:10"):
+    for d in days:
+        f = pdir / "parquet" / "pm_trade" / f"date={d}"
+        f.mkdir(parents=True, exist_ok=True)
+        (f / "10.src").write_text("# format 2\n" + body)
 
 
 def fake_result(c: RunConfig, pnls=(1.5, -0.25, None)) -> RunResult:
@@ -98,20 +106,25 @@ def test_summary_counts(pdir):
 
 def test_provenance_host_is_hashed(pdir, monkeypatch):
     monkeypatch.setattr("platform.node", lambda: "my-secret-host.example")
+    build_manifests(pdir, ["2026-11-24"])
     h = runs.host_hash()
     assert len(h) == 8 and "secret" not in h
     p = runs.provenance(get_strategy("noop"), {}, ["2026-11-24"], "run")
-    assert p["host"] == h and "my-secret-host" not in json.dumps(p)
+    assert p["host"] == h and "my-secret-host" not in json.dumps({k: v for k, v in p.items() if k != "git_diff"})  # the diff may quote this test
     assert {"git_commit", "sim_version", "strategy_version", "data_fingerprint", "python", "packages"} <= set(p)
 
 
 def test_data_fingerprint(pdir):
-    f = pdir / "raw" / "2026-11-24" / "10"
-    f.mkdir(parents=True)
-    (f / "pm_trade.tsv.zst").write_bytes(b"x" * 10)
+    with pytest.raises(ValueError, match="2026-11-24"):
+        runs.data_fingerprint(["2026-11-24"])
+    (pdir / "raw" / "2026-11-24" / "10").mkdir(parents=True)  # raw files are not used
+    (pdir / "raw" / "2026-11-24" / "10" / "x.zst").write_bytes(b"x")
+    with pytest.raises(ValueError):
+        runs.data_fingerprint(["2026-11-24"])
+    build_manifests(pdir, ["2026-11-24"])
     a = runs.data_fingerprint(["2026-11-24"])
     assert a == runs.data_fingerprint(["2026-11-24"]) and len(a) == 64
-    (f / "pm_trade.tsv.zst").write_bytes(b"x" * 11)
+    build_manifests(pdir, ["2026-11-24"], "pm_trade.tsv.zst:11")
     assert runs.data_fingerprint(["2026-11-24"]) != a
 
 
@@ -160,6 +173,7 @@ def test_final_refused_without_validation(pdir):
     with pytest.raises(runs.FinalRefused, match="validation"):
         runs.final_preflight(cls, {}, sealed_days())
     mark_validated(pdir)
+    build_manifests(pdir, sealed_days())
     runs.final_preflight(cls, {}, sealed_days())
     with pytest.raises(runs.FinalRefused, match="sealed days"):
         runs.final_preflight(cls, {}, sealed_days(4))
@@ -168,11 +182,11 @@ def test_final_refused_without_validation(pdir):
 def test_final_refused_when_repeated(pdir):
     mark_validated(pdir)
     cls, days = get_strategy("noop"), sealed_days()
+    build_manifests(pdir, days)
     v, fp, sim = runs.strategy_version(cls, {}), runs.data_fingerprint(days), validate.sim_version()
     assert runs.final_preflight(cls, {}, days).empty
     put_run(pdir, kind="final", version=v, sim=sim, fp=fp, rid="2026-11-30T1000-cccccc")
-    runs.rebuild_index(csv_path=pdir / "i.csv")
-    with pytest.raises(runs.FinalRefused, match="already"):
+    with pytest.raises(runs.FinalRefused, match="already"):  # no manual rebuild: preflight refreshes the index
         runs.final_preflight(cls, {}, days)
     # a different simulator version or fingerprint allows another final, and lists the earlier one
     idx = pd.read_parquet(pdir / "runs" / "index.parquet")
@@ -184,9 +198,8 @@ def test_final_refused_when_repeated(pdir):
 
 def test_final_looks_counts_looks_jsonl_excluding_health(pdir):
     assert runs.final_looks() == 0
-    put_run(pdir, kind="final", rid="2026-11-30T1000-cccccc")
+    put_run(pdir, kind="final", rid="2026-11-30T1000-cccccc")  # no rebuild here: final_looks must not trust a cache
     put_run(pdir, kind="run", rid="2026-11-30T1100-dddddd")
-    runs.rebuild_index(csv_path=pdir / "i.csv")
     (pdir / "runs" / "looks.jsonl").write_text("\n".join(json.dumps({"purpose": p}) for p in
                                                            ["health", "health", "inspect", "final"]) + "\n\n")
     assert runs.final_looks() == 1 + 1
@@ -277,3 +290,36 @@ def test_one_final_run_counts_once(pdir):
     runs.rebuild_index(csv_path=pdir / "i.csv")
     (pdir / "runs" / "looks.jsonl").write_text(json.dumps({"purpose": "final"}) + "\n")
     assert runs.final_looks() == 1
+
+
+def test_looks_merge_across_hosts_and_dedupe(pdir):
+    own = {"utc": "u1", "purpose": "inspect", "detail": {"a": 1}}
+    (pdir / "runs").mkdir()
+    (pdir / "runs" / "looks.jsonl").write_text(json.dumps(own) + "\n")
+    (pdir / "runs" / "looks").mkdir()
+    (pdir / "runs" / "looks" / "aaaaaaaa.jsonl").write_text(
+        json.dumps(own) + "\n" + json.dumps({"utc": "u2", "purpose": "inspect", "detail": {}}) + "\n"
+        + json.dumps({"utc": "u3", "purpose": "health", "detail": {}}) + "\n")
+    assert runs.final_looks() == 2
+
+
+def test_push_shares_looks_per_host(pdir):
+    (pdir / "runs").mkdir()
+    (pdir / "runs" / "looks.jsonl").write_text("{}\n")
+    s3 = FakeS3()
+    runs.push(client=s3, bucket_name="b")
+    assert f"runs/looks/{runs.host_hash()}.jsonl" in s3.objs and "runs/looks.jsonl" not in s3.objs
+
+
+def test_pull_rejects_escaping_keys(pdir):
+    s3 = FakeS3({"runs/../evil.txt": b"x", "runs/a/b/c/results.json": b"{}"})
+    runs.pull(client=s3, bucket_name="b")
+    assert not (pdir / "evil.txt").exists() and "runs/../evil.txt" not in s3.downloaded
+
+
+def test_new_run_dir_retries_on_collision(pdir, monkeypatch):
+    toks = iter(["aaaaaa", "aaaaaa", "bbbbbb"])
+    monkeypatch.setattr(runs.secrets, "token_hex", lambda n: next(toks))
+    now = datetime(2026, 11, 24, 13, 5, tzinfo=timezone.utc)
+    assert runs.new_run_dir("f", "s", now).name.endswith("aaaaaa")
+    assert runs.new_run_dir("f", "s", now).name.endswith("bbbbbb")

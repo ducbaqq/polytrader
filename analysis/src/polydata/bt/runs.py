@@ -7,6 +7,9 @@ scans the folders, so it can always be rebuilt from them.
 Run files that get pushed never contain secrets, hostnames, IPs or bucket names (the host is a
 hash). `results.json` is deterministic: the same run twice gives the same bytes.
 
+Pulled validation files (`runs/validation/<sim_version>.json`) are trusted, keyed by `sim_version`.
+Looks are pushed per host (`runs/looks/<host8>.jsonl`, a copy of the local `looks.jsonl`).
+
 Versions: `strategy_version` hashes the strategy's source file bytes, its registry name (several
 strategies can share one file) and the params merged over the class `default_params`.
 Provenance: `provenance.json` carries `git diff HEAD` (tracked files only, capped at 200 kB) when the
@@ -19,8 +22,10 @@ import hashlib
 import inspect
 import json
 import math
+import os
 import platform
 import secrets
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -54,7 +59,7 @@ def runs_dir() -> Path:
 
 
 def csv_default() -> Path:
-    return REPO_ROOT / "docs" / "runs-index.csv"
+    return Path(os.environ["POLYDATA_RUNS_CSV"]) if os.environ.get("POLYDATA_RUNS_CSV") else REPO_ROOT / "docs" / "runs-index.csv"
 
 
 # ---------------------------------------------------------------------------------------- versions
@@ -72,18 +77,18 @@ def strategy_version(strategy_cls: type, params: dict) -> str:
 
 
 def data_fingerprint(days: list[str]) -> str:
-    """sha256 of the sorted (raw path, size) list of `days`: from the raw dir, else the Parquet `.src` manifests."""
+    """sha256 over the `.src` manifests (raw file names and sizes) of the built Parquet of `days`.
+
+    They describe what is actually replayed and survive pruning of the raw files. Raises if a day has none."""
     p = paths()
-    items: list[str] = []
+    h = hashlib.sha256()
     for day in sorted(set(days)):
-        files = sorted(p.raw.glob(f"{day}/*/*.zst"))
-        if files:
-            items += [f"{f.relative_to(p.raw).as_posix()}\t{f.stat().st_size}" for f in files]
-            continue
-        for src in sorted(p.parquet.glob(f"*/date={day}/*.src")):
-            rel = src.relative_to(p.parquet).with_suffix("").as_posix()
-            items += [f"{rel}/{line}" for line in src.read_text().splitlines() if line and not line.startswith("#")]
-    return hashlib.sha256("\n".join(sorted(items)).encode()).hexdigest()
+        srcs = sorted(p.parquet.glob(f"*/date={day}/*.src"))
+        if not srcs:
+            raise ValueError(f"no built Parquet manifests (.src) for {day}: run `polydata build`")
+        for src in srcs:
+            h.update(src.relative_to(p.parquet).as_posix().encode() + b"\0" + src.read_bytes() + b"\0")
+    return h.hexdigest()
 
 
 def available_days() -> list[str]:
@@ -100,9 +105,14 @@ def days_of_kinds(kinds: set[str]) -> list[str]:
 
 
 def new_run_dir(family: str, strategy: str, now_utc: datetime) -> Path:
-    d = runs_dir() / family / strategy / f"{now_utc:%Y-%m-%dT%H%M}-{secrets.token_hex(3)}"
-    d.mkdir(parents=True, exist_ok=False)
-    return d
+    for _ in range(100):
+        d = runs_dir() / family / strategy / f"{now_utc:%Y-%m-%dT%H%M}-{secrets.token_hex(3)}"
+        try:
+            d.mkdir(parents=True, exist_ok=False)
+            return d
+        except FileExistsError:
+            continue
+    raise RuntimeError("could not find a free run folder name")
 
 
 # ---------------------------------------------------------------------------------------- records
@@ -216,10 +226,14 @@ def rebuild_index(csv_path: Path | None = None) -> pd.DataFrame:
                     "path": "object"})
     df = df.sort_values(["created_utc", "run_id"], kind="stable").reset_index(drop=True)
     runs_dir().mkdir(parents=True, exist_ok=True)
-    df.to_parquet(runs_dir() / "index.parquet", index=False)
     out = csv_path or csv_default()
     out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out, index=False, lineterminator="\n")
+    tag = f".{os.getpid()}.{secrets.token_hex(2)}.tmp"
+    for target, write in ((runs_dir() / "index.parquet", lambda f: df.to_parquet(f, index=False)),
+                          (out, lambda f: df.to_csv(f, index=False, lineterminator="\n"))):
+        tmp = target.with_name(target.name + tag)
+        write(tmp)
+        os.replace(tmp, target)  # atomic: concurrent readers and writers never see a partial file
     return df
 
 
@@ -228,21 +242,30 @@ def load_index() -> pd.DataFrame:
     return pd.read_parquet(f) if f.exists() else rebuild_index()
 
 
-def final_looks() -> int:
-    """Final runs in the index plus the looks.jsonl lines that are neither `health` nor `final` (a final run
-    records a `final` look, but is counted once, as a run): N for the trial-budget threshold."""
-    idx = runs_dir() / "index.parquet"
-    n = int((pd.read_parquet(idx).kind == "final").sum()) if idx.exists() else 0
-    f = runs_dir() / "looks.jsonl"
-    if f.exists():
+def _look_lines() -> list[dict]:
+    """Looks from the local looks.jsonl and every pulled `runs/looks/*.jsonl`, deduplicated by (utc, purpose, detail)."""
+    seen, out = set(), []
+    for f in [runs_dir() / "looks.jsonl", *sorted((runs_dir() / "looks").glob("*.jsonl"))]:
+        if not f.exists():
+            continue
         for line in f.read_text().splitlines():
-            if line.strip():
-                try:
-                    purpose = json.loads(line).get("purpose")
-                except ValueError:
-                    purpose = None
-                n += purpose not in ("health", "final")  # a final run is already counted as a run
-    return n
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            key = (rec.get("utc"), rec.get("purpose"), json.dumps(rec.get("detail"), sort_keys=True))
+            if key not in seen:
+                seen.add(key)
+                out.append(rec)
+    return out
+
+
+def final_looks() -> int:
+    """Final runs in the (freshly rebuilt) index plus the look lines (local and pulled) that are neither
+    `health` nor `final` (a final run records a `final` look but is counted once, as a run): N for the
+    trial-budget threshold."""
+    n = int((rebuild_index().kind == "final").sum())
+    return n + sum(r.get("purpose") not in ("health", "final") for r in _look_lines())
 
 
 def final_preflight(strategy_cls: type, params: dict, days: list[str], sim_ver: str | None = None) -> pd.DataFrame:
@@ -253,7 +276,7 @@ def final_preflight(strategy_cls: type, params: dict, days: list[str], sim_ver: 
     if len(days) < FINAL_MIN_DAYS:
         raise FinalRefused(f"only {len(days)} sealed days available, --final needs at least {FINAL_MIN_DAYS}")
     version, fp = strategy_version(strategy_cls, effective_params(strategy_cls, params)), data_fingerprint(days)
-    idx = load_index()
+    idx = rebuild_index()  # never trust a cached index
     finals = idx[(idx.kind == "final") & (idx.version == version)]
     same = []
     for _, r in finals.iterrows():
@@ -295,6 +318,10 @@ def _client(client, bucket_name):
 def push(client=None, bucket_name: str | None = None, csv_path: Path | None = None) -> int:
     """Upload run files that are missing in the bucket (or differ in size), then rebuild the index."""
     client, bucket_name = _client(client, bucket_name)
+    local_looks = runs_dir() / "looks.jsonl"
+    if local_looks.exists():  # shared under a per-host name so machines never overwrite each other's looks
+        (runs_dir() / "looks").mkdir(exist_ok=True)
+        shutil.copyfile(local_looks, runs_dir() / "looks" / f"{host_hash()}.jsonl")
     remote = _remote(client, bucket_name)
     n = 0
     for f in _shared_files():
@@ -314,7 +341,9 @@ def pull(client=None, bucket_name: str | None = None, csv_path: Path | None = No
         rel = key[len("runs/"):]
         if not rel or Path(rel).name in _NOT_SHARED:
             continue
-        local = runs_dir() / rel
+        local = (runs_dir() / rel).resolve()
+        if not local.is_relative_to(runs_dir().resolve()):
+            continue  # a key that would leave runs/
         if local.exists() and local.stat().st_size == size:
             continue
         local.parent.mkdir(parents=True, exist_ok=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import os
 import secrets
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -89,7 +90,7 @@ def _brief(s: dict) -> dict:
 
 
 def execute(cfg: RunConfig, kind: str = "run", latency_sweep: tuple[int, ...] | None = None, workers: int | None = None,
-            con_factory=None, extra_prov: dict | None = None) -> tuple[Path, dict]:
+            con_factory=None, extra_prov: dict | None = None, rebuild: bool = True) -> tuple[Path, dict]:
     """Run `cfg`, optionally re-run it at other order latencies, write the run folder and refresh the index."""
     from . import engine
     from .strategy import get_strategy
@@ -109,7 +110,8 @@ def execute(cfg: RunConfig, kind: str = "run", latency_sweep: tuple[int, ...] | 
     prov = runs.provenance(cls, cfg.params, days, kind, elapsed_s=round(res.elapsed_s, 1), **(extra_prov or {}))
     d = runs.new_run_dir(cls.family or "unfiled", cls.name, datetime.now(timezone.utc))
     runs.write_run(d, cfg, res, metrics, prov)
-    runs.rebuild_index()
+    if rebuild:
+        runs.rebuild_index()
     return d, metrics
 
 
@@ -141,7 +143,7 @@ def cmd_run(a) -> None:
 
     connect(include_sealed=True, purpose="final").close()  # the recorded look
     n = runs.final_looks()
-    cfg = replace(cfg, day_kinds=["sealed"], days=days, tags=[*cfg.tags, "final"])
+    cfg = replace(cfg, day_kinds=["sealed"], days=days, tags=[*cfg.tags, "final"], order_latency_ms=200)
     d, m = execute(cfg, "final", runs.LATENCY_SWEEP_MS, con_factory=sealed_con,
                    extra_prov={"earlier_finals": list(earlier.run_id), "final_looks": n})
     _print_run(d, m)
@@ -151,7 +153,7 @@ def cmd_run(a) -> None:
 
 def _sweep_point(args) -> tuple[str, dict]:
     cfg_d, workers = args
-    d, m = execute(RunConfig.from_dict(cfg_d), "sweep", None, workers)
+    d, m = execute(RunConfig.from_dict(cfg_d), "sweep", None, workers, rebuild=False)
     return str(d), m
 
 
@@ -168,7 +170,7 @@ def cmd_sweep(a) -> None:
         for k, v in combo:
             apply_set(d, k, v)
         points.append((combo, d))
-    workers = max(1, 4 // a.jobs)
+    workers = max(1, (os.cpu_count() or 4) // a.jobs)
     print(f"sweep {sweep_id}: {len(points)} runs, {a.jobs} at a time")
     jobs = [(d, workers) for _, d in points]
     if a.jobs <= 1:
@@ -176,6 +178,7 @@ def cmd_sweep(a) -> None:
     else:
         with ProcessPoolExecutor(a.jobs) as ex:
             results = list(ex.map(_sweep_point, jobs))
+    runs.rebuild_index()
     rows = sorted(zip(points, results), key=lambda r: -r[1][1]["usd_per_day"])
     for (combo, _), (path, m) in rows:
         label = " ".join(f"{k}={v}" for k, v in combo)
