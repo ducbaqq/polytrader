@@ -52,7 +52,7 @@ the same `results.json` bytes.
 # <strategy-name>
 
 **Family:** <family> | **Status:** idea | testing | candidate | paper | live | abandoned
-**Current version:** <strategy_version from the latest run's provenance.json>
+**Current version:** <strategy_version from the latest run's provenance.json> | **sim_version:** <from the same file>
 
 ## Hypothesis
 What edge, why it should exist, and who loses money to us.
@@ -65,7 +65,8 @@ Count of strategy versions and parameter sets tried so far (the trial budget): <
 ## Results
 | Run | Days | Kind | $/day | Verdict | Notes |
 |---|---|---|---|---|---|
-Link run folders as `data/runs/<family>/<strategy>/<run_id>`.
+Link run folders as `data/runs/<family>/<strategy>/<run_id>`. One line per run that matters, failures included.
+Never list sealed-day results except from a `--final` run (give N, the number of final looks, and the verdict).
 
 ## Lessons
 What the runs taught us, including what did not work.

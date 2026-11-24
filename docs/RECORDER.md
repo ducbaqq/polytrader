@@ -159,3 +159,5 @@ systemd units: `scripts/recorder/systemd/` (copy to `/etc/systemd/system/`).
 
 Deploy: `npm run build`, rsync `dist/recorder package.json package-lock.json` to
 `/opt/polytrader/app/`, `npm ci --omit=dev` if dependencies changed, restart the service.
+| Before 2026-11-24 10:36 (backtester) | Late `recv_ms` at 5-minute boundaries (see above) and backfilled resolutions with late `recv_ms` | `polydata.bt` never replays data before 2026-11-24 10:36 UTC. A backfilled resolution delays the simulated payout cash (credited `redeem_delay_s` after its `recv_ms`); see [BACKTESTER.md](BACKTESTER.md#known-limitations) | Handled in the backtester |
+
