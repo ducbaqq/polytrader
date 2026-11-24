@@ -30,7 +30,10 @@
     "no-trader:scan-once": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts scan-once",
     "no-trader:monitor-once": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/noPaperTraderCli.ts monitor-once",
     "no-trader:build": "tsc",
-    "no-trader:prod": "NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/noPaperTraderCli.js start"
+    "no-trader:prod": "NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/noPaperTraderCli.js start",
+    "recorder:build": "tsc -p tsconfig.recorder.json",
+    "recorder": "node dist/recorder/index.js",
+    "recorder:dev": "ts-node src/recorder/index.ts"
   },
   "keywords": [
     "polymarket",
