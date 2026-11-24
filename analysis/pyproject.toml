@@ -13,6 +13,7 @@ dependencies = [
     "pyarrow>=26.0.1",
     "pycryptodome>=4.6.0",
     "python-dotenv>=1.2.4",
+    "scipy>=1.18.1",
     "zstandard>=0.25.0",
 ]
 

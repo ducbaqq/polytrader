@@ -62,7 +62,7 @@ def _convert(con: duckdb.DuckDBPyConnection, stream: str, files: list[Path], out
     tmp = out.with_suffix(".tmp")
     con.execute(f"COPY ({rel}) TO '{tmp.as_posix()}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 250000)")
     tmp.replace(out)
-    return con.execute(f"SELECT count(*) FROM '{out.as_posix()}'").fetchone()[0]
+    return con.execute(f"SELECT count(*) FROM '{out.as_posix()}'").fetchall()[0][0]
 
 
 def build(days: list[str] | None = None, streams: list[str] | None = None, force: bool = False) -> None:
@@ -116,5 +116,5 @@ def build_markets(con: duckdb.DuckDBPyConnection | None = None) -> None:
     tmp = out.with_suffix(".tmp")
     con.execute(f"COPY ({MARKETS_SQL.format(P=p.parquet.as_posix())}) TO '{tmp.as_posix()}' (FORMAT parquet)")
     tmp.replace(out)
-    n = con.execute(f"SELECT count(*) FROM '{out.as_posix()}'").fetchone()[0]
+    n = con.execute(f"SELECT count(*) FROM '{out.as_posix()}'").fetchall()[0][0]
     print(f"  markets.parquet {n:,} markets")
