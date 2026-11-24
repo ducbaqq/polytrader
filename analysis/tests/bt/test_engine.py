@@ -23,10 +23,11 @@ LEN = {"5m": 300_000, "15m": 900_000, "1h": 3_600_000}
 NO_EVENTS = pd.DataFrame({"ts_ms": pd.Series([], dtype="int64"), "kind": [], "source": [], "detail": []})
 
 
-def minfo(ws: int, tf: str = "5m", outcome: str | None = "Up", coin: str = "btc") -> MarketInfo:
+def minfo(ws: int, tf: str = "5m", outcome: str | None = "Up", coin: str = "btc",
+          price_to_beat: float | None = 60000.0) -> MarketInfo:
     return MarketInfo(slug=f"{coin}-updown-{tf}-{ws // 1000}", coin=coin, timeframe=tf,
                       series=f"{coin}-up-or-down-{tf}", condition_id=f"0x{ws}", window_start_ms=ws,
-                      window_end_ms=ws + LEN[tf], price_to_beat=60000.0, fee_rate=0.05, fee_exponent=1.0,
+                      window_end_ms=ws + LEN[tf], price_to_beat=price_to_beat, fee_rate=0.05, fee_exponent=1.0,
                       tick_px=10, min_order_size=5.0, outcome=outcome,
                       resolution_recv_ms=None if outcome is None else ws + LEN[tf] + 30_000)
 
@@ -590,3 +591,26 @@ def test_mid_10s_nan_within_10s_of_window_end():
                           loader=loader_for({M1.slug: md}), strategy=Bid(), rec_events=NO_EVENTS)
     f = res.fills
     assert len(f) == 1 and math.isnan(f.mid_10s.iloc[0]) and f.mid_at_fill.iloc[0] == pytest.approx(0.5)
+
+
+def test_fair_value_uses_computed_price_to_beat_when_official_is_none():
+    """Like a 4h market: no official price_to_beat; the engine's computed (revealed) one is used."""
+    m = minfo(T0, price_to_beat=None)
+
+    class FV(Strategy):
+        name = "fv-none-test"
+
+        def __init__(self):
+            super().__init__({})
+            self.vals: list[tuple[int, float | None, float | None]] = []
+
+        def on_chainlink(self, ctx, coin, price):
+            for x in ctx.markets():
+                self.vals.append((ctx.now, x.price_to_beat, ctx.fair_value(x.slug)))
+
+    s = FV()
+    engine.run_coin(cfg(), "btc", lambda: make_con([m], T0 - 800_000, T0 + 500_000),
+                    loader=loader_for({m.slug: mdata(m)}), strategy=s, rec_events=NO_EVENTS)
+    late = [(k, v) for t, k, v in s.vals if T0 + 105_000 < t < m.window_end_ms]
+    assert late and all(k is not None and v is not None and 0 < v < 1 for k, v in late)
+    assert all(v is None for t, k, v in s.vals if k is None)

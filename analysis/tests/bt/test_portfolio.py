@@ -188,3 +188,32 @@ def test_global_budget_shared_across_coins():
     assert p.reserve_buy(order("Up", "BUY", 500, 10))
     assert not p.reserve_buy(order("Up", "BUY", 500, 11, slug="eth-updown-5m-1795519800"))
     assert p.free_cash("*") == pytest.approx(5.0)
+
+
+def test_budget_not_grown_by_profit_after_win_then_buy():
+    p = pf(10.0)
+    o = order("Up", "BUY", 400, 25)
+    assert p.reserve_buy(o)
+    p.apply_fill(o, fill(o))
+    p.release(o)
+    p.settle(SLUG, "Up", T0)
+    p.redeem(T0 + 10**9)
+    assert p.cash["btc"] == pytest.approx(25.0) and p.free_cash("btc") == pytest.approx(10.0)
+    p.add_market(info("btc-updown-5m-1795520100"))
+    b = order("Up", "BUY", 900, 10, slug="btc-updown-5m-1795520100")
+    assert p.reserve_buy(b)
+    p.apply_fill(b, fill(b))
+    p.release(b)
+    assert p.cash["btc"] == pytest.approx(16.0)
+    assert p.free_cash("btc") == pytest.approx(1.0)  # 9 deployed out of the 10 budget
+    assert not p.reserve_buy(order("Up", "BUY", 900, 10, slug="btc-updown-5m-1795520100"))
+    # a loss of 4 elsewhere: cash 6, free 6
+    q = pf(10.0)
+    o = order("Down", "BUY", 400, 10)
+    assert q.reserve_buy(o)
+    q.apply_fill(o, fill(o))
+    q.release(o)
+    assert q.free_cash("btc") == pytest.approx(6.0)  # 4 deployed
+    q.settle(SLUG, "Up", T0)
+    q.redeem(T0 + 10**9)
+    assert q.cash["btc"] == pytest.approx(6.0) and q.free_cash("btc") == pytest.approx(6.0)

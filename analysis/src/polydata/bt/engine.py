@@ -83,7 +83,8 @@ ORDER_COLS = ["ms", "report_ms", "order_id", "slug", "event", "token", "side", "
 FILL_COLS = ["slug", "coin", "order_id", "ts_ms", "report_ms", "token", "side", "kind", "px", "size", "fee",
              "liquidity", "queue_ahead_at_fill", "trade_ts_ms", "mid_at_fill", "mid_10s", "settle_value",
              "bn_move_1s"]
-EQUITY_COLS = ["ms", "cash", "locked", "pending", "mtm", "equity"]  # cash: unlocked, not capped at the budget
+# cash = total unlocked cash, realised profits included (not capped at the budget like ctx.cash)
+EQUITY_COLS = ["ms", "cash", "locked", "pending", "mtm", "equity"]
 MARKET_COLS = ["slug", "coin", "timeframe", "window_start_ms", "window_end_ms", "voided", "reason", "pnl",
                "settle_ms", "outcome"]
 
@@ -690,7 +691,7 @@ class _Replay:
                     tot += float(c[2][j])
                 j -= 1
             avg = tot / n if n else None
-        return _fair_value(cl_px, self._bn_mid(sym, now), self._bn_mid(sym, cl_ts), info.price_to_beat, sig, tau, n,
+        return _fair_value(cl_px, self._bn_mid(sym, now), self._bn_mid(sym, cl_ts), m.pub.price_to_beat, sig, tau, n,
                            avg, k=K_BEST)
 
     # ------------------------------------------------------------------------------- setup
