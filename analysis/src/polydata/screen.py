@@ -5,7 +5,8 @@ A screen can only reject or promote, never pass: promotion means "worth a full s
 A screen is a rule over the snapshot frame (`research/snapshots.py`) that returns "buy this token now"
 rows `slug, t_ms, token ('Up'|'Down'), size?`. Signal inputs must be columns known at `t_ms`
 (`up_bid`, `up_ask`, `tau_s`, ...). The `up_ask_300`/`dn_ask_300` (and `_1000`) columns are execution
-prices only, they look 300 ms / 1 s past t, and must never feed a rule.
+prices only, they look 300 ms / 1 s past t, and must never feed a rule; neither must `outcome_up`. `run`
+passes the rule a frame without them (`FORBIDDEN_RULE_COLUMNS`).
 
 Pessimistic fills: a market buy at the ask `latency_ms` after t (latency 300 or 1000 only, the horizons
 the snapshots carry), plus `taker_fee` on entry. Visible depth is NOT checked (snapshots have no sizes):
@@ -44,6 +45,8 @@ EXIT_DELAY_MS = 2000
 MAX_EXIT_WAIT_MS = 10_000  # a bid exit whose first row is later than t + 10 s is held to resolution instead
 DEFAULT_SIZE = 10.0
 NOTE_DEPTH = "visible depth is not checked: every signal fills in full at its size"
+# look past t (execution prices, the outcome): dropped from the frame a rule sees
+FORBIDDEN_RULE_COLUMNS = ("outcome_up", "up_ask_300", "dn_ask_300", "up_ask_1000", "dn_ask_1000")
 
 
 @dataclass(frozen=True)
@@ -119,8 +122,22 @@ def load_snapshots(rebuild: bool | None = None) -> tuple[pd.DataFrame, float | N
     return prepare(pd.read_parquet(f)), secs
 
 
+def _ranges(mk: pd.DataFrame) -> pd.Series:
+    """Per market, the index of its contiguous non-sealed range of days (a sealed day in between starts a new one;
+    `prepare` keeps no window touching a sealed day)."""
+    days = sorted({date.fromisoformat(_day(ms)) for ms in mk.window_start_ms})
+    rid, cur, d = {}, 0, days[0] if days else None
+    while d is not None and d <= days[-1]:
+        if day_kind(d) == "sealed":
+            cur += 1
+        rid[d.isoformat()] = cur
+        d = date.fromordinal(d.toordinal() + 1)
+    return mk.window_start_ms.map(lambda ms: rid[_day(ms)])
+
+
 def voided_slugs(snap: pd.DataFrame, max_gap_ms_pm: int = 5000, max_gap_ms_bn: int = 1000) -> dict[str, str]:
-    """Markets of `snap` that overlap a data gap (or have no outcome), as {slug: reason}."""
+    """Markets of `snap` that overlap a data gap (or have no outcome), as {slug: reason}. Gaps are computed per
+    contiguous non-sealed range: a sealed day is hidden, which would otherwise look like a 24 h silence."""
     from .bt import gaps
     from .views import connect
 
@@ -129,11 +146,13 @@ def voided_slugs(snap: pd.DataFrame, max_gap_ms_pm: int = 5000, max_gap_ms_bn: i
     try:
         meta = con.execute("SELECT slug, series, coin, outcome FROM markets").df()
         mk = mk.merge(meta, on="slug", how="left")
-        g = gaps.gap_table(con, int(mk.window_start_ms.min()), int(mk.window_end_ms.max()),
-                           max_gap_ms_pm=max_gap_ms_pm, max_gap_ms_bn=max_gap_ms_bn)
+        g = [gaps.gap_table(con, int(r.window_start_ms.min()), int(r.window_end_ms.max()),
+                            max_gap_ms_pm=max_gap_ms_pm, max_gap_ms_bn=max_gap_ms_bn)
+             for _, r in mk.groupby(_ranges(mk), sort=True)]
     finally:
         con.close()
-    v = gaps.voided_markets(mk, g, max_gap_ms_pm, max_gap_ms_bn)
+    g = [x for x in g if len(x)]
+    v = gaps.voided_markets(mk, pd.concat(g, ignore_index=True) if g else gaps._empty(), max_gap_ms_pm, max_gap_ms_bn)
     return dict(zip(v.slug, v.reason))
 
 
@@ -248,7 +267,7 @@ def run(name: str, latency_ms: int = 300, exit: str = "hold", size: float = DEFA
     snap = snap[snap.window_start_ms.map(lambda ms: _kind(_day(ms)) != "sealed")].reset_index(drop=True)
     if voided is None:
         voided = voided_slugs(snap) if len(snap) else {}
-    sigs = scr.rule(snap)
+    sigs = scr.rule(snap.drop(columns=[c for c in FORBIDDEN_RULE_COLUMNS if c in snap.columns]))
     res = evaluate(snap, sigs, latency_ms, exit, size, voided)
     v = verdict(res)
     days = sorted(set(snap.window_start_ms.map(_day)))

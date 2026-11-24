@@ -130,3 +130,70 @@ def test_pm_silence_not_spurious_at_range_edges():
     con.execute("INSERT INTO pm_book SELECT 'h', ? + i*1000 FROM range(0, 3600) t(i)", [T0 - 1_800_000])
     con.execute("INSERT INTO pm_api_trades VALUES ('h', ?), ('h', ?)", [T0 - 500_000, T0 + 500_000])
     assert G.pm_silences(con, T0, T0 + 600_000).empty
+
+
+# ------------------------------------------------------------------------------- sealed catalog days
+
+def _day_ms(d: str) -> int:
+    from datetime import date, datetime, timezone
+
+    x = date.fromisoformat(d)
+    return int(datetime(x.year, x.month, x.day, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _write_events(root, day: str, rows) -> None:
+    from datetime import datetime, timezone
+
+    d = root / "catalog" / day
+    d.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame([(datetime.fromtimestamp(t / 1000, timezone.utc).isoformat(), k, s, "")
+                       for t, k, s in rows], columns=["ts", "kind", "source", "detail"])
+    con = duckdb.connect()
+    con.register("df", df)
+    con.execute(f"COPY df TO '{(d / 'rec_events.csv.zst').as_posix()}' (HEADER, COMPRESSION zstd)")
+
+
+def _looks(root) -> list[dict]:
+    import json
+
+    f = root / "runs" / "looks.jsonl"
+    return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+
+def test_sealed_day_connection_gap_voids_market_in_final_replay(tmp_path, monkeypatch):
+    monkeypatch.setenv("POLYDATA_DIR", str(tmp_path))
+    s = _day_ms("2026-11-25")  # sealed
+    _write_events(tmp_path, "2026-11-25", [(s + 3_600_000, "ws_close", "polymarket"),
+                                           (s + 3_610_000, "ws_open", "polymarket")])
+    con = bn_con([("BTCUSDT", [s + 1000])])
+    g = G.gap_table(con, s, s + 86_400_000)
+    assert [(r.stream, r.key, r.from_ms, r.to_ms) for r in g.itertuples() if r.stream == "pm"] == \
+        [("pm", "*", s + 3_600_000, s + 3_610_000)]
+    v = G.voided_markets(markets([mkt(start=s + 3_600_000 - 100_000)]), g)
+    assert len(v) == 1 and "pm gap" in v.reason.iloc[0]
+    looks = _looks(tmp_path)
+    assert [x["purpose"] for x in looks] == ["health"]  # once per call
+    assert "2026-11-25" in str(looks[0]["detail"])
+
+
+def test_close_on_sealed_day_open_next_day_voids_next_day_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("POLYDATA_DIR", str(tmp_path))
+    d1 = _day_ms("2026-11-26")  # validation; the day before is sealed
+    _write_events(tmp_path, "2026-11-25", [(d1 - 30_000, "ws_close", "polymarket")])
+    _write_events(tmp_path, "2026-11-26", [(d1 + 20_000, "ws_open", "polymarket")])
+    con = bn_con([("BTCUSDT", [d1 + 1000])])
+    g = G.gap_table(con, d1, d1 + 86_400_000)
+    pm = g[g.stream == "pm"]
+    assert [(r.from_ms, r.to_ms) for r in pm.itertuples()] == [(d1 - 30_000, d1 + 20_000)]
+    v = G.voided_markets(markets([mkt(start=d1)]), g)
+    assert list(v.slug) == ["btc-updown-5m-1"]
+    assert [x["purpose"] for x in _looks(tmp_path)] == ["health"]
+
+
+def test_no_look_recorded_without_sealed_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("POLYDATA_DIR", str(tmp_path))
+    d = _day_ms("2026-11-27")  # train; the day before (11-26) is validation
+    _write_events(tmp_path, "2026-11-27", [(d + 1000, "ws_close", "polymarket"), (d + 9000, "ws_open", "polymarket")])
+    con = bn_con([("BTCUSDT", [d + 1000])])
+    assert len(G.gap_table(con, d, d + 86_400_000)) >= 1
+    assert _looks(tmp_path) == []

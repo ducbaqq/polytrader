@@ -212,3 +212,44 @@ def test_staleness_ignores_sealed_day_parquet(tmp_path, monkeypatch):
     # the sealed-day file is newer than the snapshots but must not trigger a rebuild
     _, secs = screen.load_snapshots()
     assert secs is None
+
+
+def test_rule_never_sees_outcome_or_execution_columns(tmp_path, monkeypatch):
+    monkeypatch.setenv("POLYDATA_DIR", str(tmp_path))
+    monkeypatch.setenv("POLYDATA_RUNS_CSV", str(tmp_path / "idx.csv"))
+    seen = []
+
+    def spy(snap):
+        seen.append(set(snap.columns))
+        return screen.endgame_favourite(snap)
+
+    monkeypatch.setitem(screen.REGISTRY, "spy", screen.Screen("spy", "taker", spy))
+    s = pd.DataFrame(snap_rows("a", D_TRAIN, ask=0.85, bid=0.83, taus=(30,)))
+    screen.run("spy", snap=s, voided=set())
+    assert seen and not seen[0] & set(screen.FORBIDDEN_RULE_COLUMNS)
+    assert {"outcome_up", "up_ask_300", "dn_ask_300", "up_ask_1000", "dn_ask_1000"} <= set(screen.FORBIDDEN_RULE_COLUMNS)
+    assert {"slug", "t_ms", "up_ask", "dn_ask", "tau_s"} <= seen[0]
+
+
+def test_voided_slugs_per_contiguous_non_sealed_range(monkeypatch):
+    # markets on 11-24 (train) and 11-26 (validation): 11-25 is sealed and hidden, so gaps are computed per range
+    import duckdb
+
+    from polydata.bt import gaps
+
+    calls = []
+
+    def fake_gap_table(con, start_ms, end_ms, **kw):
+        calls.append((start_ms, end_ms))
+        return gaps._empty()
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE markets AS SELECT * FROM (VALUES ('a', 'btc-up-or-down-5m', 'btc', 'Up'), "
+                "('b', 'btc-up-or-down-5m', 'btc', 'Up'), ('c', 'btc-up-or-down-5m', 'btc', NULL)) t(slug, series, coin, outcome)")
+    monkeypatch.setattr("polydata.views.connect", lambda *a, **k: con.cursor())
+    monkeypatch.setattr(gaps, "gap_table", fake_gap_table)
+    d24 = D_SEALED - DAY_MS
+    s = pd.DataFrame(snap_rows("a", d24 + 40_000_000) + snap_rows("b", D_VALID + 1000) + snap_rows("c", D_VALID + 600_000))
+    v = screen.voided_slugs(s)
+    assert v == {"c": "no outcome"}
+    assert calls == [(d24 + 40_000_000, d24 + 40_300_000), (D_VALID + 1000, D_VALID + 900_000)]

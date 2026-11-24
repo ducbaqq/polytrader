@@ -2,6 +2,11 @@
 
 A dropped Polymarket connection leaves a stale book, which gives fills that could never have
 happened. `gap_table` lists the gaps; `voided_markets` says which market windows must not be replayed.
+
+Connection events are data-health information, so `gap_table` always reads the `rec_events` catalog
+of sealed days too (a `--final` replay covers only sealed days, and a ws_close on a sealed day can
+leave the next day's start stale). Each call that reads a sealed day's catalog records one `health`
+look (`splits.record_look`).
 """
 
 from __future__ import annotations
@@ -32,17 +37,22 @@ def _empty() -> pd.DataFrame:
 
 
 def load_rec_events(days: Iterable[date], include_sealed: bool = False) -> pd.DataFrame:
-    """Read the daily `rec_events.csv.zst` catalog exports. Missing days are skipped with one warning."""
+    """Read the daily `rec_events.csv.zst` catalog exports. Missing days are skipped with one warning.
+    Sealed days are skipped unless `include_sealed`; reading one records a `health` look (once per call)."""
     import duckdb
 
-    from .splits import day_kind
+    from .splits import day_kind, record_look
 
-    files, missing = [], []
+    files, missing, sealed = [], [], []
     for d in days:
         if not include_sealed and day_kind(d) == "sealed":
             continue
         f = paths().catalog / d.isoformat() / "rec_events.csv.zst"
         (files if f.exists() else missing).append(f.as_posix() if f.exists() else d.isoformat())
+        if f.exists() and day_kind(d) == "sealed":
+            sealed.append(d.isoformat())
+    if sealed:
+        record_look("health", {"via": "gaps.load_rec_events", "rec_events_days": sealed})
     if missing:
         log.warning("no rec_events catalog for %s; relying on Binance and Polymarket silences only", ", ".join(missing))
     if not files:
@@ -147,16 +157,17 @@ def pm_silences(con, start_ms: int, end_ms: int, max_gap_ms_pm: int = 5000) -> p
 
 
 def gap_table(con, start_ms: int, end_ms: int, events: pd.DataFrame | None = None,
-              max_gap_ms_pm: int = 5000, max_gap_ms_bn: int = 1000, include_sealed: bool = False) -> pd.DataFrame:
+              max_gap_ms_pm: int = 5000, max_gap_ms_bn: int = 1000) -> pd.DataFrame:
     """All known gaps overlapping [start_ms, end_ms): columns stream ('pm'|'bn'|'cl'), key (series,
-    '*', Binance sym or coin), from_ms, to_ms, source. `events` defaults to the daily catalog."""
+    '*', Binance sym or coin), from_ms, to_ms, source. `events` defaults to the daily catalog, sealed
+    days included (data-health information; recorded as a `health` look)."""
     from datetime import datetime, timedelta, timezone
 
     if events is None:
         # one day earlier: a ws_close the day before may have its ws_open inside the range
         d0 = datetime.fromtimestamp(start_ms / 1000, timezone.utc).date() - timedelta(days=1)
         d1 = datetime.fromtimestamp(end_ms / 1000, timezone.utc).date()
-        events = load_rec_events([d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)], include_sealed)
+        events = load_rec_events([d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)], include_sealed=True)
     syms = [r[0] for r in con.execute(
         "SELECT DISTINCT sym FROM bn_fut_bbo WHERE recv_ms BETWEEN ? AND ?", [start_ms, end_ms]).fetchall()]
     parts = [event_gaps(events, end_ms, syms), bn_silences(con, start_ms, end_ms, max_gap_ms_bn),
