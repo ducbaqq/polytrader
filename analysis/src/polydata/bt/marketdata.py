@@ -42,6 +42,7 @@ TOKENS = ("Up", "Down")
 
 
 class Tops(NamedTuple):
+    """Top-of-book changes; prices are int32 px."""
     ts_ms: np.ndarray
     recv_ms: np.ndarray
     bid_px: np.ndarray
@@ -49,6 +50,8 @@ class Tops(NamedTuple):
 
 
 class Trades(NamedTuple):
+    """Public trades as arrays. `MarketData.trades` is in ts_ms order (the exchange clock, for
+    matching); `MarketData.trades_recv` holds the same trades in recv_ms order (what the strategy sees)."""
     ts_ms: np.ndarray
     recv_ms: np.ndarray
     token: np.ndarray  # 0 Up, 1 Down
@@ -70,10 +73,11 @@ class _Level(NamedTuple):
     recv_ms: np.ndarray  # raw receive times, in exchange order
     recv_eff: np.ndarray  # running max of recv_ms: when the state is known at our end
     size: np.ndarray
+    last_pos: np.ndarray  # index of the last event at or before i with size > 0, or -1
 
 
 # --------------------------------------------------------------------------------------------- SQL
-# Inputs (temp tables): _pc(mi, ts_ms, recv_ms, seq, outcome, side, price, size, best_bid, best_ask),
+# Inputs (temp tables): _pc(mi, ts_ms, recv_ms, seq, dn, sell, px, size, bb, ba) — compact: see _PC_SELECT,
 # _bk(mi, ts_ms, recv_ms, seq, outcome, bids, asks), _tr(mi, ts_ms, recv_ms, seq, outcome, side, price, size),
 # _tk(mi, ts_ms, recv_ms, new_tick_size). `mi` is the market index, `seq` the row order inside a stream.
 # Event order key k = ts_ms * 2 (+1 for snapshots, so they follow same-ts changes).
@@ -81,20 +85,19 @@ class _Level(NamedTuple):
 _BID = "CASE WHEN {b} > 0 THEN round({b} * 1000)::INTEGER ELSE 0 END"
 _ASK = "CASE WHEN {a} > 0 AND {a} < 1 THEN round({a} * 1000)::INTEGER ELSE 1000 END"
 
-_SQL_CHANGES = f"""
+# Compact form of pm_price_change rows (token-terms side/px; bb/ba: 0 / 1000 for an empty side).
+_PC_SELECT = f"""outcome = 'Down' AS dn, side = 'SELL' AS sell, round(price * 1000)::SMALLINT AS px, size,
+    ({_BID.format(b='best_bid')})::SMALLINT AS bb, ({_ASK.format(a='best_ask')})::SMALLINT AS ba"""
+
+# Level changes in Up terms; `sell` = the Up-terms side is SELL (an ask).
+_SQL_CHANGES = """
 CREATE OR REPLACE TEMP TABLE _chg AS
-WITH c AS (
-    SELECT mi, ts_ms, recv_ms, seq, outcome, side, round(price * 1000)::INTEGER AS px, size,
-           {_BID.format(b='best_bid')} AS bb, {_ASK.format(a='best_ask')} AS ba
-    FROM _pc),
-up AS (SELECT * FROM c WHERE outcome = 'Up'),
-dn AS (SELECT * FROM c d WHERE outcome = 'Down' AND NOT EXISTS (
-        SELECT 1 FROM up u WHERE u.mi = d.mi AND u.ts_ms = d.ts_ms AND u.px = 1000 - d.px AND u.side <> d.side))
-SELECT mi, ts_ms, recv_ms, seq, side AS up_side, px, size, bb, ba FROM up
+SELECT mi, ts_ms, recv_ms, seq, sell, px, size, bb, ba FROM _pc WHERE NOT dn
 UNION ALL
-SELECT mi, ts_ms, recv_ms, seq, CASE side WHEN 'BUY' THEN 'SELL' ELSE 'BUY' END, 1000 - px, size,
-       CASE WHEN ba < 1000 THEN 1000 - ba ELSE 0 END, CASE WHEN bb > 0 THEN 1000 - bb ELSE 1000 END
-FROM dn
+SELECT mi, ts_ms, recv_ms, seq, NOT sell, (1000 - px)::SMALLINT, size,
+       (CASE WHEN ba < 1000 THEN 1000 - ba ELSE 0 END)::SMALLINT, (CASE WHEN bb > 0 THEN 1000 - bb ELSE 1000 END)::SMALLINT
+FROM _pc d WHERE dn AND NOT EXISTS (
+    SELECT 1 FROM _pc u WHERE NOT u.dn AND u.mi = d.mi AND u.ts_ms = d.ts_ms AND u.px = 1000 - d.px AND u.sell <> d.sell)
 """
 
 _SQL_SNAPSHOTS = """
@@ -115,8 +118,8 @@ WITH l AS (
     UNION ALL
     SELECT mi, ts_ms, recv_ms, seq, k, outcome, 'SELL', unnest(levels(asks)) FROM _snap)
 SELECT mi, ts_ms, recv_ms, seq, k,
-       CASE WHEN outcome = 'Up' THEN tside WHEN tside = 'BUY' THEN 'SELL' ELSE 'BUY' END AS up_side,
-       CASE WHEN outcome = 'Up' THEN round(l.price * 1000)::INTEGER ELSE 1000 - round(l.price * 1000)::INTEGER END AS px,
+       (outcome = 'Up') = (tside = 'SELL') AS sell,
+       (CASE WHEN outcome = 'Up' THEN round(l.price * 1000) ELSE 1000 - round(l.price * 1000) END)::SMALLINT AS px,
        l.size AS size
 FROM l;
 """
@@ -125,24 +128,24 @@ _ORDER = "k, recv_ms, seq, src, size"
 
 _SQL_LEVELS = f"""
 CREATE OR REPLACE TEMP TABLE _ev AS
-SELECT mi, up_side, px, ts_ms * 2 AS k, ts_ms, recv_ms, seq, 0 AS src, size FROM _chg
+SELECT mi, sell, px, ts_ms * 2 AS k, ts_ms, recv_ms, seq, 0 AS src, size FROM _chg
 UNION ALL
-SELECT mi, up_side, px, k, ts_ms, recv_ms, seq, 1, size FROM _sl;
+SELECT mi, sell, px, k, ts_ms, recv_ms, seq, 1, size FROM _sl;
 
 -- A level > 0 after key k whose next event at a later key comes after the next snapshot (or never)
 -- is absent from that snapshot: it gets a size-0 entry at the snapshot.
 CREATE OR REPLACE TEMP TABLE _zero AS
-WITH g AS (SELECT mi, up_side, px, k, arg_max(size, (recv_ms, seq, src)) > 0 AS pos FROM _ev GROUP BY ALL),
-e AS (SELECT *, lead(k) OVER (PARTITION BY mi, up_side, px ORDER BY k) AS nk FROM g),
+WITH g AS (SELECT mi, sell, px, k, arg_max(size, (recv_ms, seq, src)) > 0 AS pos FROM _ev GROUP BY ALL),
+e AS (SELECT *, lead(k) OVER (PARTITION BY mi, sell, px ORDER BY k) AS nk FROM g),
 s AS (SELECT mi, k, ts_ms, recv_ms, seq FROM _snap)
-SELECT e.mi, e.up_side, e.px, s.k, s.ts_ms, s.recv_ms, s.seq, 2 AS src, 0.0 AS size
+SELECT e.mi, e.sell, e.px, s.k, s.ts_ms, s.recv_ms, s.seq, 2 AS src, 0.0 AS size
 FROM e ASOF JOIN s ON e.mi = s.mi AND e.k < s.k
 WHERE e.pos AND (e.nk IS NULL OR e.nk > s.k);
 """
 
 _SQL_LEVELS_OUT = f"""
-SELECT mi, (up_side = 'SELL')::TINYINT AS side, px::SMALLINT AS px, ts_ms, recv_ms, size
-FROM (SELECT * FROM _ev UNION ALL SELECT mi, up_side, px, k, ts_ms, recv_ms, seq, src, size FROM _zero)
+SELECT mi, sell::TINYINT AS side, px, ts_ms, recv_ms, size
+FROM (SELECT * FROM _ev UNION ALL SELECT mi, sell, px, k, ts_ms, recv_ms, seq, src, size FROM _zero)
 ORDER BY mi, side, px, {_ORDER}
 """
 
@@ -151,8 +154,8 @@ CREATE OR REPLACE TEMP TABLE _top AS
 SELECT mi, ts_ms * 2 AS k, ts_ms, recv_ms, seq, bb, ba FROM _chg
 UNION ALL
 SELECT s.mi, s.k, s.ts_ms, s.recv_ms, s.seq,
-       coalesce(max(l.px) FILTER (WHERE l.up_side = 'BUY' AND l.size > 0), 0),
-       coalesce(min(l.px) FILTER (WHERE l.up_side = 'SELL' AND l.size > 0), 1000)
+       coalesce(max(l.px) FILTER (WHERE NOT l.sell AND l.size > 0), 0),
+       coalesce(min(l.px) FILTER (WHERE l.sell AND l.size > 0), 1000)
 FROM _snap s LEFT JOIN _sl l ON l.mi = s.mi AND l.k = s.k
 GROUP BY s.mi, s.k, s.ts_ms, s.recv_ms, s.seq;
 """
@@ -161,7 +164,7 @@ GROUP BY s.mi, s.k, s.ts_ms, s.recv_ms, s.seq;
 def _sql_tops_out(order: str) -> str:
     """Top rows in `order`, keeping a row only where (bid, ask) changes."""
     return f"""
-    SELECT mi, ts_ms, recv_ms, bb::SMALLINT AS bid_px, ba::SMALLINT AS ask_px FROM (
+    SELECT mi, ts_ms, recv_ms, bb::INTEGER AS bid_px, ba::INTEGER AS ask_px FROM (
         SELECT *, lag(bb) OVER w AS pb, lag(ba) OVER w AS pa FROM _top
         WINDOW w AS (PARTITION BY mi ORDER BY {order}))
     WHERE pb IS NULL OR pb <> bb OR pa <> ba
@@ -171,12 +174,12 @@ def _sql_tops_out(order: str) -> str:
 _SQL_TRADES_OUT = """
 SELECT mi, ts_ms, recv_ms, (outcome = 'Down')::TINYINT AS token, (side = 'SELL')::TINYINT AS side, price, size,
        ((outcome = 'Down') <> (side = 'SELL'))::TINYINT AS up_side,
-       (CASE WHEN outcome = 'Up' THEN round(price * 1000) ELSE 1000 - round(price * 1000) END)::SMALLINT AS up_px
+       (CASE WHEN outcome = 'Up' THEN round(price * 1000) ELSE 1000 - round(price * 1000) END)::INTEGER AS up_px
 FROM _tr ORDER BY mi, ts_ms, recv_ms, seq
 """
 
 _SQL_TICKS_OUT = """
-SELECT mi, ts_ms, min(recv_ms) AS recv_ms, round(new_tick_size * 1000)::SMALLINT AS tick_px
+SELECT mi, ts_ms, min(recv_ms) AS recv_ms, round(new_tick_size * 1000)::INTEGER AS tick_px
 FROM _tk GROUP BY mi, ts_ms, tick_px ORDER BY mi, ts_ms, recv_ms
 """
 
@@ -184,9 +187,12 @@ FROM _tk GROUP BY mi, ts_ms, tick_px ORDER BY mi, ts_ms, recv_ms
 def _build(con, n_markets: int) -> list[dict]:
     """Run the pipeline over the _pc/_bk/_tr/_tk temp tables; return one dict of arrays per market."""
     con.execute(_SQL_CHANGES)
+    con.execute("DROP TABLE IF EXISTS _pc")
     con.execute(_SQL_SNAPSHOTS)
+    con.execute("DROP TABLE IF EXISTS _bk")
     con.execute(_SQL_LEVELS)
     con.execute(_SQL_TOPS)
+    con.execute("DROP TABLE IF EXISTS _chg; DROP TABLE IF EXISTS _sl")
     parts = {
         "levels": con.execute(_SQL_LEVELS_OUT).fetchnumpy(),
         "tops": con.execute(_sql_tops_out("k, recv_ms, seq")).fetchnumpy(),
@@ -194,12 +200,12 @@ def _build(con, n_markets: int) -> list[dict]:
         "trades": con.execute(_SQL_TRADES_OUT).fetchnumpy(),
         "ticks": con.execute(_SQL_TICKS_OUT).fetchnumpy(),
     }
-    for t in ("_chg", "_snap", "_sl", "_ev", "_zero", "_top"):
+    for t in ("_snap", "_ev", "_zero", "_top"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     out: list[dict] = [{} for _ in range(n_markets)]
     for name, cols in parts.items():
         cols = {c: np.asarray(v) for c, v in cols.items()}
-        mi = cols.pop("mi").astype(np.int64)
+        mi = cols.pop("mi")
         bounds = np.searchsorted(mi, np.arange(n_markets + 1))
         for m in range(n_markets):
             a, b = bounds[m], bounds[m + 1]
@@ -220,21 +226,29 @@ class MarketData:
     def __init__(self, info: MarketInfo, arrays: dict):
         self.info = info
         lv = arrays["levels"]
-        side, px = lv["side"].astype(np.int8), lv["px"].astype(np.int64)
-        ts, recv, size = lv["ts_ms"].astype(np.int64), lv["recv_ms"].astype(np.int64), lv["size"].astype(np.float64)
+        # Arrays arrive in their final dtypes from SQL; astype(copy=False) only guards that.
+        side, px = lv["side"].astype(np.int8, copy=False), lv["px"].astype(np.int16, copy=False)
+        ts, recv = lv["ts_ms"].astype(np.int64, copy=False), lv["recv_ms"].astype(np.int64, copy=False)
+        size = lv["size"].astype(np.float64, copy=False)
         n = len(ts)
         self._levels: dict[tuple[str, int], _Level] = {}
         self._keys: dict[str, list[int]] = {"BUY": [], "SELL": []}
         if n:
-            start = np.flatnonzero(np.r_[True, (side[1:] != side[:-1]) | (px[1:] != px[:-1])])
-            group = np.cumsum(np.r_[True, (side[1:] != side[:-1]) | (px[1:] != px[:-1])]) - 1
+            new = np.r_[True, (side[1:] != side[:-1]) | (px[1:] != px[:-1])]
+            start = np.flatnonzero(new)
+            group = np.cumsum(new) - 1
             base = int(recv.min())
             span = int(recv.max()) - base + 1
             recv_eff = np.maximum.accumulate((recv - base) + group * span) - group * span + base
+            del group
+            # last index with size > 0 at or before each event (global index; < group start -> none)
+            pos = np.maximum.accumulate(np.where(size > 0, np.arange(n), -1))
             ends = np.r_[start[1:], n]
             for a, b in zip(start.tolist(), ends.tolist()):
                 key = (SIDES[side[a]], int(px[a]))
-                self._levels[key] = _Level(ts[a:b], recv[a:b], recv_eff[a:b], size[a:b])
+                lp = pos[a:b] - a
+                lp[lp < 0] = -1
+                self._levels[key] = _Level(ts[a:b], recv[a:b], recv_eff[a:b], size[a:b], lp)
                 self._keys[key[0]].append(key[1])
         self._keys["BUY"].sort(reverse=True)
         self._keys["SELL"].sort()
@@ -242,20 +256,23 @@ class MarketData:
         self.tops = self._tops(arrays["tops"])  # ts_ms order
         self.tops_recv = self._tops(arrays["tops_recv"])  # recv_ms order
         tr = arrays["trades"]
-        self.trades = Trades(tr["ts_ms"].astype(np.int64), tr["recv_ms"].astype(np.int64), tr["token"].astype(np.int8),
-                             tr["side"].astype(np.int8), tr["price"].astype(np.float64),
-                             tr["size"].astype(np.float64), tr["up_side"].astype(np.int8),
-                             tr["up_px"].astype(np.int64))
+        self.trades = Trades(tr["ts_ms"].astype(np.int64, copy=False), tr["recv_ms"].astype(np.int64, copy=False),
+                             tr["token"].astype(np.int8, copy=False), tr["side"].astype(np.int8, copy=False),
+                             tr["price"].astype(np.float64, copy=False), tr["size"].astype(np.float64, copy=False),
+                             tr["up_side"].astype(np.int8, copy=False), tr["up_px"].astype(np.int32, copy=False))
+        o = np.lexsort((np.arange(len(self.trades.ts_ms)), self.trades.recv_ms))  # recv, then ts order
+        self.trades_recv = Trades(*(a[o] for a in self.trades))
         tk = arrays["ticks"]
-        tk_ts, tk_recv, tk_px = tk["ts_ms"].astype(np.int64), tk["recv_ms"].astype(np.int64), tk["tick_px"].astype(np.int64)
+        tk_ts, tk_recv = tk["ts_ms"].astype(np.int64, copy=False), tk["recv_ms"].astype(np.int64, copy=False)
+        tk_px = tk["tick_px"].astype(np.int32, copy=False)
         self.ticks = Ticks(tk_ts, tk_recv, tk_px)
         o = np.argsort(tk_recv, kind="stable")
         self._ticks_recv = Ticks(tk_ts[o], tk_recv[o], tk_px[o])
 
     @staticmethod
     def _tops(d: dict) -> Tops:
-        return Tops(d["ts_ms"].astype(np.int64), d["recv_ms"].astype(np.int64),
-                    d["bid_px"].astype(np.int64), d["ask_px"].astype(np.int64))
+        return Tops(d["ts_ms"].astype(np.int64, copy=False), d["recv_ms"].astype(np.int64, copy=False),
+                    d["bid_px"].astype(np.int32, copy=False), d["ask_px"].astype(np.int32, copy=False))
 
     def __repr__(self) -> str:
         return (f"MarketData({self.info.slug}: {len(self._levels)} levels, "
@@ -306,6 +323,9 @@ class MarketData:
 
     # -- tops
     def top_at(self, t: int, clock: Clock = "recv") -> Top:
+        """Top of book at t on `clock` (default: what the strategy has seen). Prices come from the
+        reported tops; sizes from the level series on the same clock (see `_top_size`: a present
+        price never has size 0, NaN when no positive size is known yet)."""
         tops = self.tops_recv if clock == "recv" else self.tops if clock == "ts" else None
         if tops is None:
             raise ValueError(f"unknown clock {clock!r}")
@@ -314,8 +334,21 @@ class MarketData:
             return Top(0, 0, NO_BID_PX, 0.0, NO_ASK_PX, 0.0)
         bid, ask = int(tops.bid_px[i]), int(tops.ask_px[i])
         return Top(int(tops.recv_ms[i]), int(tops.ts_ms[i]),
-                   bid, self.size_at("BUY", bid, t, clock) if bid != NO_BID_PX else 0.0,
-                   ask, self.size_at("SELL", ask, t, clock) if ask != NO_ASK_PX else 0.0)
+                   bid, self._top_size("BUY", bid, t, clock) if bid != NO_BID_PX else 0.0,
+                   ask, self._top_size("SELL", ask, t, clock) if ask != NO_ASK_PX else 0.0)
+
+    def _top_size(self, side: Side, px: int, t: int, clock: Clock) -> float:
+        """Size of a price the top reports as present. If the level reads 0 at t on this clock (a
+        change filling it was published earlier but arrives late), the last positive size known
+        on this clock; NaN if none is known. Never 0 for a present price."""
+        lv = self._levels.get((side, px))
+        if lv is None:
+            return float("nan")
+        i = _search(self._times(lv, clock), t)
+        if i < 0:
+            return float("nan")
+        j = int(lv.last_pos[i])
+        return float(lv.size[j]) if j >= 0 else float("nan")
 
     # -- trades / ticks
     def trade(self, i: int) -> Trade:
@@ -360,6 +393,8 @@ class MarketData:
             casts = ", ".join(f"CAST({c} AS {t.strip()}) AS {c}" for c, t in zip(cols, types.split(",")))
             con.register("_src", df)
             con.execute(f"CREATE TEMP TABLE {name} AS SELECT 0 AS mi, {casts}, seq FROM _src")
+            if name == "_pc":
+                con.execute(f"CREATE OR REPLACE TEMP TABLE _pc AS SELECT mi, ts_ms, recv_ms, seq, {_PC_SELECT} FROM _pc")
             con.unregister("_src")
         try:
             return cls(info, _build(con, 1)[0])
@@ -419,7 +454,7 @@ def load_coin(con, coin: str, timeframes: list[str], start_ms: int, end_ms: int,
     where = "s.asset IN (SELECT unnest(?)) AND s.date BETWEEN ? AND ? AND s.ts_ms BETWEEN ? AND ?"
     params = [assets, d0, d1, lo, hi]
     con.execute(f"""CREATE OR REPLACE TEMP TABLE _pc AS
-        SELECT m.mi, s.ts_ms, s.recv_ms, s.seq, s.outcome, s.side, s.price, s.size, s.best_bid, s.best_ask
+        SELECT m.mi, s.ts_ms, s.recv_ms, s.seq, {_PC_SELECT}
         FROM pm_price_change s JOIN _mk m USING (slug) WHERE {where}""", params)
     con.execute(f"""CREATE OR REPLACE TEMP TABLE _bk AS
         SELECT m.mi, s.ts_ms, s.recv_ms, s.seq, s.outcome, s.bids, s.asks
@@ -436,9 +471,9 @@ def load_coin(con, coin: str, timeframes: list[str], start_ms: int, end_ms: int,
         con.unregister("_cid_df")
     else:
         con.execute("CREATE OR REPLACE TEMP TABLE _tk (mi INTEGER, ts_ms BIGINT, recv_ms BIGINT, new_tick_size DOUBLE)")
-    for t_ in ("_pc", "_bk", "_tr"):
+    for t_, stream in (("_pc", "pm_price_change"), ("_bk", "pm_book"), ("_tr", "pm_trade")):
         if con.execute(f"SELECT count(*) FROM {t_} WHERE seq IS NULL").fetchall()[0][0]:
-            raise RuntimeError(f"{t_[1:]}: rows without `seq` (hours built before build format 2); "
+            raise RuntimeError(f"{stream}: rows without `seq` (hours built before build format 2); "
                                "rebuild them with `polydata build --force`")
     arrays = _build(con, len(mk))
     for t_ in ("_pc", "_bk", "_tr", "_tk", "_mk"):
@@ -461,7 +496,7 @@ def reconstruction_rate(con, md: MarketData, n: int = 200, seed: int = 0, strict
     """
     slug = md.info.slug
     rows = con.execute(
-        "SELECT ts_ms, best_bid, best_ask FROM pm_best_bid_ask WHERE asset = ? ORDER BY ts_ms, recv_ms",
+        "SELECT ts_ms, best_bid, best_ask FROM pm_best_bid_ask WHERE asset = ? ORDER BY ts_ms, recv_ms, seq",
         [f"{slug}|U"]).df()
     if rows.empty:
         return float("nan")

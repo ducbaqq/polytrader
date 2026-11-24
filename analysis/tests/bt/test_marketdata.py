@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 import pytest
 
@@ -195,3 +197,33 @@ def test_same_ms_rows_follow_seq():
     assert (top.bid_px, top.ask_px, top.ask_size) == (570, 580, 10)
     assert list(zip(md.tops.bid_px.tolist(), md.tops.ask_px.tolist())) == [(580, 590), (570, 590), (570, 580)]
     assert md.size_at("BUY", 470, T0 + 2000) == 0
+
+
+def test_top_at_recv_never_zero_for_present_price():
+    # The bid at 0.49 is emptied (received on time) and refilled, but the refill arrives late. A
+    # later change reports best bid 0.49: on the recv clock the level still reads 0, so top_at
+    # reports the last positive size known on that clock (100); with none known, NaN.
+    b = books([(T0, "Up", "0.49:100|0.48:10", "0.52:80")])
+    c = changes(mirror([(T0 + 1000, "BUY", 0.49, 0.0, 0.48, 0.52),
+                        (T0 + 1500, "BUY", 0.49, 20.0, 0.49, 0.52),
+                        (T0 + 2000, "SELL", 0.52, 70.0, 0.49, 0.52),
+                        (T0 + 3000, "BUY", 0.50, 5.0, 0.50, 0.52),
+                        (T0 + 3500, "SELL", 0.52, 60.0, 0.50, 0.52)]))
+    c.loc[c.ts_ms == T0 + 1500, "recv_ms"] = T0 + 9000
+    c.loc[c.ts_ms == T0 + 3000, "recv_ms"] = T0 + 9500
+    md = MarketData.from_frames(info(), c, b, EMPTY_T, ticks())
+    top = md.top_at(T0 + 2100)
+    assert (top.bid_px, top.bid_size) == (490, 100)
+    assert md.size_at("BUY", 490, T0 + 2100, clock="recv") == 0
+    top = md.top_at(T0 + 3600)  # bid 0.50 reported, its only change not yet received
+    assert top.bid_px == 500 and math.isnan(top.bid_size)
+    assert md.top_at(T0 + 9600).bid_size == 5
+
+
+def test_trades_recv_order():
+    t = trades([(T0 + 500, "Up", "BUY", 0.52, 5.0), (T0 + 400, "Down", "SELL", 0.38, 10.0)])
+    t.loc[0, "recv_ms"] = T0 + 450  # received before the ts-earlier trade (recv T0+520)
+    md = MarketData.from_frames(info(), EMPTY_C, EMPTY_B, t, ticks())
+    assert list(md.trades.ts_ms) == [T0 + 400, T0 + 500]
+    assert list(md.trades_recv.recv_ms) == [T0 + 450, T0 + 520]
+    assert list(md.trades_recv.ts_ms) == [T0 + 500, T0 + 400]
