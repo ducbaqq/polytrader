@@ -101,15 +101,17 @@ def execute(cfg: RunConfig, kind: str = "run", latency_sweep: tuple[int, ...] | 
     con_factory = con_factory or engine.default_con_factory
     res = engine.run(cfg, con_factory, workers)
     metrics = runs.summary(res, cfg)
+    dk = lambda d: day_kind(date.fromisoformat(d))  # noqa: E731
     if latency_sweep:
-        sweep = {str(cfg.order_latency_ms): _brief(metrics)}
+        sweep = {str(cfg.order_latency_ms): {**_brief(metrics), "eval_pnl_usd": bt_metrics.eval_pnl(res, dk)}}
         for ms in latency_sweep:
             if ms != cfg.order_latency_ms:
                 c2 = replace(cfg, order_latency_ms=ms)
-                sweep[str(ms)] = _brief(runs.summary(engine.run(c2, con_factory, workers), c2))
+                r2 = engine.run(c2, con_factory, workers)
+                sweep[str(ms)] = {**_brief(runs.summary(r2, c2)), "eval_pnl_usd": bt_metrics.eval_pnl(r2, dk)}
         metrics["latency_sweep"] = dict(sorted(sweep.items(), key=lambda kv: int(kv[0])))
     days = metrics["days"]
-    m = bt_metrics.compute(res, cfg, lambda d: day_kind(date.fromisoformat(d)))
+    m = bt_metrics.compute(res, cfg, dk)
     m["latency_sweep"] = metrics.get("latency_sweep")
     v = bt_metrics.verdict(m, "final" if kind == "final" else "provisional", (extra_prov or {}).get("final_looks", 0),
                            runs.MIN_USD_PER_DAY)

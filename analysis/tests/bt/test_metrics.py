@@ -40,7 +40,7 @@ def make_result(n_days=1, per_day=6, seed=1, pnl_bias=0.0, with_sweep_days=False
                 fee = 0.01 if side == "buy" else 0.0
                 dr = 1 if side == "buy" else -1
                 pnl += dr * sz * (settle - px) - fee
-                fl.append(dict(slug=slug, coin="btc", order_id=100 * i + j, ts_ms=ws + 1000 + j, report_ms=ws + 1100 + j,
+                fl.append(dict(slug=slug, mid_before=m0, coin="btc", order_id=100 * i + j, ts_ms=ws + 1000 + j, report_ms=ws + 1100 + j,
                                token="Up", side=side, kind="limit", px=px, size=sz, fee=fee, liquidity="maker",
                                queue_ahead_at_fill=1.0, trade_ts_ms=ws + 1000, mid_at_fill=m0, mid_10s=m10,
                                settle_value=settle, bn_move_1s=bool(j)))
@@ -109,7 +109,7 @@ def test_verdict_pass_and_fail_paths():
     assert v["checks"]["fills_per_day >= 200"]["passed"] is True
     assert v["checks"]["profitable at 400 ms"]["passed"] is None
     assert v["checks"]["usd_per_day >= min"]["passed"] is True
-    m["latency_sweep"] = {"400": {"pnl_usd": -1.0}}
+    m["latency_sweep"] = {"400": {"pnl_usd": 9.0, "eval_pnl_usd": -1.0}}
     v = metrics.verdict(m)
     assert v["checks"]["profitable at 400 ms"]["passed"] is False and v["passed"] is False and v["label"].startswith("FAIL")
     bad = make_result(n_days=3, per_day=2, pnl_bias=-9.0)
@@ -176,9 +176,28 @@ def test_execute_writes_metrics_verdict_and_report(tmp_path, monkeypatch):
     r = json.loads((d / "results.json").read_text())
     assert r["verdict"] == "no validation days yet" and r["metrics"]["attribution"]
     assert set(r["latency_sweep"]) == {"100", "200", "400"}
+    assert r["latency_sweep"]["400"]["eval_pnl_usd"] is None  # train days only
     assert (d / "report.html").exists()
     idx = runs.load_index()
     assert idx.verdict.iloc[0] == "no validation days yet"
     # the same run twice gives the same results.json bytes (no wall clock)
     d2, _ = cli.execute(cfg, "run", (100, 400), con_factory=lambda: None)
     assert (d / "results.json").read_text() == (d2 / "results.json").read_text()
+
+
+def test_eval_pnl_uses_validation_days_only():
+    res, cfg = make_result(n_days=2, per_day=3, pnl_bias=1.0)
+    mk = res.markets
+    d1 = metrics._day(D0 + DAY)
+    v = metrics.eval_pnl(res, lambda d: "validation" if d == d1 else "train")
+    assert v == pytest.approx(float(mk[(mk.window_start_ms >= D0 + DAY) & ~mk.voided].pnl.sum()))
+    assert metrics.eval_pnl(res, lambda d: "train") is None
+
+
+def test_spread_uses_mid_before():
+    res, cfg = make_result(n_days=1)
+    f = res.coins["btc"].fills.copy()
+    f["mid_before"] = f["mid_at_fill"] + 0.01 * np.where(f.side == "buy", 1, -1)
+    a = metrics.attribution(f)
+    b = metrics.attribution(f.assign(mid_before=f.mid_at_fill))
+    assert a["spread"] > b["spread"] and sum(a.values()) == pytest.approx(sum(b.values()))

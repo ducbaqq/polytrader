@@ -3,7 +3,8 @@
 `compute` reads a `RunResult` and returns a JSON-safe dict. Everything is attributed to the day of the market's
 `window_start`. The `eval` block holds the numbers the verdict is judged on: the validation days of an ordinary
 run (provisional verdict) or all days of a run that has only sealed days (the final verdict). `verdict` applies the
-criteria to it. All values are deterministic (no wall clock) and finite (NaN -> None).
+criteria to it. `realism.order_vs_level_size_p50` is our size / (queue ahead + our size) at acceptance (the orders
+frame has no level size). The 400 ms check uses per-day P&L of the latency-sweep runs on the evaluated days only. All values are deterministic (no wall clock) and finite (NaN -> None).
 """
 
 from __future__ import annotations
@@ -108,14 +109,16 @@ def _stats(mk: pd.DataFrame, fills: pd.DataFrame, eq: pd.Series, capital_total: 
 def attribution(fills: pd.DataFrame) -> dict:
     """P&L split over all fills (maker and taker), in token terms; sums to the run's P&L.
 
-    spread = (mid_at_fill - px)*dir*size; adverse = (mid_10s - mid_at_fill)*dir*size (mid_10s := mid_at_fill when
-    unknown); inventory = (settle - mid_10s)*dir*size; fees = -sum(fee). Fills without a settlement (voided) are skipped."""
+    spread = (mid_before - px)*dir*size; adverse = (mid_10s - mid_before)*dir*size (mid_10s := mid_before when
+    unknown); mid_before is the mid 200 ms before the fill (mid_at_fill already includes the impact of the fill's own
+    trade, which would book adverse selection as negative spread); inventory = (settle - mid_10s)*dir*size; fees = -sum(fee). Fills without a settlement (voided) are skipped."""
     f = fills[fills["settle_value"].notna()] if len(fills) else fills
     if len(f) == 0:
         return {"spread": 0.0, "adverse": 0.0, "inventory": 0.0, "fees": 0.0}
     d = np.where(f["side"].astype(str).str.lower().str.startswith("b"), 1.0, -1.0)
     px, sz = f["px"].astype(float).to_numpy(), f["size"].astype(float).to_numpy()
-    m0 = f["mid_at_fill"].astype(float).fillna(f["px"].astype(float)).to_numpy()
+    mb = f["mid_before"] if "mid_before" in f else f["mid_at_fill"]
+    m0 = mb.astype(float).fillna(f["px"].astype(float)).to_numpy()
     m10 = f["mid_10s"].astype(float).to_numpy()
     m10 = np.where(np.isnan(m10), m0, m10)
     s = f["settle_value"].astype(float).to_numpy()
@@ -143,6 +146,21 @@ def realism(result: RunResult, cfg: RunConfig, mk: pd.DataFrame) -> dict:
     if len(f):
         out["share_fills_1s_after_bn_move"] = float(f["bn_move_1s"].astype(bool).mean())
     return out
+
+
+def eval_pnl(result: RunResult, day_kind_of: Callable[[str], str]) -> float | None:
+    """P&L on the evaluated days only (validation days, or all days of an all-sealed run); None if there are none."""
+    mk = result.markets
+    if len(mk) == 0:
+        return None
+    mk = mk[~mk["voided"].astype(bool)]
+    kinds = [day_kind_of(_day(x)) for x in mk["window_start_ms"]]
+    sel = [k == "validation" for k in kinds]
+    if not any(sel):
+        if not kinds or set(kinds) != {"sealed"}:
+            return None
+        sel = [True] * len(kinds)
+    return float(mk["pnl"].astype(float).fillna(0.0)[sel].sum())
 
 
 def compute(result: RunResult, cfg: RunConfig, day_kind_of: Callable[[str], str]) -> dict:
@@ -255,7 +273,7 @@ def verdict(m: dict, kind: str = "provisional", n_looks: int = 0, min_usd_per_da
         c["positive days >= 70%"] = _chk(e["positive_day_share"], POS_DAY_SHARE, None)
         c["positive days >= 70%"]["note"] = f"{NOT_JUDGED}: needs {MIN_DAYS_POS_SHARE}+ days"
     sw = m.get("latency_sweep") or {}
-    p400 = (sw.get("400") or {}).get("pnl_usd")
+    p400 = (sw.get("400") or {}).get("eval_pnl_usd")
     if p400 is None:
         c["profitable at 400 ms"] = _chk(None, 0, None)
         c["profitable at 400 ms"]["note"] = f"{NOT_JUDGED}: no latency sweep"

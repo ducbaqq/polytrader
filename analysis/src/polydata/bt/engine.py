@@ -82,7 +82,10 @@ ORDER_COLS = ["ms", "report_ms", "order_id", "slug", "event", "token", "side", "
               "reason", "queue_ahead"]
 FILL_COLS = ["slug", "coin", "order_id", "ts_ms", "report_ms", "token", "side", "kind", "px", "size", "fee",
              "liquidity", "queue_ahead_at_fill", "trade_ts_ms", "mid_at_fill", "mid_10s", "settle_value",
-             "bn_move_1s"]
+             "bn_move_1s", "mid_before"]
+# mid_before: token-terms mid at ts_ms - 200 on the exchange clock. The recorded level change that our fill's trade
+# caused lands up to ~150 ms before the trade's ts, so mid_at_fill is already the post-trade mid. Post-hoc, metrics only.
+MID_BEFORE_MS = 200
 # cash = total unlocked cash, realised profits included (not capped at the budget like ctx.cash)
 EQUITY_COLS = ["ms", "cash", "locked", "pending", "mtm", "equity"]
 MARKET_COLS = ["slug", "coin", "timeframe", "window_start_ms", "window_end_ms", "voided", "reason", "pnl",
@@ -617,11 +620,12 @@ class _Replay:
         for f, o, rep, bn_move in m.raw_fills:
             up = _up_mid(md.top_at(f.ts_ms, "ts"))
             up10 = _up_mid(md.top_at(f.ts_ms + 10_000, "ts")) if f.ts_ms + 10_000 < end else math.nan
+            ub = _up_mid(md.top_at(f.ts_ms - MID_BEFORE_MS, "ts"))
             dn = o.token == "Down"
             self.fill_rows.append((
                 info.slug, info.coin, o.id, f.ts_ms, rep, o.token, o.side, o.kind, f.px / PX_SCALE, f.size, f.fee,
                 f.liquidity, f.queue_ahead_at_fill, f.trade_ts_ms, 1 - up if dn else up, 1 - up10 if dn else up10,
-                math.nan if info.outcome is None else float(info.outcome == o.token), bn_move))
+                math.nan if info.outcome is None else float(info.outcome == o.token), bn_move, 1 - ub if dn else ub))
         m.raw_fills = []
 
     # ------------------------------------------------------------------------------- strategy queries
