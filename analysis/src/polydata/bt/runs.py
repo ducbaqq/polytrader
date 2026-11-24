@@ -6,6 +6,11 @@ scans the folders, so it can always be rebuilt from them.
 
 Run files that get pushed never contain secrets, hostnames, IPs or bucket names (the host is a
 hash). `results.json` is deterministic: the same run twice gives the same bytes.
+
+Versions: `strategy_version` hashes the strategy's source file bytes, its registry name (several
+strategies can share one file) and the params merged over the class `default_params`.
+Provenance: `provenance.json` carries `git diff HEAD` (tracked files only, capped at 200 kB) when the
+tree is dirty; it is pushed with the run, so it must stay free of secrets (the repo is public).
 """
 
 from __future__ import annotations
@@ -224,7 +229,8 @@ def load_index() -> pd.DataFrame:
 
 
 def final_looks() -> int:
-    """Final runs in the index plus the non-`health` lines of looks.jsonl: N for the trial-budget threshold."""
+    """Final runs in the index plus the looks.jsonl lines that are neither `health` nor `final` (a final run
+    records a `final` look, but is counted once, as a run): N for the trial-budget threshold."""
     idx = runs_dir() / "index.parquet"
     n = int((pd.read_parquet(idx).kind == "final").sum()) if idx.exists() else 0
     f = runs_dir() / "looks.jsonl"
@@ -235,7 +241,7 @@ def final_looks() -> int:
                     purpose = json.loads(line).get("purpose")
                 except ValueError:
                     purpose = None
-                n += purpose != "health"
+                n += purpose not in ("health", "final")  # a final run is already counted as a run
     return n
 
 

@@ -189,7 +189,7 @@ def test_final_looks_counts_looks_jsonl_excluding_health(pdir):
     runs.rebuild_index(csv_path=pdir / "i.csv")
     (pdir / "runs" / "looks.jsonl").write_text("\n".join(json.dumps({"purpose": p}) for p in
                                                            ["health", "health", "inspect", "final"]) + "\n\n")
-    assert runs.final_looks() == 1 + 2
+    assert runs.final_looks() == 1 + 1
 
 
 class FakeS3:
@@ -270,3 +270,10 @@ def test_cli_runs_filters(pdir, capsys):
         main(["bt", "runs", *args])
         out = capsys.readouterr().out
         assert expect in out and ("bbbbbb" if expect == "aaaaaa" else "aaaaaa") not in out
+
+
+def test_one_final_run_counts_once(pdir):
+    put_run(pdir, kind="final", rid="2026-11-30T1000-cccccc")
+    runs.rebuild_index(csv_path=pdir / "i.csv")
+    (pdir / "runs" / "looks.jsonl").write_text(json.dumps({"purpose": "final"}) + "\n")
+    assert runs.final_looks() == 1
