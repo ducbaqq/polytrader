@@ -8,7 +8,10 @@ The model is deliberately pessimistic (spec: "Queue and fill model"):
   is at least theirs).
 - **Recorded trades** (taker side T, Up price P, size S) match our resting orders on the other side,
   in price priority for the taker, then arrival order:
-  - at a price strictly better for the taker than P (trade-through): our whole remainder fills;
+  - at a price strictly better for the taker than P (trade-through): we fill min(remaining, x). Had
+    we been resting, the taker would have traded with us first; a taker smaller than our order would
+    have been filled at our price and never reached P, so we claim no more than the volume it brought
+    (a deliberate pessimistic deviation from "the whole remainder fills");
   - at P: the trade first consumes `queue_ahead`, then fills us. `x`, the trade volume left for
     our later orders, shrinks by every fill of ours (trade-throughs included), never by the
     volume that consumed `queue_ahead` (each order's `queue_ahead` counts other traders only).
@@ -341,13 +344,17 @@ class Exchange:
                     if q > EPS:
                         x -= q
                         self._fill(o, ts, px, q, "maker", ts, 0.0, out)
-            elif (px < P) if rest == "SELL" else (px > P):  # trade-through: the whole remainder fills
+            elif (px < P) if rest == "SELL" else (px > P):
+                # Trade-through, capped at the trade volume left: had we been resting, the taker would
+                # have traded with us first and a smaller taker would never have reached P (deliberately
+                # pessimistic; the spec's "fills us fully" only holds when the trade is big enough).
                 for o in list(lv.get(px, ())):
                     if ts <= o.arrival_ms + echo:
                         continue
-                    q = o.remaining
-                    x = max(0.0, x - q)
-                    self._fill(o, ts, px, q, "maker", ts, 0.0, out)
+                    q = min(o.remaining, x)
+                    if q > EPS:
+                        x -= q
+                        self._fill(o, ts, px, q, "maker", ts, 0.0, out)
             else:
                 break  # worse than P for the taker: untouched, and so is everything after
 

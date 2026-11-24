@@ -62,13 +62,26 @@ def test_join_back_of_queue():
 
 
 def test_trade_through_fills_fully():
-    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 1)])
+    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 25)])
     ex = Exchange(md, ExchangeConfig())
     o = order(px=480, size=20)
     ex.submit(o)
     f = fills(ex.advance(T0 + 5000))
     assert [(x.px, x.size, x.queue_ahead_at_fill) for x in f] == [(480, 20, 100)]
     assert o.status == "filled" and o.filled == 20
+
+
+def test_trade_through_capped_by_trade_size():
+    # A 5-share taker SELL at 0.47 would have hit our 0.48 bid first and stopped there: we fill 5, not 20.
+    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 5),
+                                                (T0 + 3000, "Up", "SELL", 0.46, 30)])
+    ex = Exchange(md, ExchangeConfig())
+    o = order(px=480, size=20)
+    ex.submit(o)
+    f = fills(ex.advance(T0 + 2000))
+    assert [(x.px, x.size) for x in f] == [(480, 5)] and o.status == "open" and o.queue_ahead == 100
+    f = fills(ex.advance(T0 + 5000))
+    assert [(x.px, x.size) for x in f] == [(480, 15)] and o.status == "filled"
 
 
 def test_down_order_filled_by_up_trade():
@@ -175,7 +188,7 @@ def test_partial_fill_then_cancel():
 
 
 def test_ordering_equal_ms_pessimistic():
-    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 1)])
+    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 10)])
     ex = Exchange(md, ExchangeConfig())
     o = order(px=480, size=10)
     ex.submit(o)
@@ -290,7 +303,7 @@ def test_taker_impact_partial_level():
 
 
 def test_crossing_limit_takes_then_rests():
-    md = market("0.48:100", "0.52:10|0.54:10", trades=[(T0 + 2000, "Up", "SELL", 0.52, 3)])
+    md = market("0.48:100", "0.52:10|0.54:10", trades=[(T0 + 2000, "Up", "SELL", 0.52, 5)])
     ex = Exchange(md, ExchangeConfig())
     o = order(px=530, size=15)
     ex.submit(o)
