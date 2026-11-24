@@ -162,8 +162,8 @@ up to the trade's size (after our earlier orders). The book can't trade through 
 but a taker smaller than our order would have stopped at our price, so we never claim more than the
 volume the taker brought.
 
-**Trade echo.** A trade's `ts_ms` lands ~4 ms (up to 27 ms) after the level change it caused. Trades
-within `trade_echo_ms` (30) after our order's arrival are never matched against it, so the same
+**Trade echo.** A trade's `ts_ms` lands after the level change it caused (BTC 5m: median 21 ms, p95
+40 ms, p99 134 ms). Trades within `trade_echo_ms` (150) after our order's arrival are never matched against it, so the same
 volume isn't counted twice (once in the size we joined behind, once as a trade).
 
 **No self-impact.** Our orders don't change the recorded book or other traders' behaviour. Reports
@@ -405,7 +405,7 @@ no queue model.
   10 ms difference is far below our 126–200 ms delays.
 - **Merging Up+Down pairs is assumed free and instant**; it's a gasless operation via Polymarket's
   relayer, to be confirmed in the live project.
-- **Trade-throughs are capped at the trade's size, and trades within 30 ms after our arrival are
+- **Trade-throughs are capped at the trade's size, and trades within 150 ms after our arrival are
   ignored** (both pessimistic; see the queue model).
 - **Parquet keeps the raw arrival order** (`seq`) so same-millisecond book changes replay in order.
 - **Run artifacts are not committed.** Only journals, the glossary and the index CSV are.
