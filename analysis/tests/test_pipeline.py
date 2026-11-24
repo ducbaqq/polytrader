@@ -68,6 +68,10 @@ def data(tmp_path, monkeypatch):
     write_jsonl(raw / "bn_depth_snapshot.1795518000000.jsonl.zst",
                 [{"recv_ms": 1795518001000, "d": {"market": "fut", "sym": "BTCUSDT", "lastUpdateId": 99,
                                                    "bids": [["60000.1", "1.5"], ["60000.0", "3"]], "asks": [["60000.2", "2"]]}}])
+    # Empty zstd frame, as left by restarts during development: must be skipped, not fail the hour.
+    import zstandard
+
+    (raw / "bn_fut_bbo.1795518000999.tsv.zst").write_bytes(zstandard.ZstdCompressor().compress(b""))
     return tmp_path
 
 

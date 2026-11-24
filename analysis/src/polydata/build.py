@@ -20,6 +20,17 @@ from .config import paths
 from .views import MARKETS_SQL
 
 
+def _has_rows(f: Path) -> bool:
+    """False for files without data rows (empty zstd frames left by restarts during development)."""
+    if f.stat().st_size > 1024:
+        return True
+    import zstandard
+
+    with zstandard.ZstdDecompressor().stream_reader(f.open("rb")) as r:
+        lines = r.read().splitlines()
+    return len(lines) > (1 if ".tsv." in f.name else 0)
+
+
 def _sources(files: list[Path]) -> str:
     return "\n".join(f"{f.name}:{f.stat().st_size}" for f in files)
 
@@ -68,7 +79,7 @@ def build(days: list[str] | None = None, streams: list[str] | None = None, force
             for stream in all_streams:
                 if streams and not any(fnmatch.fnmatch(stream, s) for s in streams):
                     continue
-                files = sorted(hour_dir.glob(f"{stream}.*.zst"))
+                files = [f for f in sorted(hour_dir.glob(f"{stream}.*.zst")) if _has_rows(f)]
                 if not files:
                     continue
                 out_dir = p.parquet / stream / f"date={day_dir.name}"
