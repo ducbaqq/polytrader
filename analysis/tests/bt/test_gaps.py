@@ -75,10 +75,35 @@ def test_unresolved_market_voided():
     assert list(v.reason) == ["no outcome"]
 
 
-def test_bn_silences_query():
+def bn_con(bbo, trades=()):
     con = duckdb.connect()
     con.execute("CREATE TABLE bn_fut_bbo(recv_ms BIGINT, sym VARCHAR)")
-    con.execute("INSERT INTO bn_fut_bbo VALUES (?,'BTCUSDT'),(?,'BTCUSDT'),(?,'BTCUSDT'),(?,'ETHUSDT'),(?,'ETHUSDT')",
-                [T0, T0 + 500, T0 + 2500, T0, T0 + 900])
-    g = G.bn_silences(con, T0, T0 + 10_000, max_gap_ms_bn=1000)
-    assert [(r.key, r.from_ms, r.to_ms) for r in g.itertuples()] == [("BTCUSDT", T0 + 500, T0 + 2500)]
+    con.execute("CREATE TABLE bn_fut_trade(recv_ms BIGINT, sym VARCHAR)")
+    for sym, ts in bbo:
+        con.executemany("INSERT INTO bn_fut_bbo VALUES (?,?)", [(t, sym) for t in ts])
+    if trades:
+        con.executemany("INSERT INTO bn_fut_trade VALUES (?,?)", [(t, s) for s, t in trades])
+    return con
+
+
+def test_slow_symbol_silence_without_trades_is_not_a_gap():
+    con = bn_con([("BNBUSDT", [T0, T0 + 2500]), ("BTCUSDT", [T0, T0 + 500, T0 + 1000, T0 + 1500, T0 + 2000, T0 + 2500])])
+    assert G.bn_silences(con, T0, T0 + 10_000).empty
+
+
+def test_silence_with_trade_inside_is_a_gap():
+    con = bn_con([("BNBUSDT", [T0, T0 + 2500])], trades=[("BNBUSDT", T0 + 1200)])
+    g = G.bn_silences(con, T0, T0 + 10_000)
+    assert [(r.key, r.from_ms, r.to_ms) for r in g.itertuples()] == [("BNBUSDT", T0, T0 + 2500)]
+    assert "trades inside" in g.source.iloc[0]
+    # a trade exactly at a boundary is not inside
+    con = bn_con([("BNBUSDT", [T0, T0 + 2500])], trades=[("BNBUSDT", T0), ("ETHUSDT", T0 + 1200)])
+    assert G.bn_silences(con, T0, T0 + 10_000).empty
+
+
+def test_three_symbols_silent_together_is_a_gap():
+    con = bn_con([(s, [T0, T0 + 2000 + i * 100]) for i, s in enumerate(["A", "B", "C"])])
+    g = G.bn_silences(con, T0, T0 + 10_000)
+    assert sorted(g.key) == ["A", "B", "C"] and all("multi-symbol" in x for x in g.source)
+    con = bn_con([(s, [T0, T0 + 2000]) for s in ["A", "B"]])
+    assert G.bn_silences(con, T0, T0 + 10_000).empty

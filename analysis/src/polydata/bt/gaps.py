@@ -87,15 +87,30 @@ def event_gaps(events: pd.DataFrame, end_ms: int, bn_syms: Iterable[str] = ()) -
     return pd.DataFrame(out, columns=GAP_COLS) if out else _empty()
 
 
-def bn_silences(con, start_ms: int, end_ms: int, max_gap_ms_bn: int = 1000) -> pd.DataFrame:
-    """Gaps between consecutive `bn_fut_bbo.recv_ms` per sym longer than `max_gap_ms_bn`."""
+def bn_silences(con, start_ms: int, end_ms: int, max_gap_ms_bn: int = 1000, min_syms: int = 3) -> pd.DataFrame:
+    """Silences of `bn_fut_bbo.recv_ms` per sym longer than `max_gap_ms_bn` that mean missing data:
+    (a) `bn_fut_trade` has a row for the sym strictly inside the silence (it traded, so top-of-book
+    updates were missing), or (b) at least `min_syms` syms are silent at once (connection drop).
+    A quiet top of book on a slow symbol is not a gap. `source` says which rule fired."""
+    has_trade = "bn_fut_trade" in {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+    a = ("EXISTS (SELECT 1 FROM bn_fut_trade t WHERE t.sym = s.sym AND t.recv_ms > s.from_ms AND t.recv_ms < s.to_ms)"
+         if has_trade else "false")
     return con.execute(
-        """
-        SELECT 'bn' AS stream, sym AS key, prev AS from_ms, recv_ms AS to_ms, 'bn_fut_bbo silence' AS source
-        FROM (SELECT sym, recv_ms, lag(recv_ms) OVER (PARTITION BY sym ORDER BY recv_ms) AS prev
-              FROM bn_fut_bbo WHERE recv_ms BETWEEN ? AND ?)
-        WHERE recv_ms - prev > ?
-        ORDER BY sym, from_ms""", [start_ms, end_ms, max_gap_ms_bn]).df()
+        f"""
+        WITH s AS (
+            SELECT sym, prev AS from_ms, recv_ms AS to_ms
+            FROM (SELECT sym, recv_ms, lag(recv_ms) OVER (PARTITION BY sym ORDER BY recv_ms) AS prev
+                  FROM bn_fut_bbo WHERE recv_ms BETWEEN ? AND ?)
+            WHERE recv_ms - prev > ?),
+        f AS (SELECT s.*, {a} AS by_trade,
+                     (SELECT count(DISTINCT o.sym) FROM s o WHERE o.from_ms < s.to_ms AND o.to_ms > s.from_ms) >= ? AS by_multi
+              FROM s)
+        SELECT 'bn' AS stream, sym AS key, from_ms, to_ms,
+               CASE WHEN by_trade AND by_multi THEN 'bn_fut_bbo silence (trades inside, multi-symbol)'
+                    WHEN by_trade THEN 'bn_fut_bbo silence (trades inside)'
+                    ELSE 'bn_fut_bbo silence (multi-symbol)' END AS source
+        FROM f WHERE by_trade OR by_multi
+        ORDER BY sym, from_ms""", [start_ms, end_ms, max_gap_ms_bn, min_syms]).df()
 
 
 def pm_silences(con, start_ms: int, end_ms: int, max_gap_ms_pm: int = 5000) -> pd.DataFrame:
