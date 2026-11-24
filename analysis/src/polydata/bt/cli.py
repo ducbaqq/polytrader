@@ -114,7 +114,7 @@ def execute(cfg: RunConfig, kind: str = "run", latency_sweep: tuple[int, ...] | 
     m = bt_metrics.compute(res, cfg, dk)
     m["latency_sweep"] = metrics.get("latency_sweep")
     v = bt_metrics.verdict(m, "final" if kind == "final" else "provisional", (extra_prov or {}).get("final_looks", 0),
-                           runs.MIN_USD_PER_DAY)
+                           cfg.min_usd_per_day)
     e = m["eval"] or m
     metrics.update(bt_metrics.clean({"metrics": m, "verdict": v["label"], "verdict_detail": v, "t_block": e["block_pnl_t"]}))
     prov = runs.provenance(cls, cfg.params, days, kind, elapsed_s=round(res.elapsed_s, 1), **(extra_prov or {}))

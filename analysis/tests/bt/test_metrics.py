@@ -157,10 +157,10 @@ def test_report_final_header_and_no_eval(tmp_path):
     v = metrics.clean(metrics.verdict(m, "final", 100))
     res.equity.to_parquet(tmp_path / "equity.parquet", index=False)
     html = report.render(tmp_path, m, v, cfg, {}).read_text()
-    assert "no validation days yet" in html and "Fill model: unverified" in html
+    assert "no sealed-day data" in html and "Fill model: unverified" in html
     assert "Latency sensitivity" not in html
     m2 = metrics.clean(metrics.compute(res, cfg, lambda d: "sealed"))
-    v2 = metrics.clean(metrics.verdict(m2, "final", 100))
+    v2 = metrics.clean(metrics.verdict(m2, "final", 99))
     html = report.render(tmp_path, m2, v2, cfg, {}).read_text()
     assert "N = 100" in html and "3.29" in html
 
@@ -201,3 +201,71 @@ def test_spread_uses_mid_before():
     a = metrics.attribution(f)
     b = metrics.attribution(f.assign(mid_before=f.mid_at_fill))
     assert a["spread"] > b["spread"] and sum(a.values()) == pytest.approx(sum(b.values()))
+
+
+def _flat_two_coin():
+    cfg = RunConfig(strategy="join-best", coins=["btc", "eth"], timeframes=["5m"])  # capital 5000 -> 2500 each
+
+    def cr(coin, t0):
+        eq = pd.DataFrame({"ms": [t0, t0 + 1000], "cash": 2500.0, "locked": 0.0, "pending": 0.0, "mtm": 0.0,
+                           "equity": [2500.0, 2500.0]})
+        mk = pd.DataFrame([dict(slug=coin, coin=coin, timeframe="5m", window_start_ms=D0, window_end_ms=D0 + 300000,
+                                voided=False, reason="", pnl=0.0, settle_ms=D0, outcome="Up")])
+        return CoinResult(pd.DataFrame(), pd.DataFrame(columns=engine.FILL_COLS), eq, mk, [])
+    return RunResult(cfg, {"btc": cr("btc", D0), "eth": cr("eth", D0 + 5000)}), cfg
+
+
+def test_capital_denominator_two_coins_flat_equity():
+    res, cfg = _flat_two_coin()
+    m = metrics.compute(res, cfg, lambda d: "validation")
+    assert m["capital_total"] == 5000.0 and m["max_drawdown_usd"] == 0 and m["max_drawdown_pct"] == 0
+    assert metrics.capitals(cfg) == (5000.0, 2500.0)
+    assert metrics.capitals(RunConfig(strategy="x", coins=["btc", "eth"], capital_mode="global")) == (5000.0, 5000.0)
+
+
+def test_eval_drawdown_ignores_train_days():
+    res, cfg = make_result(n_days=2, per_day=3)
+    mk = res.coins["btc"].markets  # the RunResult.markets property is a copy
+    mk.loc[mk.window_start_ms < D0 + DAY, "pnl"] = -500.0  # a big train-day loss
+    mk.loc[mk.window_start_ms >= D0 + DAY, "pnl"] = 1.0
+    d1 = metrics._day(D0 + DAY)
+    m = metrics.compute(res, cfg, lambda d: "validation" if d == d1 else "train")
+    assert m["max_drawdown_usd"] >= 0 and m["eval"]["max_drawdown_usd"] == 0
+    assert m["eval"]["n_days"] == 1
+
+
+def test_missing_400_sweep_is_incomplete_not_pass():
+    res, cfg = make_result(n_days=3, per_day=300, pnl_bias=2.0)
+    m = metrics.compute(res, cfg, lambda d: "validation")
+    v = metrics.verdict(m)
+    assert v["passed"] is False and v["label"] == "INCOMPLETE (no 400 ms sweep)"
+    m["latency_sweep"] = {"400": {"eval_pnl_usd": 3.0}}
+    assert metrics.verdict(m)["passed"] is True
+
+
+def test_too_few_blocks_fails_t_and_ci():
+    res, cfg = make_result(n_days=3, per_day=6, pnl_bias=5.0)
+    m = metrics.compute(res, cfg, lambda d: "validation")
+    assert m["eval"]["n_blocks"] < metrics.MIN_BLOCKS
+    m["latency_sweep"] = {"400": {"eval_pnl_usd": 3.0}}
+    v = metrics.verdict(m)
+    for k in ("ci95_lo > 0", "t > threshold"):
+        assert v["checks"][k]["passed"] is False and "too few blocks" in v["checks"][k]["note"]
+    assert v["passed"] is False
+
+
+def test_bonferroni_counts_current_look():
+    res, cfg = make_result(n_days=1)
+    m = metrics.compute(res, cfg, lambda d: "sealed")
+    v = metrics.verdict(m, "final", 99)
+    assert v["n_looks"] == 100 and v["t_threshold"] == pytest.approx(3.29, abs=0.01)
+
+
+def test_days_and_positive_share_use_nonvoided_days_and_min_usd_in_config():
+    res, cfg = make_result(n_days=2, per_day=3)
+    mk = res.coins["btc"].markets
+    mk.loc[len(mk)] = dict(slug="v2", coin="btc", timeframe="5m", window_start_ms=D0 + 5 * DAY, window_end_ms=D0 + 5 * DAY + 1,
+                           voided=True, reason="gap", pnl=float("nan"), settle_ms=float("nan"), outcome=None)
+    m = metrics.compute(res, cfg, lambda d: "validation")
+    assert m["n_days"] == 2 and len(m["days"]) == 2 and m["eval"]["n_days"] == 2
+    assert cfg.min_usd_per_day == 10 and "min_usd_per_day" in cfg.to_dict()

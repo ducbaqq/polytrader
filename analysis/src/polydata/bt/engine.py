@@ -105,7 +105,7 @@ def _date(ms: int) -> date:
 
 
 def _up_mid(top: Top) -> float:
-    if top.bid_px == NO_BID_PX and top.ask_px == NO_ASK_PX:
+    if top.bid_px == NO_BID_PX or top.ask_px == NO_ASK_PX:  # a one-sided book has no mid
         return math.nan
     return (top.bid_px + top.ask_px) / (2 * PX_SCALE)
 

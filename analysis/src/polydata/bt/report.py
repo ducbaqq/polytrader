@@ -61,7 +61,8 @@ def _equity_series(run_dir: Path, m: dict, cfg) -> pd.Series:
     if not f.exists():
         return pd.Series(dtype="float64")
     eq = pd.read_parquet(f)
-    s = M.total_equity(eq, m.get("capital_total") or cfg.capital, cfg.capital) if len(eq) else pd.Series(dtype="float64")
+    total, each = M.capitals(cfg)
+    s = M.total_equity(eq, total, each) if len(eq) else pd.Series(dtype="float64")
     if len(s) > 3000:
         s = s.iloc[:: len(s) // 3000 + 1]
     s.index = pd.to_datetime(s.index, unit="ms", utc=True)
@@ -122,7 +123,7 @@ def chart_attribution(a: dict) -> str:
 
 def _verdict_block(v: dict, m: dict) -> str:
     label = v.get("label", "")
-    cls = "none" if label == M.NO_VALIDATION else ("pass" if v.get("passed") else "fail")
+    cls = "none" if label in (M.NO_VALIDATION, "no sealed-day data") or label.startswith("INCOMPLETE") else ("pass" if v.get("passed") else "fail")
     out = [f'<span class="verdict {cls}">{html.escape(label)}</span>']
     if v.get("checks"):
         rows, cl = [], []
@@ -153,11 +154,16 @@ def render(run_dir: Path, metrics: dict, verdict: dict, cfg, extras: dict) -> Pa
     kinds = {}
     for d in m["days"].values():
         kinds[d["kind"]] = kinds.get(d["kind"], 0) + 1
-    head.append(f'<div class="meta">{m["n_days"]} days ({", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))}); '
+    head.append(f'<div class="meta">All days: {m["n_days"]} days ({", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))}); '
                 f'P&amp;L ${_fmt(m["pnl_usd"])} (${_fmt(m["usd_per_day"])}/day, return on capital {_fmt(100 * m["return_on_capital"])}%); '
                 f'{m["fills"]} fills ({_fmt(m["cents_per_share"])} cents/share); '
                 f'block t {_fmt(m["block_pnl_t"])}, 95% CI [{_fmt(m["block_ci95"][0])}, {_fmt(m["block_ci95"][1])}]; '
                 f'max drawdown ${_fmt(m["max_drawdown_usd"])} ({_fmt(m["max_drawdown_pct"])}% of capital)</div>')
+    if e:
+        head.append(f'<div class="meta">Evaluated ({html.escape(e["kind"])} days): {e["n_days"]} days; P&amp;L ${_fmt(e["pnl_usd"])} '
+                    f'(${_fmt(e["usd_per_day"])}/day); {e["fills"]} fills; {e["n_blocks"]} blocks, block t {_fmt(e["block_pnl_t"])}, '
+                    f'95% CI [{_fmt(e["block_ci95"][0])}, {_fmt(e["block_ci95"][1])}]; realised max drawdown '
+                    f'${_fmt(e["max_drawdown_usd"])} ({_fmt(e["max_drawdown_pct"])}%)</div>')
     sections += head
     s = _equity_series(run_dir, m, cfg)
     day_rows = [{"day": d, "kind": x["kind"], "pnl": x["pnl"]} for d, x in sorted(m["days"].items())]

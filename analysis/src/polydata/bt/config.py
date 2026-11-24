@@ -31,6 +31,7 @@ class RunConfig:
     max_gap_ms_bn: int = 1000
     bn_step_ms: int = 10
     seed: int = 0
+    min_usd_per_day: float = 10.0  # pass criterion, recorded with the run
     tags: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:

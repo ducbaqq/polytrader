@@ -23,6 +23,7 @@ from .engine import RunResult
 BLOCK_MS = 900_000
 N_BOOT = 2000
 MIN_T = 3.0
+MIN_BLOCKS = 30  # t and the bootstrap CI are not trusted below this many evaluated 15-minute blocks
 MIN_DAYS_POS_SHARE = 7
 MAX_DD_PCT = 10.0
 MIN_FILLS_PER_DAY = 200
@@ -65,6 +66,22 @@ def total_equity(equity: pd.DataFrame, capital_total: float, capital_each: float
     s = df.sum(axis=1)
     s.loc[int(s.index[0]) - 1] = capital_total
     return s.sort_index()
+
+
+def capitals(cfg: RunConfig) -> tuple[float, float]:
+    """(total capital, capital per budget): the engine gives each coin capital / len(coins) in per-coin mode."""
+    total = float(cfg.capital)
+    return total, (total / len(cfg.coins) if cfg.capital_mode == "per_coin" else total)
+
+
+def realised_drawdown(mk: pd.DataFrame, capital_total: float) -> float:
+    """Drawdown of capital_total + cumulative P&L of settled markets in settle order (realised only)."""
+    mk = mk[~mk["voided"].astype(bool)]
+    if len(mk) == 0:
+        return 0.0
+    order = mk["settle_ms"].astype(float).fillna(mk["window_end_ms"].astype(float)).to_numpy().argsort(kind="stable")
+    c = np.concatenate([[0.0], np.cumsum(mk["pnl"].astype(float).fillna(0.0).to_numpy()[order])]) + capital_total
+    return float((np.maximum.accumulate(c) - c).max())
 
 
 def max_drawdown(s: pd.Series) -> float:
@@ -166,8 +183,7 @@ def eval_pnl(result: RunResult, day_kind_of: Callable[[str], str]) -> float | No
 def compute(result: RunResult, cfg: RunConfig, day_kind_of: Callable[[str], str]) -> dict:
     mk = result.markets
     fills = result.fills
-    cap_each = float(cfg.capital)
-    cap_total = cap_each * max(len(result.coins), 1)
+    cap_total, cap_each = capitals(cfg)
     eq = total_equity(result.equity, cap_total, cap_each)
 
     if len(mk):
@@ -184,8 +200,8 @@ def compute(result: RunResult, cfg: RunConfig, day_kind_of: Callable[[str], str]
     m = _stats(mk, fills, eq, cap_total)
     nv = mk[~mk["voided"].astype(bool)] if len(mk) else mk
     daily = nv.groupby("day")["pnl"].apply(lambda s: float(s.astype(float).fillna(0).sum())) if len(nv) else {}
-    kind_of = dict(zip(mk["day"], mk["kind"])) if len(mk) else {}
-    all_days = sorted(set(mk["day"])) if len(mk) else []
+    kind_of = dict(zip(nv["day"], nv["kind"])) if len(nv) else {}
+    all_days = sorted(set(nv["day"])) if len(nv) else []  # days with at least one non-voided market
     m["days"] = {d: {"kind": kind_of[d], "pnl": float(daily.get(d, 0.0))} for d in all_days}
     m["attribution"] = attribution(fills)
     m["realism"] = realism(result, cfg, mk)
@@ -213,7 +229,7 @@ def compute(result: RunResult, cfg: RunConfig, day_kind_of: Callable[[str], str]
     m["per_day_edge"] = pde
 
     # the numbers the verdict is judged on
-    kinds = set(kind_of.values())
+    kinds = set(mk["kind"]) if len(mk) else set()
     if "validation" in kinds:
         ev_kind = "validation"
     elif kinds == {"sealed"}:
@@ -223,10 +239,11 @@ def compute(result: RunResult, cfg: RunConfig, day_kind_of: Callable[[str], str]
     m["eval"] = None
     if ev_kind:
         sel = mk[mk["kind"] == ev_kind]
-        days = set(sel["day"])
+        days = set(sel[~sel["voided"].astype(bool)]["day"])
         efills = fills[fills["day"].isin(days)] if len(fills) else fills
-        eeq = eq[[_day(i) in days for i in eq.index]] if len(eq) else eq
-        e = _stats(sel, efills, eeq, cap_total)
+        e = _stats(sel, efills, pd.Series(dtype="float64"), cap_total)
+        e["max_drawdown_usd"] = realised_drawdown(sel, cap_total)  # realised only; never touches train days
+        e["max_drawdown_pct"] = 100 * e["max_drawdown_usd"] / cap_total if cap_total else 0.0
         dp = [m["days"][d]["pnl"] for d in sorted(days)]
         k = max(1, round(len(dp) / 3))
         e["kind"] = ev_kind
@@ -253,19 +270,25 @@ def verdict(m: dict, kind: str = "provisional", n_looks: int = 0, min_usd_per_da
     A check that cannot be judged has `passed` None and a `value` of "not judged"; it does not fail the verdict."""
     e = m.get("eval")
     if not e:
-        return {"passed": False, "label": NO_VALIDATION, "kind": kind, "checks": {}, "t_threshold": t_threshold(kind, n_looks)}
-    thr = t_threshold(kind, n_looks)
+        label = "no sealed-day data" if kind == "final" else NO_VALIDATION
+        return {"passed": False, "label": label, "kind": kind, "checks": {}, "t_threshold": t_threshold(kind, n_looks + 1)}
+    n_eff = n_looks + 1  # the look being judged counts
+    thr = t_threshold(kind, n_eff)
     lo = (e["block_ci95"] or [None])[0]
     t = e["block_pnl_t"]
+    few = e["n_blocks"] < MIN_BLOCKS
     c = {
         "pnl > 0": _chk(e["pnl_usd"], 0, e["pnl_usd"] > 0),
-        "ci95_lo > 0": _chk(lo, 0, lo is not None and lo > 0),
-        "t > threshold": _chk(t, thr, t is not None and t > thr),
+        "ci95_lo > 0": _chk(lo, 0, not few and lo is not None and lo > 0),
+        "t > threshold": _chk(t, thr, not few and t is not None and t > thr),
         "recent third of days > 0": _chk(e["recent_third_pnl"], 0, e["recent_third_pnl"] > 0),
         "usd_per_day >= min": _chk(e["usd_per_day"], min_usd_per_day, e["usd_per_day"] >= min_usd_per_day),
         "fills_per_day >= 200": _chk(e["fills_per_day"], MIN_FILLS_PER_DAY, e["fills_per_day"] >= MIN_FILLS_PER_DAY),
         "max_drawdown_pct < 10": _chk(e["max_drawdown_pct"], MAX_DD_PCT, e["max_drawdown_pct"] < MAX_DD_PCT),
     }
+    if few:
+        for k in ("ci95_lo > 0", "t > threshold"):
+            c[k]["note"] = f"too few blocks ({e['n_blocks']} < {MIN_BLOCKS})"
     if e["n_days"] >= MIN_DAYS_POS_SHARE:
         s = e["positive_day_share"]
         c["positive days >= 70%"] = _chk(s, POS_DAY_SHARE, s is not None and s >= POS_DAY_SHARE)
@@ -279,7 +302,13 @@ def verdict(m: dict, kind: str = "provisional", n_looks: int = 0, min_usd_per_da
         c["profitable at 400 ms"]["note"] = f"{NOT_JUDGED}: no latency sweep"
     else:
         c["profitable at 400 ms"] = _chk(p400, 0, p400 > 0)
-    passed = all(v["passed"] is not False for v in c.values())
-    label = ("PASS" if passed else "FAIL") + (" (provisional)" if kind != "final" else "")
-    return {"passed": passed, "label": label, "kind": kind, "t_threshold": thr, "n_looks": n_looks if kind == "final" else None,
+    # only the positive-days check may be unjudged and still pass; a missing 400 ms sweep is incomplete
+    passed = all(v["passed"] is True for k, v in c.items() if k != "positive days >= 70%")
+    passed = passed and c["positive days >= 70%"]["passed"] is not False
+    suffix = " (provisional)" if kind != "final" else ""
+    if not passed and not any(v["passed"] is False for v in c.values()) and c["profitable at 400 ms"]["passed"] is None:
+        label = "INCOMPLETE (no 400 ms sweep)"
+    else:
+        label = ("PASS" if passed else "FAIL") + suffix
+    return {"passed": passed, "label": label, "kind": kind, "t_threshold": thr, "n_looks": n_eff if kind == "final" else None,
             "checks": c}
