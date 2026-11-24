@@ -132,7 +132,7 @@ transient REST errors, depth resyncs and single restarts. They are counted in th
 | Feed degraded | Chainlink or mark-price rate below normal for 15 min |
 | Connection stuck | a WebSocket hasn't reconnected for 5 min |
 | Coverage | a series' current market isn't subscribed for 5 min |
-| Rate limited | HTTP 429/418 for 5 min |
+| Rate limited | Binance IP ban (HTTP 418) at once; HTTP 429 only if 20+ per 10 min for 10 min (scattered 429s are retried and self-heal) |
 | Format change | parse errors or unexpected outcomes (Polymarket changed something) |
 | Resolutions | markets without outcome/trades more than 1 h after their end, for 30 min |
 | Archive | no successful Spaces upload for 2 h 15 min |
