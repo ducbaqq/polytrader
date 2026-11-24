@@ -323,3 +323,24 @@ def test_new_run_dir_retries_on_collision(pdir, monkeypatch):
     now = datetime(2026, 11, 24, 13, 5, tzinfo=timezone.utc)
     assert runs.new_run_dir("f", "s", now).name.endswith("aaaaaa")
     assert runs.new_run_dir("f", "s", now).name.endswith("bbbbbb")
+
+
+def test_final_refused_when_day_not_built(pdir):
+    mark_validated(pdir)
+    with pytest.raises(runs.FinalRefused, match="not built: run polydata build"):
+        runs.final_preflight(get_strategy("noop"), {}, sealed_days())
+
+
+def test_provenance_without_manifests_records_null_fingerprint(pdir):
+    p = runs.provenance(get_strategy("noop"), {}, ["2026-11-24"], "run")
+    assert p["data_fingerprint"] is None
+    with pytest.raises(ValueError):
+        runs.provenance(get_strategy("noop"), {}, ["2026-11-24"], "final")
+
+
+def test_push_skips_tmp_files(pdir):
+    d = put_run(pdir)
+    (d / "results.json.123.tmp").write_text("x")
+    s3 = FakeS3()
+    runs.push(client=s3, bucket_name="b")
+    assert not any(k.endswith(".tmp") for k in s3.objs) and any(k.endswith("results.json") for k in s3.objs)

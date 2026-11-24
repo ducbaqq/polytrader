@@ -24,3 +24,6 @@ __pycache__/
 *.swp
 *~
 .DS_Store
+
+# Temp files of the runs-index CSV writer
+docs/*.tmp

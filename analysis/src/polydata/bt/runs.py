@@ -85,7 +85,7 @@ def data_fingerprint(days: list[str]) -> str:
     for day in sorted(set(days)):
         srcs = sorted(p.parquet.glob(f"*/date={day}/*.src"))
         if not srcs:
-            raise ValueError(f"no built Parquet manifests (.src) for {day}: run `polydata build`")
+            raise ValueError(f"day {day} not built: run polydata build")
         for src in srcs:
             h.update(src.relative_to(p.parquet).as_posix().encode() + b"\0" + src.read_bytes() + b"\0")
     return h.hexdigest()
@@ -131,6 +131,12 @@ def _git(*args: str) -> str | None:
 
 
 def provenance(strategy_cls: type, params: dict, days: list[str], kind: str, **extra) -> dict:
+    try:
+        fingerprint = data_fingerprint(days)
+    except ValueError:
+        if kind == "final":
+            raise
+        fingerprint = None  # an ordinary run must not abort after its replay
     commit = (_git("rev-parse", "HEAD") or "").strip() or None
     diff = _git("diff", "HEAD") or ""
     pk = {}
@@ -142,7 +148,7 @@ def provenance(strategy_cls: type, params: dict, days: list[str], kind: str, **e
     return {"kind": kind, "family": strategy_cls.family, "strategy": strategy_cls.name,
             "git_commit": commit, "git_diff": diff[:200_000] if diff else None, "git_dirty": bool(diff),
             "sim_version": validate.sim_version(), "strategy_version": strategy_version(strategy_cls, effective_params(strategy_cls, params)),
-            "data_fingerprint": data_fingerprint(days), "python": sys.version.split()[0], "packages": pk,
+            "data_fingerprint": fingerprint, "python": sys.version.split()[0], "packages": pk,
             "host": host_hash(), **extra}
 
 
@@ -275,7 +281,11 @@ def final_preflight(strategy_cls: type, params: dict, days: list[str], sim_ver: 
         raise FinalRefused(f"the simulator validation has not passed for sim_version {sim}: run `polydata bt validate`")
     if len(days) < FINAL_MIN_DAYS:
         raise FinalRefused(f"only {len(days)} sealed days available, --final needs at least {FINAL_MIN_DAYS}")
-    version, fp = strategy_version(strategy_cls, effective_params(strategy_cls, params)), data_fingerprint(days)
+    try:
+        fp = data_fingerprint(days)
+    except ValueError as e:
+        raise FinalRefused(str(e)) from None
+    version = strategy_version(strategy_cls, effective_params(strategy_cls, params))
     idx = rebuild_index()  # never trust a cached index
     finals = idx[(idx.kind == "final") & (idx.version == version)]
     same = []
@@ -296,8 +306,7 @@ def final_preflight(strategy_cls: type, params: dict, days: list[str], sim_ver: 
 
 def _shared_files() -> list[Path]:
     r = runs_dir()
-    return sorted(f for f in r.rglob("*") if f.is_file() and f.name not in _NOT_SHARED and not f.name.endswith(".part")
-                  and ".tmp" not in f.parts)
+    return sorted(f for f in r.rglob("*") if f.is_file() and f.name not in _NOT_SHARED and not f.name.endswith((".part", ".tmp")))
 
 
 def _remote(client, bucket_name: str) -> dict[str, int]:
