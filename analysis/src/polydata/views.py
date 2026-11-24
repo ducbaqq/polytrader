@@ -7,6 +7,7 @@ from pathlib import Path
 import duckdb
 
 from . import schema
+from .fees import SQL_MACRO as FEE_MACRO
 from .config import paths
 
 # One row per market: static fields from discovery (`pm_market_meta`), result from `pm_resolution`.
@@ -119,6 +120,7 @@ def create_views(con: duckdb.DuckDBPyConnection, parquet: Path | None = None) ->
     """(Re)create macros and one view per available stream. Returns the view names."""
     root = (parquet or paths().parquet).as_posix()
     con.execute(MACROS)
+    con.execute(FEE_MACRO)
     names: list[str] = []
     for stream in list(schema.TSV) + schema.JSONL:
         if list(Path(root, stream).glob("*/*.parquet")):

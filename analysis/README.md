@@ -72,7 +72,9 @@ plus `date`:
 | `bn_open_interest` | Open interest per minute |
 | `bn_fut_ratios` | Long/short account and position ratios, taker buy/sell, OI history (5-min) |
 
-**Macros:** `levels(s)` turns a book string into `LIST(STRUCT(price, size))`, `ms(x)` converts ms to
+**Macros:** `taker_fee(shares, price, rate)` gives the verified Polymarket fee (see
+[docs/FEES.md](../docs/FEES.md); `polydata.taker_fee()` in Python). `levels(s)` turns a book string
+into `LIST(STRUCT(price, size))`, `ms(x)` converts ms to
 TIMESTAMP, and `asset_slug(a)` / `asset_outcome(a)` parse an asset key.
 
 ## Rules for backtests
@@ -81,6 +83,8 @@ TIMESTAMP, and `asset_slug(a)` / `asset_outcome(a)` parse an asset key.
   exchange timestamps, and use `ASOF JOIN` (see the quickstart notebook).
 - Check [the data quality log](../docs/RECORDER.md#data-quality-log) for periods with gaps or skewed
   `recv_ms`.
+- Charge every taker fill `taker_fee(shares, price, markets.fee_rate)`; makers pay nothing. Assume
+  0% rebates.
 - `markets.price_to_beat` is NULL for 4h markets. Rebuild it from `chainlink` (mean over the 60 s
   before `window_start`), as in the notebook.
 

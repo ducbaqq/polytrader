@@ -23,6 +23,8 @@ top of it.
 | `scripts/recorder/` | `archive.sh` (hourly upload to Spaces), `verify.py` (data-quality checks) |
 | `analysis/` | `polydata` (Python, DuckDB): sync, Parquet build, SQL views, notebooks, tests |
 | `docs/RECORDER.md` | Every stream and column, operations, data quality log |
+| `docs/FEES.md` | Verified fee formula, rates, rebates and what they mean for strategies |
+| `docs/TODO.md` | What's next |
 | `analysis/README.md` | Views, query examples, backtest rules |
 
 ## What is recorded
@@ -81,7 +83,8 @@ con.sql("SELECT * FROM pm_trade WHERE slug = 'btc-updown-5m-1795509000'").df()
   timestamps.
 - Check the [data quality log](docs/RECORDER.md#data-quality-log) for affected periods. Data from
   2026-11-23 16:50–17:46 UTC is development data.
-- Taker fees apply on 5m/15m markets (`markets.fee_rate`); makers get rebates.
+- Taker fee = shares × rate × p(1 − p): rate 0.05 on BTC 5m/15m, 0.01 on everything else. Makers pay
+  nothing; assume no rebates. Use `polydata.taker_fee()` / SQL `taker_fee()`. See [docs/FEES.md](docs/FEES.md).
 - 4h markets have no `price_to_beat`; rebuild it from `chainlink`.
 
 ## Recorder
