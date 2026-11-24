@@ -8,22 +8,13 @@ Path from the data we're collecting to tested strategies. Update this file as it
 - [x] `polydata`: sync, Parquet, DuckDB views, notebooks (2026-11-24)
 - [x] Telegram alerting, actionable problems only (2026-11-24)
 - [x] Fee formula verified on-chain: [FEES.md](FEES.md) (2026-11-24)
+- [x] Calibration & fair-value study: [research/calibration-study.md](research/calibration-study.md) (2026-11-24).
+  Conclusions: market making is the lead strategy; makers must react to Binance moves within
+  ~100–200 ms; taker mispricing and the latency trade (from Singapore) are not worth pursuing.
 
 ## Next
 
-### 1. Fair-value and calibration study (about 1 day; start on the first 2–3 days of data)
-- [ ] Fair-value model for P(Up), from:
-  - distance to `priceToBeat` (in volatility units)
-  - time left in the window
-  - realized and implied Binance volatility
-  - the 60-second TWAP settlement: the closing average dampens the last minute's moves
-- [ ] Calibration: bucket Polymarket mid prices by time-to-end and compare with actual outcomes.
-  Is the market over- or under-confident, and where?
-- [ ] Mispricing map: where does |model − market| exceed fee plus half the spread? How often, how
-  long does it last, and how much size is available?
-- [ ] Use the result to choose which strategy to build first: lead-lag, market making, or mispricing.
-
-### 2. Backtester (a few days; design discussion with you first)
+### 1. Backtester, market making first (a few days; design discussion with you first)
 - [ ] Design: the strategy interface (events in, orders out), the configuration, and the reports
   wanted.
 - [ ] Event replay ordered by `recv_ms` across Polymarket, Binance and Chainlink streams (no
@@ -43,11 +34,12 @@ Path from the data we're collecting to tested strategies. Update this file as it
   - capacity: size actually fillable
   - sensitivity to latency and fill assumptions
 
-### 3. Strategy research (when there are about 7–10 days of data)
-- [ ] Lead-lag: how fast the Polymarket book reacts to Binance moves, and whether the delay is worth
-  more than fee plus spread.
-- [ ] Market making: quote around fair value, widen or pull quotes on volatility, track inventory.
-  Makers pay no fees, which is a large advantage on BTC 5m/15m.
+### 2. Strategy research (when there are about 7–10 days of data)
+- [ ] Market making (lead candidate): quote in tight books, pull or reprice quotes on Binance moves,
+  inventory limits. Measure what *we* would earn with a back-of-queue fill model.
+- [ ] Rerun the calibration study at 7 and 14 days: `uv run python -m polydata.research.study`.
+- [ ] Find where Polymarket's matching engine is hosted (round-trip ~200 ms from Singapore). A
+  server near it would speed up maker cancels and could revive the BTC 5m latency trade.
 - [ ] Wallet study (`pm_api_trades`): which wallets consistently profit, and what they do (timing,
   prices, side, size).
 - [ ] Set pass criteria before testing:
@@ -56,7 +48,7 @@ Path from the data we're collecting to tested strategies. Update this file as it
   - t-statistic above about 3
   - enough fillable size
 
-### 4. Paper trading
+### 3. Paper trading
 - [ ] Run the best one or two candidates live on the droplet, simulated against the live book.
 - [ ] Compare paper fills with what the backtest predicted for the same period.
 

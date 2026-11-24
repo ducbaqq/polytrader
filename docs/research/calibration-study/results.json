@@ -1,0 +1,495 @@
+{
+ "period": [
+  "2026-11-23 18:50:00",
+  "2026-11-24 14:45:00"
+ ],
+ "markets": 2673,
+ "snapshots": 323759,
+ "calibration": [
+  {
+   "timeframe": "15m",
+   "time_left": "0-10s",
+   "snapshots": 1240,
+   "markets": 627,
+   "slope": 4.94,
+   "slope_ci": [
+    4.27,
+    5.13
+   ]
+  },
+  {
+   "timeframe": "15m",
+   "time_left": "10-30s",
+   "snapshots": 2351,
+   "markets": 609,
+   "slope": 1.53,
+   "slope_ci": [
+    1.31,
+    30.97
+   ]
+  },
+  {
+   "timeframe": "15m",
+   "time_left": "30-60s",
+   "snapshots": 3351,
+   "markets": 587,
+   "slope": 1.16,
+   "slope_ci": [
+    0.93,
+    1.8
+   ]
+  },
+  {
+   "timeframe": "15m",
+   "time_left": "1-2m",
+   "snapshots": 6571,
+   "markets": 586,
+   "slope": 1.16,
+   "slope_ci": [
+    1.01,
+    1.4
+   ]
+  },
+  {
+   "timeframe": "15m",
+   "time_left": "2-5m",
+   "snapshots": 19513,
+   "markets": 597,
+   "slope": 1.09,
+   "slope_ci": [
+    0.9,
+    1.42
+   ]
+  },
+  {
+   "timeframe": "15m",
+   "time_left": "5-15m",
+   "snapshots": 64785,
+   "markets": 612,
+   "slope": 0.97,
+   "slope_ci": [
+    0.74,
+    1.28
+   ]
+  },
+  {
+   "timeframe": "1h",
+   "time_left": "10-30s",
+   "snapshots": 501,
+   "markets": 127,
+   "slope": 7.77,
+   "slope_ci": [
+    4.99,
+    8.12
+   ]
+  },
+  {
+   "timeframe": "1h",
+   "time_left": "30-60s",
+   "snapshots": 734,
+   "markets": 127,
+   "slope": 1.62,
+   "slope_ci": [
+    1.31,
+    32.83
+   ]
+  },
+  {
+   "timeframe": "1h",
+   "time_left": "1-2m",
+   "snapshots": 1438,
+   "markets": 123,
+   "slope": 1.16,
+   "slope_ci": [
+    0.97,
+    5.39
+   ]
+  },
+  {
+   "timeframe": "1h",
+   "time_left": "2-5m",
+   "snapshots": 4216,
+   "markets": 126,
+   "slope": 0.95,
+   "slope_ci": [
+    0.78,
+    1.76
+   ]
+  },
+  {
+   "timeframe": "1h",
+   "time_left": "5-15m",
+   "snapshots": 12852,
+   "markets": 125,
+   "slope": 0.85,
+   "slope_ci": [
+    0.59,
+    1.41
+   ]
+  },
+  {
+   "timeframe": "1h",
+   "time_left": "15-60m",
+   "snapshots": 60356,
+   "markets": 124,
+   "slope": 1.06,
+   "slope_ci": [
+    0.61,
+    1.89
+   ]
+  },
+  {
+   "timeframe": "5m",
+   "time_left": "0-10s",
+   "snapshots": 3736,
+   "markets": 1891,
+   "slope": 2.11,
+   "slope_ci": [
+    1.92,
+    106.26
+   ]
+  },
+  {
+   "timeframe": "5m",
+   "time_left": "10-30s",
+   "snapshots": 6704,
+   "markets": 1837,
+   "slope": 1.28,
+   "slope_ci": [
+    1.16,
+    1.62
+   ]
+  },
+  {
+   "timeframe": "5m",
+   "time_left": "30-60s",
+   "snapshots": 8924,
+   "markets": 1668,
+   "slope": 1.11,
+   "slope_ci": [
+    1.02,
+    1.23
+   ]
+  },
+  {
+   "timeframe": "5m",
+   "time_left": "1-2m",
+   "snapshots": 18116,
+   "markets": 1675,
+   "slope": 0.98,
+   "slope_ci": [
+    0.88,
+    1.12
+   ]
+  },
+  {
+   "timeframe": "5m",
+   "time_left": "2-5m",
+   "snapshots": 53392,
+   "markets": 1664,
+   "slope": 0.86,
+   "slope_ci": [
+    0.75,
+    0.98
+   ]
+  }
+ ],
+ "model": {
+  "fit": {
+   "k": 1.2,
+   "vol": "sig15",
+   "nowcast": true,
+   "train_logloss": 0.4626011456762547
+  },
+  "test_brier_model": 0.1342499046700246,
+  "test_brier_market": 0.13041091569373883,
+  "test_logloss_model": 0.4075313846299843,
+  "test_logloss_market": 0.39667318531890877,
+  "test_logloss_market_plus_model": 0.3990911701439173,
+  "combined_weights": [
+   -0.132,
+   0.561,
+   0.357
+  ]
+ },
+ "model_taker_test": [
+  {
+   "latency_ms": 300,
+   "margin": 0.0,
+   "trades": 2356,
+   "markets": 1249,
+   "win_rate": 0.4728,
+   "avg_price": 0.4796,
+   "avg_fee": 0.0036,
+   "pnl_per_share": -0.0103,
+   "pnl_ci95": [
+    -0.020919691155246438,
+    0.000703598015055914
+   ],
+   "total_pnl_1_share_each": -24.3333
+  },
+  {
+   "latency_ms": 300,
+   "margin": 0.02,
+   "trades": 2194,
+   "markets": 1235,
+   "win_rate": 0.4439,
+   "avg_price": 0.4439,
+   "avg_fee": 0.0035,
+   "pnl_per_share": -0.0035,
+   "pnl_ci95": [
+    -0.017987977250482828,
+    0.0107504944919854
+   ],
+   "total_pnl_1_share_each": -7.6813
+  },
+  {
+   "latency_ms": 300,
+   "margin": 0.05,
+   "trades": 1860,
+   "markets": 1168,
+   "win_rate": 0.3892,
+   "avg_price": 0.3813,
+   "avg_fee": 0.0033,
+   "pnl_per_share": 0.0047,
+   "pnl_ci95": [
+    -0.014754039201462295,
+    0.02226721317717918
+   ],
+   "total_pnl_1_share_each": 8.6633
+  },
+  {
+   "latency_ms": 300,
+   "margin": 0.1,
+   "trades": 1038,
+   "markets": 794,
+   "win_rate": 0.2967,
+   "avg_price": 0.293,
+   "avg_fee": 0.0028,
+   "pnl_per_share": 0.0009,
+   "pnl_ci95": [
+    -0.02478050248045493,
+    0.027112815988521912
+   ],
+   "total_pnl_1_share_each": 0.9208
+  },
+  {
+   "latency_ms": 1000,
+   "margin": 0.0,
+   "trades": 2355,
+   "markets": 1250,
+   "win_rate": 0.4726,
+   "avg_price": 0.4865,
+   "avg_fee": 0.0036,
+   "pnl_per_share": -0.0174,
+   "pnl_ci95": [
+    -0.02919703951180385,
+    -0.005170617916045359
+   ],
+   "total_pnl_1_share_each": -41.0742
+  },
+  {
+   "latency_ms": 1000,
+   "margin": 0.02,
+   "trades": 2194,
+   "markets": 1235,
+   "win_rate": 0.4439,
+   "avg_price": 0.4529,
+   "avg_fee": 0.0035,
+   "pnl_per_share": -0.0125,
+   "pnl_ci95": [
+    -0.027068281388907815,
+    0.0029526434860122014
+   ],
+   "total_pnl_1_share_each": -27.4412
+  },
+  {
+   "latency_ms": 1000,
+   "margin": 0.05,
+   "trades": 1860,
+   "markets": 1168,
+   "win_rate": 0.3892,
+   "avg_price": 0.3891,
+   "avg_fee": 0.0033,
+   "pnl_per_share": -0.0031,
+   "pnl_ci95": [
+    -0.021895729687417754,
+    0.01640747119492325
+   ],
+   "total_pnl_1_share_each": -5.746
+  },
+  {
+   "latency_ms": 1000,
+   "margin": 0.1,
+   "trades": 1038,
+   "markets": 794,
+   "win_rate": 0.2967,
+   "avg_price": 0.3021,
+   "avg_fee": 0.0028,
+   "pnl_per_share": -0.0082,
+   "pnl_ci95": [
+    -0.033728904264645025,
+    0.020105058138140716
+   ],
+   "total_pnl_1_share_each": -8.5493
+  }
+ ],
+ "leadlag": {
+  "btc": {
+   "0": 0.041,
+   "200": 0.123,
+   "400": 0.316,
+   "600": 0.546,
+   "1000": 0.857,
+   "2000": 1.18,
+   "3000": 1.291
+  },
+  "eth": {
+   "0": 0.137,
+   "200": 0.621,
+   "400": 0.957,
+   "600": 1.073,
+   "1000": 1.149,
+   "2000": 1.215,
+   "3000": 1.235
+  },
+  "sol": {
+   "0": 0.131,
+   "200": 0.714,
+   "400": 0.923,
+   "600": 0.97,
+   "1000": 0.982,
+   "2000": 0.974,
+   "3000": 0.97
+  },
+  "xrp": {
+   "0": 0.121,
+   "200": 0.872,
+   "400": 1.175,
+   "600": 1.185,
+   "1000": 1.126,
+   "2000": 1.055,
+   "3000": 1.062
+  }
+ },
+ "latency_trade": {
+  "btc": {
+   "arrival_ms": [
+    0,
+    100,
+    150,
+    200,
+    250,
+    300,
+    400,
+    600
+   ],
+   "pnl_c": [
+    1.435,
+    1.146,
+    0.94,
+    0.703,
+    0.47,
+    0.271,
+    -0.034,
+    -0.461
+   ],
+   "n": 14294
+  },
+  "eth": {
+   "arrival_ms": [
+    0,
+    100,
+    150,
+    200,
+    250,
+    300,
+    400,
+    600
+   ],
+   "pnl_c": [
+    0.607,
+    -0.148,
+    -0.359,
+    -0.509,
+    -0.589,
+    -0.625,
+    -0.667,
+    -0.69
+   ],
+   "n": 18335
+  }
+ },
+ "maker": {
+  "trades": 647437,
+  "shares": 17764675.721509,
+  "notional_usd": 8724277.955295697,
+  "maker_pnl_usd": 84255.81408169499,
+  "taker_fees_usd": 105528.5180842106,
+  "maker_c_per_share": 0.47428850040690745,
+  "maker_ci95": [
+   0.14275550101284107,
+   0.7757314792655221
+  ],
+  "by_coin": {
+   "bnb": 1.965,
+   "btc": 0.408,
+   "doge": 1.997,
+   "eth": 0.848,
+   "hype": 2.648,
+   "sol": 1.131,
+   "xrp": 0.402,
+   "zec": -8.215
+  },
+  "by_fee_rate": {
+   "0.01": 0.729,
+   "0.05": 0.427
+  }
+ },
+ "toxic_flow": {
+  "btc": {
+   "quiet": {
+    "share": 0.532,
+    "maker_c": 1.035
+   },
+   "against small move": {
+    "share": 0.122,
+    "maker_c": 1.285
+   },
+   "against big move": {
+    "share": 0.053,
+    "maker_c": 2.74
+   },
+   "with small move": {
+    "share": 0.181,
+    "maker_c": -1.287
+   },
+   "with big move": {
+    "share": 0.113,
+    "maker_c": -0.887
+   }
+  },
+  "eth": {
+   "quiet": {
+    "share": 0.527,
+    "maker_c": 0.675
+   },
+   "against small move": {
+    "share": 0.176,
+    "maker_c": 1.709
+   },
+   "against big move": {
+    "share": 0.053,
+    "maker_c": 5.378
+   },
+   "with small move": {
+    "share": 0.169,
+    "maker_c": -0.644
+   },
+   "with big move": {
+    "share": 0.074,
+    "maker_c": -1.259
+   }
+  }
+ }
+}
