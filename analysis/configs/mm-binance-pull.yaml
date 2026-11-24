@@ -15,6 +15,7 @@ params:
   stop_before_end_s: 20
   center: mid                # mid (Up mid) or fair (ctx.fair_value)
   requote_threshold_ticks: 1 # replace a resting quote when its target moved this many ticks
+  quote_before_start: false  # true: also quote before window_start_ms (strike unknown then)
 coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]
 timeframes: [5m, 15m, 1h]
 day_kinds: [train, validation]

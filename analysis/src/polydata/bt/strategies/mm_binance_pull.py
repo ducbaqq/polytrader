@@ -14,9 +14,16 @@ This strategy quotes around the mid and steps back whenever Binance moves.
   beyond `max_inventory` is not quoted
 - the ask is a SELL Up when at least `size` Up is held, else a BUY Down at 1 - ask
 
-A market is quoted only while its book is two-sided with spread <= `max_book_spread`, and time left
-is in [max(t_min_s, stop_before_end_s), t_max_s]; at the stop time its quotes are cancelled.
-Otherwise (or when the conditions stop holding) its quotes are cancelled.
+A market is quoted only while its book is two-sided with spread <= `max_book_spread`, time left
+is in [max(t_min_s, stop_before_end_s), t_max_s] and, unless `quote_before_start`, its window has
+started (before the start the strike is unknown, so the Binance link does not hold yet; `t_max_s`
+still counts from the end). At the stop time its quotes are cancelled, and so are they whenever the
+conditions stop holding.
+
+**Known simplifications.** An ask resting as a BUY Down is not converted to a SELL Up when Up is
+later held (it stays until it is filled or replaced; only a new ask picks the form). The inventory
+cap uses the reported position, so with fills still in their report latency (and the other side
+resting) |inventory| can overshoot `max_inventory` by up to one `size`.
 
 **Pulls.** On every Binance step: if |ln(mid / mid pull_window_ms ago)| > pull_k x sigma_1s x
 sqrt(pull_window_ms / 1000), all quotes on that coin's markets are cancelled and quoting pauses for
@@ -157,6 +164,7 @@ class MmBinancePull(Strategy):
         "stop_before_end_s": 20,
         "center": "mid",
         "requote_threshold_ticks": 1,
+        "quote_before_start": False,
     }
 
     def __init__(self, params: dict | None = None):
@@ -176,6 +184,7 @@ class MmBinancePull(Strategy):
         self.cool_ms = int(p["cooldown_ms"])
         self.thr = int(p["requote_threshold_ticks"])
         self.fair = p["center"] == "fair"
+        self.pre_start = bool(p["quote_before_start"])
         self.mkts: dict[str, _Mkt] = {}
         self.by_coin: dict[str, list[_Mkt]] = {}
         self.vol: dict[str, _Vol] = {}  # by coin
@@ -190,8 +199,9 @@ class MmBinancePull(Strategy):
         self.mkts[market.slug] = m
         self.by_coin.setdefault(market.coin, []).append(m)
         end, now = market.window_end_ms, ctx.now
-        if end - self.start_ms > now:
-            ctx.set_timer(f"start:{market.slug}", end - self.start_ms - now)
+        start = end - self.start_ms if self.pre_start else max(end - self.start_ms, market.window_start_ms)
+        if start > now:
+            ctx.set_timer(f"start:{market.slug}", start - now)
         if end - self.stop_ms > now:
             ctx.set_timer(f"stop:{market.slug}", end - self.stop_ms - now)
         else:
@@ -277,7 +287,7 @@ class MmBinancePull(Strategy):
         if m.stopped:
             return None, None
         left = info.window_end_ms - now
-        if left < self.stop_ms or left > self.start_ms:
+        if left < self.stop_ms or left > self.start_ms or (now < info.window_start_ms and not self.pre_start):
             return None, None
         v = self.vol.get(info.coin)
         if v is None or not v.ready or self.paused_until.get(info.coin, 0) > now:

@@ -93,7 +93,7 @@ def make(params=None, markets=None, t_start=None):
     markets = markets or [minfo(T0)]
     s = get_strategy("mm-binance-pull")(params)
     ctx = FakeCtx(markets)
-    t0 = (markets[0].window_start_ms if t_start is None else t_start) - HIST_S * 1000
+    t0 = (markets[0].window_start_ms + 2000 if t_start is None else t_start) - HIST_S * 1000  # open 1 s in
     base = {f"{m.coin.upper()}USDT": BASE.get(m.coin, 100.0) for m in markets}
     for k in range(HIST_S):
         for sym, b in base.items():
@@ -208,6 +208,44 @@ def test_no_quotes_in_wide_book():
     assert live(ctx) == [] and len(ctx.placed) == 2
     book(s, ctx, m, 480, 520)  # tight again
     assert len(live(ctx)) == 2
+
+
+def test_no_quotes_before_window_start_unless_allowed():
+    m = minfo(T0)
+    s, ctx = make(t_start=T0 - 60_000)  # opened 61 s before the window starts
+    assert ctx.placed == [] and ctx.timers[f"start:{m.slug}"] == T0
+    book(s, ctx, m, 480, 520)
+    assert ctx.placed == []
+    for k in range(60):
+        bn(s, ctx, T0 - 60_000 + k * 1000, 60000.0)
+    fire(s, ctx, f"start:{m.slug}")
+    assert len(live(ctx)) == 2
+    s, ctx = make({"quote_before_start": True}, t_start=T0 - 60_000)
+    assert len(live(ctx)) == 2 and f"start:{m.slug}" not in ctx.timers
+
+
+def test_cancel_rejected_lets_the_side_cancel_again():
+    m = minfo(T0)
+    s, ctx = make()
+    bid = next(v for v in ctx.placed if v.token == "Up")
+    book(s, ctx, m, 400, 500)  # wide: cancel both
+    assert ctx.cancels.count(bid.id) == 1
+    book(s, ctx, m, 400, 500)  # in flight: not sent twice
+    assert ctx.cancels.count(bid.id) == 1
+    report(s, ctx, bid.id, "open", event="cancel_rejected")
+    assert ctx.views[bid.id].is_open and len(ctx.placed) == 2  # still resting, nothing new placed
+    book(s, ctx, m, 400, 500)
+    assert ctx.cancels.count(bid.id) == 2
+
+
+def test_pull_window_4000():
+    s, ctx = make({"pull_window_ms": 4000})  # threshold 2 sigma x sqrt(4) = 4 bp (sigma = 1 bp)
+    t, ref = ctx.now, 60000.0 * 1.0001  # the mid 4 s before t (an odd second of the wiggle)
+    assert len(live(ctx)) == 2
+    bn(s, ctx, t + 100, ref * 1.0003)  # 3 bp vs 4 s ago: a 1 s window would pull (> 2 bp), this one not
+    assert ctx.cancels == []
+    bn(s, ctx, t + 2000, ref * 1.0006)  # 6 bp vs the mid at t - 2000
+    assert len(ctx.cancels) == 2 and ctx.timers["resume:btc"] == t + 4000
 
 
 def test_one_sided_book_not_quoted():
@@ -370,6 +408,24 @@ def test_runs_through_engine():
     placed = o[o.event == "placed"]
     assert len(placed) >= 2 and (placed["size"] == 10).all() and placed.post_only.all()
     assert (o.event == "rejected").sum() == 0
-    assert (placed.ms <= m.window_end_ms - 30_000).all()
+    assert (placed.ms <= m.window_end_ms - 30_000).all() and (placed.ms >= m.window_start_ms).all()
     pnl = res.markets.set_index("slug").pnl[m.slug]
     assert not math.isnan(pnl)
+
+
+def test_engine_fill_sets_inventory():
+    from test_engine import loader_for, mdata
+
+    m = minfo(T0)
+    # an Up taker SELL through 0.48 at T0 + 20 s: it reaches our 0.49 bid (resting since T0 + 200 ms)
+    md = mdata(m, trades=[(T0 + 20_000, "Up", "SELL", 0.48, 150)])
+    con = lambda: make_con([m], T0 - 1_200_000, T0 + 1_300_000)  # noqa: E731
+    c = cfg(strategy="mm-binance-pull", timeframes=["5m"], params={})
+    res = engine.run_coin(c, "btc", con, loader=loader_for({m.slug: md}), rec_events=NO_EVENTS)
+    f = res.fills
+    assert len(f) >= 1 and (f.liquidity == "maker").all()
+    assert f.ts_ms.min() == T0 + 20_000
+    sign = f.apply(lambda r: r["size"] * (1 if (r.token, r.side) == ("Up", "BUY") or (r.token, r.side) == ("Down", "SELL")
+                                         else -1), axis=1)
+    assert sign.sum() > 0  # net long Up
+    assert ((f.token == "Up") & (f.side == "BUY") & (f.px == 0.49)).any()
