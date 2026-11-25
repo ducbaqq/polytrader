@@ -134,6 +134,35 @@ class _Bn(NamedTuple):
 _EMPTY_BN = _Bn(*(np.empty(0, t) for t in (np.int64, float, float, float, float)))
 
 
+def _grid_segment(sec_from: int, sec_to: int, bn, prev: float | None, first: bool, base: float
+                  ) -> tuple[int, np.ndarray, np.ndarray] | None:
+    """The 1 s grid of the seconds [sec_from, sec_to) from bundles `bn` (every bundle in that span, recv order):
+    (sec0_offset, filled, csum). `first`: nothing precedes the segment, so it starts at its first second with data
+    (`sec0_offset`; None if there is none), and that second has no return. Otherwise `prev` is the previous second's
+    mid and `base` the running sum before it. Pure, so the live grid can recompute a segment's prefix each second and
+    get the same bits (a prefix of a cumsum is the cumsum of the prefix)."""
+    n = sec_to - sec_from
+    vals = np.full(n, np.nan)
+    if len(bn.recv):
+        sec = bn.recv // 1000 - sec_from
+        last = np.r_[sec[1:] != sec[:-1], True]
+        vals[sec[last]] = ((bn.bid + bn.ask) / 2)[last]
+    off = 0
+    if first:
+        ok = np.flatnonzero(~np.isnan(vals))
+        if not len(ok):
+            return None
+        off, vals = int(ok[0]), vals[ok[0]:]
+        prev = vals[0]
+    idx = np.where(~np.isnan(vals), np.arange(len(vals)), -1)
+    idx = np.maximum.accumulate(idx)
+    filled = np.where(idx >= 0, vals[np.maximum(idx, 0)], prev)
+    r2 = np.log(filled / np.r_[prev, filled[:-1]]) ** 2
+    if first:
+        r2[0] = 0.0  # the first second has no return
+    return off, filled, base + np.cumsum(r2)
+
+
 class _Grid:
     """1 s Binance mids (last update received in each second, forward-filled) and the running sum of
     squared log returns, for sig15. Restarted at each replay range."""
@@ -145,31 +174,18 @@ class _Grid:
 
     def append(self, sec_from: int, sec_to: int, bn: _Bn) -> None:
         """Add the seconds [sec_from, sec_to) from this hour's bundles."""
-        n = sec_to - sec_from
-        vals = np.full(n, np.nan)
-        if len(bn.recv):
-            sec = bn.recv // 1000 - sec_from
-            last = np.r_[sec[1:] != sec[:-1], True]
-            vals[sec[last]] = ((bn.bid + bn.ask) / 2)[last]
-        if self.sec0 is None:
-            ok = np.flatnonzero(~np.isnan(vals))
-            if not len(ok):
-                return
-            self.sec0, vals = sec_from + int(ok[0]), vals[ok[0]:]
-            prev = vals[0]
-        else:
-            if self.sec0 + len(self.mids) != sec_from:
-                raise RuntimeError("Binance grid is not contiguous")
-            prev = self.mids[-1]
-        idx = np.where(~np.isnan(vals), np.arange(len(vals)), -1)
-        idx = np.maximum.accumulate(idx)
-        filled = np.where(idx >= 0, vals[np.maximum(idx, 0)], prev)
-        r2 = np.log(filled / np.r_[prev, filled[:-1]]) ** 2
-        base = self.csum[-1] if len(self.csum) else 0.0
-        if not len(self.mids):
-            r2[0] = 0.0  # the first second has no return
+        first = self.sec0 is None
+        if not first and self.sec0 + len(self.mids) != sec_from:
+            raise RuntimeError("Binance grid is not contiguous")
+        seg = _grid_segment(sec_from, sec_to, bn, None if first else self.mids[-1], first,
+                            self.csum[-1] if len(self.csum) else 0.0)
+        if seg is None:
+            return
+        off, filled, csum = seg
+        if first:
+            self.sec0 = sec_from + off
         self.mids = np.r_[self.mids, filled]
-        self.csum = np.r_[self.csum, base + np.cumsum(r2)]
+        self.csum = np.r_[self.csum, csum]
 
     def sig15(self, t_ms: int) -> float | None:
         """sqrt(mean r^2) over the 900 returns ending at the last complete second before t_ms."""
