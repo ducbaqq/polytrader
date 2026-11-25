@@ -1,0 +1,24 @@
+# mm-binance-pull plus a one-sided pull (docs/strategies/mm-side-pull.md). Run with:
+#   cd analysis && uv run polydata bt run configs/mm-side-pull.yaml [--days ...] [--coins ...] [--set k=v ...]
+strategy: mm-side-pull
+params:
+  half_spread: 0.01          # quote centre +- this
+  size: 10                   # shares per quote
+  max_book_spread: 0.04      # quote only when the book's spread is at most this
+  t_min_s: 30                # no quoting with less time left than max(t_min_s, stop_before_end_s)
+  t_max_s: 3600              # ... or more than this
+  pull_k: 2.0                # pull when the Binance move over pull_window_ms > pull_k x sigma_1s x sqrt(window_s)
+  pull_window_ms: 1000
+  cooldown_ms: 2000          # pause after a pull (restarted by each new move)
+  skew_per_share: 0.0005     # both quotes shift by -skew x (Up - Down shares held)
+  max_inventory: 50          # no quote whose fill would take |Up - Down| beyond this
+  stop_before_end_s: 20
+  center: mid                # mid (Up mid) or fair (ctx.fair_value)
+  requote_threshold_ticks: 1 # replace a resting quote when its target moved this many ticks
+  quote_before_start: false  # true: also quote before window_start_ms (strike unknown then)
+  side_k: 0.5                # one-sided pull: |Binance return over side_window_ms| > side_k x sigma_1s x sqrt(window_s)
+  side_window_ms: 2000       # a fall pulls the bids, a rise pulls the asks
+  side_cooldown_ms: 3000     # that side stays off this long (restarted by each new move)
+coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]
+timeframes: [5m, 15m, 1h]
+day_kinds: [train, validation]
