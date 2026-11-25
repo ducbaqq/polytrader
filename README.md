@@ -4,7 +4,7 @@ Data and research platform for short-horizon trading on Polymarket's crypto **Up
 the underlying coins on Binance.
 
 A recorder on a DigitalOcean droplet captures everything about these markets 24/7. An analysis
-toolkit turns that data into DuckDB tables on any machine. Strategies and backtests will be built on
+toolkit turns that data into DuckDB tables on any machine. A backtester and strategy research are built on
 top of it.
 
 ```
@@ -95,6 +95,11 @@ uv run polydata bt runs
 - Guide (strategy API, config, fill model, splits, reports): [docs/BACKTESTER.md](docs/BACKTESTER.md)
 - Strategy journals, family glossary, how to find runs: [docs/strategies/README.md](docs/strategies/README.md)
 - Every third recorded day is sealed for `--final` runs and hidden from the views.
+
+**Research status (2026-11-25):** one train day (2026-11-24) tested, no validation day yet. Nothing has passed.
+Symmetric market making loses ~1.6¢/share to adverse selection under either queue model, and no pre-fill feature
+predicts the bad fills ([adverse-flow study](docs/research/adverse-flow.md)). The fair-value taker is positive on
+one half of the day only. Current standings: [docs/strategies/README.md](docs/strategies/README.md#where-each-strategy-stands).
 
 ## Backtesting rules
 
