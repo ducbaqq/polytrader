@@ -97,3 +97,9 @@ Per-market join (`uv run python -m polydata.research.fv_taker_vs_screen <run_dir
 - No validation days exist yet (first: 2026-11-26). Do not tune further on 2026-11-24. If the first validation day is looked at, run exactly the default and, at most, margin 3c as a second pre-registered cell named now
   (post hoc here, so on validation it counts as a fresh trial). The default is expected to fail again.
 - Cheap diagnostic if this idea is revisited: log fair, ask, tau and `price_to_beat` at each entry (`ctx.log`) and compare to the snapshot's `p` at the nearest 5 s to see whether online `fair_value` or Chainlink `price_to_beat` differs systematically.
+
+## Follow-up: is `price_to_beat` the cause of the opposite-token picks? (controller, 2026-11-25)
+No. For every 2026-11-24 market, the mean of the Chainlink ticks over [window_start − 60 s, window_start), the rule the simulator uses,
+matches the official `priceToBeat` within 0.10–0.22 bp median (p90 0.36–0.86 bp) for every coin. Using the last tick instead would be
+off by 2–5 bp. The selection gap is timing: the simulator evaluates on every event and takes the first trigger (`max_entries` 1), while the screen
+looks every 5 s, so they enter at different moments and sometimes on different sides. The simulator is the authority.

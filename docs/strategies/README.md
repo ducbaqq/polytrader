@@ -7,6 +7,22 @@ push` / `pull`); only the journals, this glossary and `docs/runs-index.csv` are.
 
 Status: `idea` / `testing` / `candidate` / `paper` / `live` / `abandoned`.
 
+## Where each strategy stands
+
+Train data so far: 2026-11-24 (10:36–24:00 UTC). Chosen on the first half (windows before 17:15 UTC),
+reported on the second half unchanged. No validation day yet (first: 2026-11-26).
+
+| Strategy | Family | Tier | Status | Result in one line |
+|---|---|---|---|---|
+| [mm-binance-pull](mm-binance-pull.md) | market-making | sim | abandoned (baseline kept) | −$201/day; earns +0.6¢/sh spread, loses −1.6¢/sh to adverse selection |
+| [mm-side-pull](mm-side-pull.md) | market-making | sim | abandoned | H1 +$18, H2 −$116 [−240, 6]; H2 adverse flow isn't preceded by Binance moves |
+| [fair-value-deviation](fair-value-deviation.md) | fair-value | screen | promoted to sim | +6.0 / +5.1¢/sh per half, CIs span 0 |
+| [fv-taker](fv-taker.md) | fair-value | sim | abandoned | H1 +9.6¢/sh, H2 −4.9¢/sh [−13, 4]; margin 3–4¢ positive in both halves (post hoc, re-test on validation days) |
+| [complete-set-arb](complete-set-arb.md) | complete-set-arb | screen | abandoned | the two asks never sum below 1 in 5 s snapshots (break-even ≈ 0.97–0.99 after fees) |
+| [settlement-lock](settlement-lock.md) | endgame | screen | abandoned | once the average locks the outcome, nothing is offered below 0.99 |
+| [binance-momentum](binance-momentum.md) | momentum | screen | abandoned | negative in all four half-variants, CIs span 0; the book has already repriced |
+| [martingale-streak-reversal](martingale-streak-reversal.md) | martingale | screen | abandoned | outcomes are close to independent; escalation only reshapes losses |
+
 ## Family glossary
 
 A strategy's `family` (a class attribute) names the run folder: `data/runs/<family>/<strategy>/...`.
