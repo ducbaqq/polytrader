@@ -11,18 +11,25 @@ from .fees import SQL_MACRO as FEE_MACRO
 from .config import paths
 from .bt.splits import SEALED_SQL_FILTER, record_look, sealed_filter
 
-# One row per market: static fields from discovery (`pm_market_meta`), result from `pm_resolution`.
-# Either side may be missing (market discovered but not yet resolved, or vice versa during the
-# development period), so both are unioned and the latest row of each kind wins.
-MARKETS_SQL = """
+
+def markets_sql(meta_rel: str, res_rel: str) -> str:
+    """One row per market: static fields from discovery (`meta_rel`, rows of `pm_market_meta`), result from
+    `res_rel` (rows of `pm_resolution`). Both relations have columns (recv_ms BIGINT, d JSON). Either side may be
+    missing (market discovered but not yet resolved, or vice versa during the development period), so both are
+    unioned and the latest row of each kind wins. The live runner uses it over in-memory relations
+    (`bt.marketdata_live.info_from_meta`), so live and replay parse Gamma identically."""
+    return _MARKETS_SQL_TEMPLATE.replace("{META}", meta_rel).replace("{RES}", res_rel)
+
+
+_MARKETS_SQL_TEMPLATE = """
 WITH meta AS (
     SELECT d->>'$.event.slug' AS slug, d->>'series' AS series, d->'$.event.markets[0]' AS m, recv_ms
-    FROM read_parquet('{P}/pm_market_meta/*/*.parquet')
+    FROM {META}
     QUALIFY row_number() OVER (PARTITION BY slug ORDER BY recv_ms DESC) = 1
 ), res AS (
     SELECT d->>'slug' AS slug, d->>'outcome' AS outcome, d->'event' AS ev, d->'$.event.markets[0]' AS m,
            recv_ms, coalesce((d->>'backfill')::BOOLEAN, false) AS backfill
-    FROM read_parquet('{P}/pm_resolution/*/*.parquet')
+    FROM {RES}
     QUALIFY row_number() OVER (PARTITION BY slug ORDER BY recv_ms DESC) = 1
 ), j AS (
     SELECT coalesce(meta.slug, res.slug) AS slug, meta.series, coalesce(meta.m, res.m) AS m,
@@ -60,6 +67,9 @@ SELECT
 FROM j
 ORDER BY window_start, slug
 """
+
+# The Parquet instance (`{P}`: the Parquet root, filled in by `build.build_markets`).
+MARKETS_SQL = markets_sql("read_parquet('{P}/pm_market_meta/*/*.parquet')", "read_parquet('{P}/pm_resolution/*/*.parquet')")
 
 MACROS = r"""
 -- 'price:size|price:size' (book / depth columns) -> LIST(STRUCT(price, size)), in recorded order;
