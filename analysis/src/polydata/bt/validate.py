@@ -23,7 +23,9 @@ Checks:
    rules (join behind the recorded level size at arrival; only trades with ts > arrival + 150 ms;
    at our price the trade eats the queue ahead first, its volume capped by the recorded decrease of our
    level over [ts - 150 ms, ts] (sum of the per-ms decreases; a sweep printed as one row at its worst price
-   must not fill us with volume executed at better levels); a trade-through fills up to the trade's size;
+   must not fill us with volume executed at better levels); a trade-through fills what is left of the trade
+   after B, the recorded decrease of every level strictly better than ours over the same window, and the
+   queue still ahead of us;
    nothing at or after the window end or after our cancel; cancel model "behind"). `join-best`
    keeps at most one order per side per market at a time, so each order is re-derived on its own
    (checked: `one_order_per_side`). Compared per (order, trade ts): filled size, fill price (the order's
@@ -410,29 +412,39 @@ FROM _o o JOIN _v_tr t ON t.slug = o.slug AND t.taker_up_side <> o.up_side
  AND ((o.up_side = 'BUY' AND t.up_px <= o.up_px) OR (o.up_side = 'SELL' AND t.up_px >= o.up_px))
 """
 
-# Candidate ms where the level (slug, side, px) of an at-price trade can change inside [ts - echo, ts]:
-# its own change rows and every snapshot of the market.
+# Per match group (slug, side, order px, trade ts, at_px) the levels whose recorded decrease over
+# [ts - echo, ts] bounds it: at our price, our own level; for a trade-through, every recorded level strictly
+# better for the taker than our price (B). Candidate ms: the level's own change rows and every snapshot.
 _CAP_EVENTS_SQL = f"""
-WITH a AS (SELECT DISTINCT slug, up_side AS side, up_px AS px, ts_ms AS trade_ts FROM _m WHERE at_px)
-SELECT a.*, c.ts_ms AS t FROM a JOIN _v_chg c ON c.slug = a.slug AND c.side = a.side AND c.px = a.px
-    AND c.ts_ms BETWEEN a.trade_ts - {TRADE_ECHO_MS} AND a.trade_ts
+WITH a AS (SELECT DISTINCT slug, up_side AS side, up_px AS opx, ts_ms AS trade_ts, at_px FROM _m),
+lv AS (SELECT DISTINCT slug, side, px FROM _v_chg UNION SELECT DISTINCT slug, side, px FROM _v_slv),
+al AS (SELECT a.*, lv.px FROM a JOIN lv ON lv.slug = a.slug AND lv.side = a.side
+       AND CASE WHEN a.at_px THEN lv.px = a.opx WHEN a.side = 'BUY' THEN lv.px > a.opx ELSE lv.px < a.opx END)
+SELECT al.*, c.ts_ms AS t FROM al JOIN _v_chg c ON c.slug = al.slug AND c.side = al.side AND c.px = al.px
+    AND c.ts_ms BETWEEN al.trade_ts - {TRADE_ECHO_MS} AND al.trade_ts
 UNION
-SELECT a.*, s.ts_ms FROM a JOIN _v_snap s ON s.slug = a.slug
-    AND s.ts_ms BETWEEN a.trade_ts - {TRADE_ECHO_MS} AND a.trade_ts
+SELECT al.*, s.ts_ms FROM al JOIN _v_snap s ON s.slug = al.slug
+    AND s.ts_ms BETWEEN al.trade_ts - {TRADE_ECHO_MS} AND al.trade_ts
 """
 
 _FILL_SQL = f"""
-WITH m AS (
+WITH m0 AS (
     -- at our price the usable volume is capped by the recorded decrease of our level in [ts - echo, ts]
-    SELECT _m.slug, _m.order_id, _m.ts_ms, _m.recv_ms, _m.seq, _m.at_px,
-           CASE WHEN _m.at_px THEN least(_m.x, coalesce(d.dec, 0)) ELSE _m.x END AS x
-    FROM _m LEFT JOIN _cap d ON d.slug = _m.slug AND d.side = _m.up_side AND d.px = _m.up_px AND d.trade_ts = _m.ts_ms),
+    SELECT _m.slug, _m.order_id, _m.ts_ms, _m.recv_ms, _m.seq, _m.at_px, _m.x, coalesce(d.dec, 0) AS dec,
+           CASE WHEN _m.at_px THEN least(_m.x, coalesce(d.dec, 0)) ELSE 0 END AS xa
+    FROM _m LEFT JOIN _cap d ON d.slug = _m.slug AND d.side = _m.up_side AND d.opx = _m.up_px
+     AND d.trade_ts = _m.ts_ms AND d.at_px = _m.at_px),
+m AS (
+    -- a trade-through reaches us only after B (better levels' decrease, `dec`) and the queue still ahead of us
+    SELECT m0.*, sum(xa) OVER w AS at_cum,
+           CASE WHEN at_px THEN 0 ELSE greatest(0, x - dec - greatest(0, o.ahead - sum(xa) OVER w)) END AS xt
+    FROM m0 JOIN _o o USING (slug, order_id)
+    WINDOW w AS (PARTITION BY slug, order_id ORDER BY ts_ms, recv_ms, seq ROWS UNBOUNDED PRECEDING)),
 c AS (
-    SELECT *, sum(CASE WHEN at_px THEN x ELSE 0 END) OVER w AS at_cum,
-              sum(CASE WHEN at_px THEN 0 ELSE x END) OVER w AS thr_cum
+    SELECT *, sum(xt) OVER w AS thr_cum
     FROM m WINDOW w AS (PARTITION BY slug, order_id ORDER BY ts_ms, recv_ms, seq ROWS UNBOUNDED PRECEDING)),
 f AS (
-    -- at our price a trade first eats the queue ahead; a trade-through fills up to its size
+    -- at our price a trade first eats the queue ahead; a trade-through fills what is left of it
     SELECT c.*, o.ahead, least(o.size, c.thr_cum + greatest(0, c.at_cum - o.ahead)) AS filled_cum
     FROM c JOIN _o o USING (slug, order_id)),
 g AS (
@@ -446,19 +458,20 @@ FROM g GROUP BY ALL HAVING sum(q) > {SIZE_EPS}
 
 
 def _stage_cap(con) -> None:
-    """`_cap(slug, side, px, trade_ts, dec)`: for every at-price match in `_m`, the recorded decrease of the
-    level over [trade_ts - echo, trade_ts]: the sum over the ms t in it of max(0, size(t - 1) - size(t)),
-    sizes from the reference book (`_size_at`). Only ms with a change of the level or a snapshot can change it."""
+    """`_cap(slug, side, opx, trade_ts, at_px, dec)`: per match group in `_m`, the summed recorded decrease of its
+    levels (see `_CAP_EVENTS_SQL`) over [trade_ts - echo, trade_ts]: per level, the sum over the ms t in it of
+    max(0, size(t - 1) - size(t)), sizes from the reference book (`_size_at`)."""
     ev = con.execute(_CAP_EVENTS_SQL).df()
     if ev.empty:
-        con.execute("CREATE OR REPLACE TEMP TABLE _cap (slug VARCHAR, side VARCHAR, px BIGINT, trade_ts BIGINT, dec DOUBLE)")
+        con.execute("CREATE OR REPLACE TEMP TABLE _cap (slug VARCHAR, side VARCHAR, opx BIGINT, trade_ts BIGINT, "
+                    "at_px BOOLEAN, dec DOUBLE)")
         return
     ev["qid"] = np.arange(len(ev))
     after = _size_at(con, ev)
     before = _size_at(con, ev.assign(qid=ev.qid + len(ev), t=ev.t - 1))
     ev["dec"] = np.clip(before.reindex(ev.qid + len(ev)).to_numpy() - after.reindex(ev.qid).to_numpy(), 0.0, None)
-    cap = ev.groupby(["slug", "side", "px", "trade_ts"], as_index=False).dec.sum()
-    con.register("_cap_df", cap.astype({"px": "int64", "trade_ts": "int64", "dec": float}))
+    cap = ev.groupby(["slug", "side", "opx", "trade_ts", "at_px"], as_index=False).dec.sum()
+    con.register("_cap_df", cap.astype({"opx": "int64", "trade_ts": "int64", "at_px": bool, "dec": float}))
     try:
         con.execute("CREATE OR REPLACE TEMP TABLE _cap AS SELECT * FROM _cap_df")
     finally:
@@ -504,7 +517,8 @@ def check_fill_support(con, res, order_latency_ms: int = 200) -> dict:
         sim = f.groupby(key).agg(sim=("size", "sum"), sim_px_min=("px", "min"), sim_px_max=("px", "max"),
                                  sim_ahead=("queue_ahead_at_fill", "min"))
     else:
-        sim = pd.DataFrame(columns=["sim", "sim_px_min", "sim_px_max", "sim_ahead"])
+        sim = pd.DataFrame(columns=["sim", "sim_px_min", "sim_px_max", "sim_ahead"],
+                           index=pd.MultiIndex.from_tuples([], names=key))
     refs = ref.set_index(key).rename(columns={"size": "ref", "px": "ref_px", "ahead_left": "ref_ahead"})
     j = sim.join(refs, how="outer")
     j[["sim", "ref"]] = j[["sim", "ref"]].fillna(0.0)

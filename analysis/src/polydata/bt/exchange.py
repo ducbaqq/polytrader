@@ -8,10 +8,11 @@ The model is deliberately pessimistic (spec: "Queue and fill model"):
   is at least theirs).
 - **Recorded trades** (taker side T, Up price P, size S) match our resting orders on the other side,
   in price priority for the taker, then arrival order:
-  - at a price strictly better for the taker than P (trade-through): we fill min(remaining, x). Had
-    we been resting, the taker would have traded with us first; a taker smaller than our order would
-    have been filled at our price and never reached P, so we claim no more than the volume it brought
-    (a deliberate pessimistic deviation from "the whole remainder fills");
+  - at a price b strictly better for the taker than P (trade-through): we fill
+    min(remaining, max(0, x - B - queue_ahead)). A sweep is printed as ONE row at its worst price P
+    with the total size x, so before reaching us the taker used B, the recorded decrease (same
+    window and per-ms rule as the at-price cap below) of every level strictly better than b on that
+    side, and the queue ahead of us at b. Never more than the old min(remaining, x);
   - at P: the trade first consumes `queue_ahead`, then fills us. `x`, the trade volume left for
     our later orders, shrinks by every fill of ours (trade-throughs included), never by the
     volume that consumed `queue_ahead` (each order's `queue_ahead` counts other traders only).
@@ -400,18 +401,30 @@ class Exchange:
                         xp -= q
                         self._fill(o, ts, px, q, "maker", ts, 0.0, out)
             elif (px < P) if rest == "SELL" else (px > P):
-                # Trade-through, capped at the trade volume left: had we been resting, the taker would
-                # have traded with us first and a smaller taker would never have reached P (deliberately
-                # pessimistic; the spec's "fills us fully" only holds when the trade is big enough).
+                # Trade-through: the volume left after the better levels (B) and our queue (Q) were used up;
+                # x already excludes our own earlier fills (deliberately pessimistic).
+                better = None  # B: what the taker took at levels strictly better than px, computed when needed
                 for o in list(lv.get(px, ())):
                     if ts <= o.arrival_ms + echo:
                         continue
-                    q = min(o.remaining, x)
+                    if better is None:
+                        better = self._better_decrease(rest, px, ts - echo, ts)
+                    q = min(o.remaining, self._through_volume(x, better, o.queue_ahead))
                     if q > EPS:
                         x -= q
                         self._fill(o, ts, px, q, "maker", ts, 0.0, out)
             else:
                 break  # worse than P for the taker: untouched, and so is everything after
+
+    def _better_decrease(self, side: str, px: int, t0: int, t1: int) -> float:
+        """B: the summed `_level_decrease` of every recorded level of `side` strictly better than px for the taker."""
+        return sum(self._level_decrease(side, p, t0, t1) for p in self.md.prices(side)
+                   if ((p < px) if side == "SELL" else (p > px)))
+
+    @staticmethod
+    def _through_volume(x: float, better: float, ahead: float) -> float:
+        """Trade-through volume that reaches our order: what is left after B and the queue ahead of us."""
+        return max(0.0, x - better - ahead)
 
     def _level_decrease(self, side: str, px: int, t0: int, t1: int) -> float:
         """Sum over the ms t in [t0, t1] of max(0, size at t - 1 - size at t) of level (side, px), ts clock."""

@@ -323,6 +323,10 @@ class MarketData:
         a, b = np.searchsorted(times, [t0, t1], side="right")
         return lv.ts_ms[a:b], lv.recv_ms[a:b], lv.size[a:b]
 
+    def prices(self, up_side: Side) -> list[int]:
+        """Every recorded price of `up_side`, best first (bids descending, asks ascending)."""
+        return self._keys[up_side]
+
     def levels(self) -> list[tuple[str, int]]:
         return list(self._levels)
 

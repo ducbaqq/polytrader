@@ -5,8 +5,8 @@ happened. `gap_table` lists the gaps; `voided_markets` says which market windows
 
 Connection events are data-health information, so `gap_table` always reads the `rec_events` catalog
 of sealed days too (a `--final` replay covers only sealed days, and a ws_close on a sealed day can
-leave the next day's start stale). Each call that reads a sealed day's catalog records one `health`
-look (`splits.record_look`).
+leave the next day's start stale). Reading a sealed day's catalog records a `health` look
+(`splits.record_look`), at most once per (sealed day, process).
 """
 
 from __future__ import annotations
@@ -28,6 +28,8 @@ EVENT_COLS = ["ts_ms", "kind", "source", "detail"]
 # end at 2026-11-24 10:12:39, so REPLAY_START_MS already excludes all of them; add future ones here.
 KNOWN_GAPS: list[tuple[str, str, int, int, str]] = []
 
+_HEALTH_LOOKED: set[str] = set()  # sealed days whose rec_events this process already logged as a `health` look
+
 _PM_STREAMS = ("pm_book", "pm_price_change", "pm_best_bid_ask", "pm_trade")
 
 
@@ -38,7 +40,7 @@ def _empty() -> pd.DataFrame:
 
 def load_rec_events(days: Iterable[date], include_sealed: bool = False) -> pd.DataFrame:
     """Read the daily `rec_events.csv.zst` catalog exports. Missing days are skipped with one warning.
-    Sealed days are skipped unless `include_sealed`; reading one records a `health` look (once per call)."""
+    Sealed days are skipped unless `include_sealed`; reading one records a `health` look (once per day and process)."""
     import duckdb
 
     from .splits import day_kind, record_look
@@ -51,8 +53,10 @@ def load_rec_events(days: Iterable[date], include_sealed: bool = False) -> pd.Da
         (files if f.exists() else missing).append(f.as_posix() if f.exists() else d.isoformat())
         if f.exists() and day_kind(d) == "sealed":
             sealed.append(d.isoformat())
-    if sealed:
-        record_look("health", {"via": "gaps.load_rec_events", "rec_events_days": sealed})
+    new = [d for d in sealed if d not in _HEALTH_LOOKED]
+    if new:
+        record_look("health", {"via": "gaps.load_rec_events", "rec_events_days": new})
+        _HEALTH_LOOKED.update(new)
     if missing:
         log.warning("no rec_events catalog for %s; relying on Binance and Polymarket silences only", ", ".join(missing))
     if not files:
