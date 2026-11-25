@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import duckdb
 import pandas as pd
+import pytest
 
 from polydata.bt import gaps as G
 
 T0 = 1_795_520_000_000
+
+
+@pytest.fixture(autouse=True)
+def _fresh_health_looks(monkeypatch):
+    monkeypatch.setattr(G, "_HEALTH_LOOKED", set())  # one health look per (sealed day, process): reset per test
 
 
 def ev(rows):
@@ -197,3 +203,17 @@ def test_no_look_recorded_without_sealed_catalog(tmp_path, monkeypatch):
     con = bn_con([("BTCUSDT", [d + 1000])])
     assert len(G.gap_table(con, d, d + 86_400_000)) >= 1
     assert _looks(tmp_path) == []
+
+
+def test_health_look_once_per_sealed_day_per_process(tmp_path, monkeypatch):
+    monkeypatch.setenv("POLYDATA_DIR", str(tmp_path))
+    s, s2 = _day_ms("2026-11-25"), _day_ms("2026-11-28")  # both sealed
+    for d in ("2026-11-25", "2026-11-28"):
+        _write_events(tmp_path, d, [(_day_ms(d) + 1000, "ws_close", "polymarket"), (_day_ms(d) + 9000, "ws_open", "polymarket")])
+    con = bn_con([("BTCUSDT", [s + 1000])])
+    G.gap_table(con, s, s + 86_400_000)
+    G.gap_table(con, s, s + 86_400_000)
+    assert len(_looks(tmp_path)) == 1
+    G.gap_table(con, s2, s2 + 86_400_000)  # a new sealed day: one more look, for that day only
+    looks = _looks(tmp_path)
+    assert len(looks) == 2 and looks[1]["detail"]["rec_events_days"] == ["2026-11-28"]

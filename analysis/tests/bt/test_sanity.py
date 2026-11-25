@@ -237,9 +237,9 @@ def test_always_cross_reference_matches():
 def _jb_raw() -> Raw:
     trades = [(T0 + 20_000, "Up", "SELL", 0.48, 60),  # eats 60 of the 100 ahead
               (T0 + 25_000, "Down", "BUY", 0.52, 50),  # = Up SELL 0.48: 40 ahead, then 10 -> our 5
-              (T0 + 30_000, "Up", "BUY", 0.53, 3),  # trade-through of our Up-terms ask 0.52: 3
+              (T0 + 30_000, "Up", "BUY", 0.53, 103),  # through our Up-terms ask 0.52: 100 ahead, then 3
               (T0 + 31_000, "Down", "SELL", 0.47, 40),  # = Up BUY 0.53: through again, the rest 2
-              (T0 + 80_000, "Up", "SELL", 0.46, 2),  # through our new bid (rejoined at 0.48): 2
+              (T0 + 80_000, "Up", "SELL", 0.46, 32),  # through our new bid (rejoined at 0.48 behind 30): 2
               ]
     # each at-price trade is echoed by the level decrease it caused (the at-price cap)
     ch = [(T0 + 19_995, "BUY", 0.48, 40, 0.48, 0.52), (T0 + 22_000, "BUY", 0.48, 60, 0.48, 0.52),
@@ -287,6 +287,33 @@ def test_fill_support_applies_the_at_price_cap(monkeypatch):
     assert (res.fills.trade_ts_ms == T0 + 20_050).any()
     chk = validate.check_fill_support(r.con(), res, order_latency_ms=200)
     assert not chk["passed"] and chk["mismatches"] >= 1, chk
+
+
+def _through_sweep_raw() -> Raw:
+    # Our bid joins 0.48 behind 10. A better 0.49 bid (20) appears; before our cancel arrives a taker SELL sweeps
+    # 0.49, 0.48 and 3 at 0.47, printed as ONE row at 0.47 for 33: only 33 - B (20) - Q (10) = 3 reached us.
+    ch = [(T0 + 20_000, "BUY", 0.49, 20, 0.49, 0.52), (T0 + 20_040, "BUY", 0.49, 0, 0.48, 0.52),
+          (T0 + 20_040, "BUY", 0.48, 0, 0.47, 0.52), (T0 + 20_040, "BUY", 0.47, 97, 0.47, 0.52)]
+    return Raw().market(M1, bids="0.48:10|0.47:100", trades=[(T0 + 20_050, "Up", "SELL", 0.47, 33)], changes=ch)
+
+
+def test_fill_support_applies_the_trade_through_cap(monkeypatch):
+    from polydata.bt.exchange import Exchange
+
+    r = _through_sweep_raw()
+    res = run(r, "join-best")
+    f = res.fills[res.fills.trade_ts_ms == T0 + 20_050]
+    assert list(f["size"]) == [3.0]
+    for raw in (_jb_raw, _through_sweep_raw):
+        r = raw()
+        chk = validate.check_fill_support(r.con(), run(r, "join-best"), order_latency_ms=200)
+        assert chk["passed"], chk
+    # the old rule min(remaining, x) over-fills: the re-derivation must disagree
+    monkeypatch.setattr(Exchange, "_through_volume", staticmethod(lambda x, better, ahead: x))
+    for raw in (_jb_raw, _through_sweep_raw):
+        r = raw()
+        chk = validate.check_fill_support(r.con(), run(r, "join-best"), order_latency_ms=200)
+        assert not chk["passed"] and chk["mismatches"] >= 1, chk
 
 
 def test_fill_support_detects_unsupported_fill():
@@ -442,7 +469,7 @@ def test_run_suite_synthetic(tmp_path, monkeypatch):
     monkeypatch.setenv("POLYDATA_DIR", str(tmp_path))
     r = Raw()
     trades = [(T0 + 20_000, "Up", "SELL", 0.48, 150), (T0 + 25_000, "Down", "BUY", 0.52, 50),
-              (T0 + 30_000, "Up", "BUY", 0.53, 30)]
+              (T0 + 30_000, "Up", "BUY", 0.53, 130)]
     r.market(M1, trades=trades, changes=[(T0 + 5_000, "BUY", 0.48, 90, 0.48, 0.52)])
     r.market(M2, bids="0.40:100", asks="0.45:100", trades=[(M2.window_start_ms + 20_000, "Up", "BUY", 0.45, 100)],
              changes=[(M2.window_start_ms + 5_000, "BUY", 0.40, 90, 0.40, 0.45)])

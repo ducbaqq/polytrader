@@ -167,14 +167,16 @@ Conservative by default: when in doubt, we do not get filled.
 - **Trades on either token** eat the queue at our price (Down trades are mapped to Up terms). Once the
   queue ahead is zero, further volume at our price fills us.
 - **Trade-through, capped.** A trade at a price worse than ours, on the side that rests at our price, fills
-  us, but only up to that trade's size, because a taker smaller than our order would have stopped at our
-  price.
+  us only with what is left of it after B and Q: `max(0, x - B - Q)`, where x is the trade size (minus our own
+  earlier fills from it), B the recorded decrease of every level strictly better than ours over [trade
+  `ts_ms` - 150 ms, trade `ts_ms`] (per-ms, as for the at-price cap) and Q the queue still ahead of us. A sweep
+  is printed as one row at its worst price with the total size, so the taker used up B and Q before it
+  reached us. Never more than the trade's size.
 - **At-price cap.** At our price, the volume that can eat the queue ahead and fill us is also capped by the
   recorded decrease of that level over [trade `ts_ms` - 150 ms, trade `ts_ms`] (the sum over those ms of the
   drops in its size; increases do not offset them). A taker that sweeps several levels is usually printed as
   ONE `pm_trade` row at its worst price with the total size, so without the cap volume executed at better
-  levels would eat our queue at the worst one. Trade-throughs are not capped this way (already capped by the
-  trade's size). Deliberately pessimistic: a trade whose level change was recorded earlier than 150 ms before
+  levels would eat our queue at the worst one. Trade-throughs have their own cap (above). Deliberately pessimistic: a trade whose level change was recorded earlier than 150 ms before
   its `ts_ms` fills nobody at its price.
 - **150 ms trade echo.** A trade's `ts_ms` lands after the level change it caused (median about 21 ms on BTC
   5m, p99 134 ms). Trades within `trade_echo_ms` = 150 of our arrival are never matched against our order, so
@@ -198,7 +200,7 @@ Conservative by default: when in doubt, we do not get filled.
   voided: not run, no P&L, counted in the report. Data before 2026-11-24 10:36 UTC is never replayed. Gaps
   come from `gaps.gap_table()` / `gaps.voided_markets()` (there is no `gaps` SQL view): connection events in the
   daily `rec_events` catalog (sealed days included: they are data-health information, and a reconnect on a
-  sealed day can leave the next day's start stale; each read is a `health` look) plus data silences (Binance
+  sealed day can leave the next day's start stale; each sealed day read is one `health` look per process) plus data silences (Binance
   top of book, Polymarket streams while Data API trades happened).
 - **Ordering.** Same-`recv_ms` events are ordered by stream (Polymarket, Chainlink, Binance), then by `seq`
   (the raw arrival order kept in Parquet), so runs are deterministic.
@@ -346,6 +348,9 @@ It is internal consistency only. It cannot say whether the queue and delay model
   at the worst price (2026-11-24: for isolated BTC 5m trades with a better level cleared just before, only 44%
   of the printed volume shows up as a drop at the printed price, against 94% otherwise). It is pessimistic
   when a level change lags its trade by more than 150 ms, and the same drop can bound two trades in the window.
+- **Trade-through cap.** A trade-through fills us only after the better levels' recorded drops (B) and our
+  queue (Q) are used up. It assumes the printed size is the whole sweep; when a trade printed below us is
+  a separate small taker, we under-fill.
 - **Current-day connection gaps are unknown.** `rec_events` is exported to the catalog once a day, so a run
   on today's data sees only data silences, not reconnects. Re-run once the day's catalog exists.
 - **Singapore receive times.** Every backtest is tied to the Singapore recorder's `recv_ms`. A strategy

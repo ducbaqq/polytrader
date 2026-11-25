@@ -160,9 +160,10 @@ exchange book at arrival time. We join at the back.
   `"proportional"` removes them pro rata. Reports state which model was used.
 
 **Trade-through.** A trade at a price worse than ours, for the side that rests at our price, fills us
-up to the trade's size (after our earlier orders). The book can't trade through us without filling us,
-but a taker smaller than our order would have stopped at our price, so we never claim more than the
-volume the taker brought.
+with `max(0, x - B - Q)` (x = trade size after our earlier orders' fills from it). A sweep is printed as one
+row at its worst price with the total size, so before reaching our price b the taker used up B, the
+recorded decrease of every level strictly better than b over [ts - `trade_echo_ms`, ts] (per-ms states,
+as for the at-price cap), and Q, the queue ahead of us at b. Never more than the trade's size.
 
 **At-price cap.** At our price, the volume that eats "ahead" and fills us is capped by the recorded
 decrease of that level over [trade `ts_ms` - `trade_echo_ms`, trade `ts_ms`] (sum of the per-ms size
@@ -170,7 +171,7 @@ drops; no data after the trade). A taker sweeping several levels is mostly print
 at its worst price with the total size (2026-11-24: ~25.7% of trades coincide with a better level being
 cleared, 7.9% in a control; for isolated trades with a better level cleared only 44% of the printed
 volume is a drop at the printed price, 94% otherwise), so the volume executed at better levels must not
-consume our queue at the worst one. Deliberately pessimistic; trade-throughs keep their own cap (the trade's size).
+consume our queue at the worst one. Deliberately pessimistic; trade-throughs have their own cap (above).
 
 **Trade echo.** A trade's `ts_ms` lands after the level change it caused (BTC 5m: median 21 ms, p95
 40 ms, p99 134 ms). Trades within `trade_echo_ms` (150) after our order's arrival are never matched against it, so the same
@@ -415,8 +416,8 @@ no queue model.
   10 ms difference is far below our 126–200 ms delays.
 - **Merging Up+Down pairs is assumed free and instant**; it's a gasless operation via Polymarket's
   relayer, to be confirmed in the live project.
-- **Trade-throughs are capped at the trade's size, and trades within 150 ms after our arrival are
-  ignored** (both pessimistic; see the queue model).
+- **Trade-throughs fill only `max(0, x - B - Q)`** (what is left of a sweep after the better levels and our
+  queue), **and trades within 150 ms after our arrival are ignored** (both pessimistic; see the queue model).
 - **At-price volume is capped by the recorded level decrease** in the 150 ms up to the trade (sweeps print
   as one row at the worst price; pessimistic; see the queue model).
 - **`--final` keeps simulator, capital and pass settings at their defaults** (it refuses otherwise), and

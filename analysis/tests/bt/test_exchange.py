@@ -104,8 +104,23 @@ def test_at_price_cap_shared_by_own_orders():
     assert [(x.order_id, x.size) for x in f] == [(a.id, 10), (b.id, 2)]
 
 
+def test_trade_through_sweep_fills_only_what_reached_us():
+    # Others bid 20 at 0.50 and 30 at 0.49; our 0.49 bid (20) joins behind those 30. A taker SELL sweeps 0.50,
+    # 0.49 and 15 at 0.48, printed as ONE row at 0.48 for 65. Before reaching us it used B = 20 (better level)
+    # and Q = 30 (our queue): only 65 - 20 - 30 = 15 is left for us.
+    md = market("0.50:20|0.49:30|0.48:100", "0.52:100",
+                changes=[(T0 + 1990, "BUY", 0.50, 0), (T0 + 1990, "BUY", 0.49, 0), (T0 + 1990, "BUY", 0.48, 85)],
+                trades=[(T0 + 2000, "Up", "SELL", 0.48, 65)])
+    ex = Exchange(md, ExchangeConfig())
+    o = order(px=490, size=20)
+    ex.submit(o)
+    f = fills(ex.advance(T0 + 5000))
+    assert [(x.px, x.size) for x in f] == [(490, 15)] and o.status == "open"
+
+
 def test_trade_through_fills_fully():
-    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 25)])
+    # x = 150 covers our queue (100) and our whole order: the old full fill
+    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 150)])
     ex = Exchange(md, ExchangeConfig())
     o = order(px=480, size=20)
     ex.submit(o)
@@ -115,14 +130,14 @@ def test_trade_through_fills_fully():
 
 
 def test_trade_through_capped_by_trade_size():
-    # A 5-share taker SELL at 0.47 would have hit our 0.48 bid first and stopped there: we fill 5, not 20.
-    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 5),
-                                                (T0 + 3000, "Up", "SELL", 0.46, 30)])
+    # A 15-share taker SELL at 0.47 first takes the 10 ahead of us at 0.48, then 5 from us and stops: 5, not 20.
+    md = market("0.48:10", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 15),
+                                               (T0 + 3000, "Up", "SELL", 0.46, 40)])
     ex = Exchange(md, ExchangeConfig())
     o = order(px=480, size=20)
     ex.submit(o)
     f = fills(ex.advance(T0 + 2000))
-    assert [(x.px, x.size) for x in f] == [(480, 5)] and o.status == "open" and o.queue_ahead == 100
+    assert [(x.px, x.size) for x in f] == [(480, 5)] and o.status == "open" and o.queue_ahead == 10
     f = fills(ex.advance(T0 + 5000))
     assert [(x.px, x.size) for x in f] == [(480, 15)] and o.status == "filled"
 
@@ -251,7 +266,7 @@ def test_partial_fill_then_cancel():
 
 
 def test_ordering_equal_ms_pessimistic():
-    md = market("0.48:100", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 10)])
+    md = market("0.48:5", "0.52:100", trades=[(T0 + 2000, "Up", "SELL", 0.47, 15)])
     ex = Exchange(md, ExchangeConfig())
     o = order(px=480, size=10)
     ex.submit(o)
@@ -320,7 +335,7 @@ def test_no_fills_after_window_end():
 
 def test_trade_at_window_end_not_matched():
     end = T0 + 300_000
-    md = market("0.48:100", "0.52:100", trades=[(end - 1, "Up", "SELL", 0.47, 10), (end, "Up", "SELL", 0.40, 100)])
+    md = market("0.48:100", "0.52:100", trades=[(end - 1, "Up", "SELL", 0.47, 120), (end, "Up", "SELL", 0.40, 100)])
     ex = Exchange(md, ExchangeConfig())
     a, b = order(px=480, size=10), order(px=470, size=10)
     ex.submit(a)
