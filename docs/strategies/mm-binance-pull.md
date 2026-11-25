@@ -86,6 +86,46 @@ Written before any run of this round.
 - Each run covers the whole day; the halves are split per market afterwards
   (`window_start_ms` from `markets.parquet`). Second-half numbers are read only for the chosen variants.
 
+### Round 1 results (config only; whole day 2026-11-24 replayed, sim_version 2127ec99eafd)
+Run folders are `data/runs/market-making/mm-binance-pull/<id>` (scratch data dir of the research session).
+"Markout" = spread + adverse (the P&L of a fill marked to the mid 10 s later); the inventory part is
+mostly the coin flip of settlement and dominates P&L at these volumes (first-half block CIs are about
++-$100 wide for every variant). Variants tried in this round: 10 config variants (plus the baseline rerun).
+
+| Variant | Run | First half P&L | 95% CI | Fills | Spread / adverse / inventory, c/share | Markout c/share |
+|---|---|---|---|---|---|---|
+| baseline (defaults) | `2026-11-25T0056-0abdaa` | -$130.78 | [-298, 27] | 1,452 | +0.54 / -1.42 / -0.41 | -0.88 |
+| (a) 15m + 1h only | `2026-11-25T0114-263382` | -$39.70 | [-118, 40] | 302 | +0.82 / -2.34 / -0.27 | -1.52 |
+| (a) 1h only | `2026-11-25T0108-a60bc0` | +$6.85 | [-9, 19] | 49 | +0.88 / -1.61 / +2.43 | -0.73 |
+| (a) no BTC | `2026-11-25T0124-13d704` | -$47.89 | [-169, 70] | 526 | +0.75 / -1.89 / -0.23 | -1.14 |
+| (b) `half_spread` 0.02 | `2026-11-25T0131-784837` | -$18.22 | [-148, 110] | 626 | +0.81 / -2.04 / +0.81 | -1.23 |
+| (b) `half_spread` 0.03 | `2026-11-25T0147-f07337` | -$1.97 | [-87, 78] | 346 | +1.24 / -2.29 / +0.97 | -1.05 |
+| (c) `center` fair | `2026-11-25T0213-d82d46` | -$5.70 | [-475, 460] | 2,323 | +0.10 / +0.58 / -0.72 | +0.68 |
+| (d) `pull_k` 1.0 | `2026-11-25T0226-869942` | -$13.74 | [-122, 91] | 551 | +0.53 / -0.39 / -0.50 | **+0.14** |
+| (d) `cooldown_ms` 5000 | `2026-11-25T0258-8d2c16` | +$19.02 | [-130, 155] | 1,002 | +0.55 / -1.16 / +0.88 | -0.61 |
+| (e) `max_book_spread` 0.02 | `2026-11-25T0319-0e4644` | -$92.43 | [-219, 18] | 1,180 | +0.47 / -1.51 / -0.07 | -1.04 |
+| (e) `t_min_s` 150 (5m: first half of the window only) | `2026-11-25T0331-cd5d80` | -$119.99 | [-260, 6] | 986 | +0.62 / -1.19 / -1.16 | -0.57 |
+
+Second half (>= 17:15 UTC), unchanged, for the variant carried forward and the baseline:
+
+| Variant | Second half P&L | 95% CI | Fills | Spread / adverse / inventory, c/share | Markout |
+|---|---|---|---|---|---|
+| baseline | -$93.46 | [-230, 45] | 1,562 | +0.64 / -1.73 / +0.23 | -1.09 |
+| `pull_k` 1.0 | -$105.56 | [-235, 36] | 890 | +0.79 / -1.55 / -0.88 | -0.76 |
+
+Reading:
+- Timeframe/coin restrictions just select subsets of the baseline's per-market results (the strategy is per
+  market); they need no run. 1h is the only positive slice but has 49 fills in 6.5 h.
+- Wider spreads raise spread earned per fill but adverse grows with it: we are filled only when the price
+  runs through us. Markout stays about -1 c.
+- `center: fair` turns the market maker into a directional trader: markout positive but no spread and a
+  huge inventory variance (CI +-$470). Not a market maker any more; the calibration study says the model
+  does not beat the mid.
+- A stricter symmetric pull (`pull_k` 1) is the only config that brought the first-half markout to about
+  zero; it did not hold in the second half (-0.76 c).
+- Tight-books-only and early-window-only did not help.
+- Round 2 (one-sided pull) is in [mm-side-pull](mm-side-pull.md).
+
 ## Lessons
 - **Pulling works on the flow it targets.** Against the same strategy with pulls off, it cuts the
   fills that follow a Binance move from 13% to 2.7%, adverse selection from -2.32 to -1.87 cents
@@ -100,5 +140,5 @@ Written before any run of this round.
   pulls). Fine in the simulator; the live runner will need a rate budget.
 
 ## Next
-More train days first. Then sweep `half_spread`, `k`, `pull_window_ms` and
-`cooldown_ms` on the validation days.
+Round 1 and 2 (2026-11-25) found no config or one-sided pull that survives the second half of the one train
+day. See [mm-side-pull](mm-side-pull.md#next) for what to test next. More train days first.
