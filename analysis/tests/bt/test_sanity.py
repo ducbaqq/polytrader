@@ -333,7 +333,7 @@ def test_fill_support_detects_fills_at_the_trade_price(monkeypatch):
     on_trade, fill = Exchange._on_trade, Exchange._fill
 
     def at_trade_px(self, i, out):
-        self._trade_px = int(self._tpx[i])
+        self._trade_px = int(self.md.trades.up_px[i])
         on_trade(self, i, out)
 
     def fill_at(self, o, ts, up_px, q, liq, trade_ts, fee, out):

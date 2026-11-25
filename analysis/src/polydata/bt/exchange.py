@@ -131,10 +131,7 @@ class Exchange:
     def __init__(self, md: MarketData, cfg: ExchangeConfig = ExchangeConfig()):
         if cfg.cancel_model not in ("behind", "proportional"):
             raise ValueError(f"unknown cancel_model {cfg.cancel_model!r}")
-        self.md, self.cfg = md, cfg
-        tr = md.trades
-        self._ts, self._tside, self._tpx, self._tsize = tr.ts_ms, tr.up_side, tr.up_px, tr.size
-        self._n = len(self._ts)
+        self.md, self.cfg = md, cfg  # md.trades is read at each call: a growing MarketData may append trades
         self._cur = 0  # next recorded trade (ts order)
         self._now = -(2**62)  # everything <= _now is processed
         self.orders: dict[int, Order] = {}
@@ -171,7 +168,8 @@ class Exchange:
     def advance(self, t_ms: int) -> list[ExEvent]:
         """Process recorded trades, cancel arrivals and order arrivals with time <= t_ms."""
         out: list[ExEvent] = []
-        ts, n = self._ts, self._n
+        tr = self.md.trades
+        ts, n = tr.ts_ms, len(tr.ts_ms)
         while True:
             ta = self._arrivals[0][0] if self._arrivals else _INF
             tc = self._cancels[0][0] if self._cancels else _INF
@@ -216,8 +214,9 @@ class Exchange:
         window end. The engine skips `advance` calls before it."""
         t = min(self._arrivals[0][0] if self._arrivals else _INF, self._cancels[0][0] if self._cancels else _INF)
         if self._n_open:
-            if self._cur < self._n:
-                t = min(t, int(self._ts[self._cur]))
+            ts = self.md.trades.ts_ms
+            if self._cur < len(ts):
+                t = min(t, int(ts[self._cur]))
             if not self._expired:
                 t = min(t, self._end)
         return t
@@ -375,11 +374,12 @@ class Exchange:
 
     # ------------------------------------------------------------------------------------ trades
     def _on_trade(self, i: int, out: list[ExEvent]) -> None:
-        rest: Side = "SELL" if self._tside[i] == 0 else "BUY"  # a taker BUY (0) hits resting SELLs
+        tr = self.md.trades
+        rest: Side = "SELL" if tr.up_side[i] == 0 else "BUY"  # a taker BUY (0) hits resting SELLs
         lv = self._book[rest]
         if not lv:
             return
-        ts, P, x = int(self._ts[i]), int(self._tpx[i]), float(self._tsize[i])
+        ts, P, x = int(tr.ts_ms[i]), int(tr.up_px[i]), float(tr.size[i])
         if ts >= self._end:  # unreachable (orders expire first); never match after the window
             return
         echo = self.cfg.trade_echo_ms
@@ -459,12 +459,13 @@ class Exchange:
     def _explained(self, side: str, px: int, tc: int, dec: float, used: dict[int, float]) -> float:
         """Recorded trade volume consuming this level within [tc, tc + trade_explain_ms], not yet used."""
         taker = 1 if side == "BUY" else 0  # bids are consumed by taker SELLs
-        a = int(np.searchsorted(self._ts, tc, side="left"))
-        b = int(np.searchsorted(self._ts, tc + self.cfg.trade_explain_ms, side="right"))
+        tr = self.md.trades
+        a = int(np.searchsorted(tr.ts_ms, tc, side="left"))
+        b = int(np.searchsorted(tr.ts_ms, tc + self.cfg.trade_explain_ms, side="right"))
         got = 0.0
         for j in range(a, b):
-            if self._tside[j] == taker and self._tpx[j] == px:
-                avail = float(self._tsize[j]) - used.get(j, 0.0)
+            if tr.up_side[j] == taker and tr.up_px[j] == px:
+                avail = float(tr.size[j]) - used.get(j, 0.0)
                 if avail > EPS:
                     take = min(avail, dec - got)
                     used[j] = used.get(j, 0.0) + take

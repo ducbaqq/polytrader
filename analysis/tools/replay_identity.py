@@ -73,7 +73,7 @@ def fingerprint(res, cfg) -> dict[str, bytes]:
     hashes: dict[str, str] = {}
     for name in FRAMES:
         df = getattr(res, name, None)
-        if df is None:
+        if df is None or (name == "decisions" and df.empty):  # untraced runs have no decisions
             continue
         hashes[name] = _frame_hash(df)
     hashes["log"] = _sha(json.dumps(list(res.log)).encode())
