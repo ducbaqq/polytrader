@@ -22,7 +22,7 @@ Count: 2 (the defaults before and after the pre-window gate). The `pull_k=1e6` a
 | 1f2544856f6c | `quote_before_start: false` (new default): no quotes before `window_start_ms`; `t_max_s` still counts from the end | before the start the strike is unknown, so the Binance link does not hold (review ruling, Task 9) |
 
 ## Results
-All on train data only: 2026-11-24 10:36-17:50 UTC (~7.2 h, one train day), sim_version a0f42186e4cc.
+All on train data only: 2026-11-24 10:36-17:50 UTC (~7.2 h, one train day), sim_version a0f42186e4cc unless noted.
 Attribution per share is over settled fills (spread / adverse / inventory, metrics.attribution).
 "After move" = share of fills with a > 2 sigma Binance move in the second before the fill.
 
@@ -40,6 +40,18 @@ still one train day), so the gated defaults were run next to the ungated variant
 |---|---|---|---|---|---|---|---|
 | `data/runs/market-making/mm-binance-pull/2026-11-24T2252-342179` | 8 coins x 3 tf, 10:36-21:50 | train | -$427.91 | 7,959 (54.7k) | +371 / -1,030 / +231 | 2.6% | -396 / -61 / +29 |
 | `data/runs/market-making/mm-binance-pull/2026-11-24T2258-3c9ae4` | same, `quote_before_start=true` | train | -$457.28 | 8,526 | +403 / -1,145 / +285 | 2.7% | -425 / -62 / +29 |
+
+**After the at-price volume cap (sim_version a3cf78718e4d, final review fix).** A recorded trade now fills or
+advances our queue at its own price only up to the level's recorded drop in the 150 ms before it (sweeps are
+printed as one row at the worst price). Same strategy version and range as `342179`:
+
+| Run | Scope | Kind | P&L | Fills (shares) | Spread / adverse / inventory, $ | After move | By timeframe 5m / 15m / 1h |
+|---|---|---|---|---|---|---|---|
+| `data/runs/market-making/mm-binance-pull/2026-11-25T0010-83d538` | 8 coins x 3 tf, 10:36-21:50 | train | -$448.22 | 7,739 (53.3k) | +353 / -1,037 / +236 | 2.5% | -405 / -70 / +27 |
+
+The cap removes 2.8% of fills (2.5% of shares), mostly cheap ones: spread earned drops by $18 while adverse
+selection is unchanged, so the loss grows by $20. The earlier numbers were slightly optimistic; the conclusion
+(5m loses, 15m/1h about flat) does not change.
 
 On the markets ending by 17:45 (the first runs' range): gated -$322 vs ungated -$341 (the first run had
 -$351 there; a few more markets are unvoided in the refreshed data). The gate saves ~$20-30 and ~7% of
