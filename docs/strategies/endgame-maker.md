@@ -89,3 +89,8 @@ Variants tried: 6. Not a candidate for the final run.
 ## Next
 Re-run V2 unchanged on validation day 2026-11-26 and later; the test is whether H2-like +3-4c per share repeats
 with a CI above 0. A larger size or the 15m market would only add fills, not edge (V6 showed no gain).
+
+## Controller note (2026-11-25)
+The hypothesis came from the calibration study, which used the same recorded data (including 2026-11-24). So the second half here
+is not independent of how the idea was found: it is a check that the simulated execution keeps the edge, not out-of-sample evidence
+for the edge itself. The first real test is validation day 2026-11-26, with V2 run unchanged (strategy version as merged).
