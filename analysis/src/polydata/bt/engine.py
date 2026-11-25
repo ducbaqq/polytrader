@@ -27,7 +27,7 @@ never touched) and it isn't voided (`gaps.voided_markets`: data gaps, or no outc
 **Markets.** A market opens (`on_market_open`; orders accepted from then on) once its first
 `pm_book` snapshot inside the replay range has been received: before that its book is untrusted.
 Markets are subscribed ~2 windows before they start and are tradable then. Its `price_to_beat`
-is hidden until the strategy could know it (see `ReplayDriver._schedule_ptb`). At `window_end_ms` the exchange is
+is hidden until the strategy could know it (see `Core.scan_ptb`). At `window_end_ms` the exchange is
 closed (resting orders expire, orders in flight are cancelled as "never arrived"), then
 `on_market_close`; the market's data is freed. Settlement happens once the resolution was received
 and every report is in; the payout is credited `redeem_delay_s` after the resolution.
@@ -228,8 +228,8 @@ class ReplayDriver:
     def _segment(self, con, s: int, e: int) -> None:
         t0 = time.perf_counter()
         self._load_bn(con, s, e)
+        self.core.mark_hour(s)  # after the chunk loads, before this hour's Chainlink ticks (scan_ptb)
         cl = self._load_cl(con, s, e)
-        self._schedule_ptb(s, e)
         recv, kind, mi, idx = [], [], [], []
 
         def add(r, k, m, i):
@@ -279,26 +279,6 @@ class ReplayDriver:
             self.core.dispatch(R_[o].tolist(), K_[o].tolist(), M_[o].tolist(), I_[o].tolist(), bn_lists, cl_lists)
         self.core._drain(e)
         self.core.stats["segments"] += 1
-
-    def _schedule_ptb(self, s: int, e: int) -> None:
-        """The strategy's price_to_beat is the mean of the received Chainlink ticks with ts in
-        [window_start - 60 s, window_start) (the settlement rule, docs/RECORDER.md), revealed when the
-        first tick with ts >= window_start is received. It stays None when no tick fell in that span
-        or the span starts before the replay range (the live runner computes it the same way)."""
-        for m in self.core.loaded:
-            ws = m.info.window_start_ms
-            if m.ptb_sched or ws >= e:
-                continue
-            c = self.core.cl.get(m.info.coin)
-            hit = np.flatnonzero(c[1] >= ws) if c is not None else []
-            if not len(hit):
-                continue  # not revealed yet: look again next hour
-            m.ptb_sched = True
-            r = int(c[0][hit[0]])
-            sel = (c[1] >= ws - 60_000) & (c[1] < ws) & (c[0] <= r)
-            if ws - 60_000 < m.rs or not sel.any():
-                continue
-            self.core.push(max(r, s), P_TIMER, ("ptb", m, float(c[2][sel].mean())))
 
     # ------------------------------------------------------------------------------- run
     def run(self, con) -> CoinResult:

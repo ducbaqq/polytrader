@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def test_engine_public_api_unchanged():
     from polydata.bt import core, engine
@@ -256,3 +258,244 @@ def test_dispatch_admit_calls_no_strategy():
     c.dispatch([M1.window_start_ms - 100_000], [K_ADMIT], [mi], [-1], [], [])
     assert c.loaded == [c.mkts[mi]] and c.ctx.now == M1.window_start_ms - 100_000 and s.events == []
 
+
+# ------------------------------------------------------------------------------------------ ordering rules
+
+HOUR = 3_600_000
+
+
+def _probe_cls():
+    from polydata.bt.strategy import Strategy
+
+    class TimerProbe(Strategy):
+        """Two timers at the same ms: one set before the hour of `at` was marked, one after (at the open)."""
+        name = "timer-probe"
+        family = "test"
+
+        def __init__(self, at, params=None):
+            super().__init__(params)
+            self.at, self.obs = at, []
+
+        def on_start(self, ctx):
+            ctx.set_timer("before", self.at - ctx.now)
+
+        def on_market_open(self, ctx, market):
+            ctx.set_timer("after", self.at - ctx.now)
+
+        def on_timer(self, ctx, name):
+            ms = ctx.markets()
+            self.obs.append((ctx.now, name, [m.price_to_beat for m in ms],
+                             [ctx.fair_value(m.slug) is not None for m in ms]))
+
+    return TimerProbe
+
+
+def test_ptb_key_matches_replay_push():
+    from test_engine import M1, NO_EVENTS, T0, cfg, loader_for, make_con, market_one
+
+    from polydata.bt import engine
+    from polydata.bt.core import K_OPEN, Core
+
+    at = T0 + 2_000  # the reveal ms: the tick with ts T0 + 0.5 s is received at T0 + 2 s (make_con)
+    Probe = _probe_cls()
+
+    def con():
+        return make_con([M1], T0 - 1_200_000, T0 + 500_000)
+
+    rep = Probe(at)
+    engine.run_coin(cfg(), "btc", con, loader=loader_for({M1.slug: market_one()}), strategy=rep, rec_events=NO_EVENTS)
+    assert [o[:2] for o in rep.obs] == [(at, "before"), (at, "after")]
+    assert rep.obs[0][2:] == ([None], [False]) and rep.obs[1][2][0] is not None and rep.obs[1][3] == [True]
+
+    # By hand, as the live driver would: the market is admitted after the hour is marked, and the revealing tick
+    # is released (scan_ptb) only after the "after" timer was set. The key still puts the reveal between them.
+    live = Probe(at)
+    c = Core(cfg(), ["btc"], {"btc": 1000.0}, live)
+    d = engine.ReplayDriver(c, None, NO_EVENTS)
+    h = T0 // HOUR * HOUR
+    rs = h - HOUR
+    k = con()
+    c.reset_range()
+    c.start(rs)
+    c.mark_hour(rs)
+    d._load_bn(k, rs, h)
+    d._load_cl(k, rs, h)
+    c._drain(h)
+    d._load_bn(k, h, h + HOUR)
+    c.mark_hour(h)
+    md = market_one()
+    mi = c.stage(M1, md, rs, h)
+    c.admit(mi)
+    c.dispatch([int(md.snaps_recv[0])], [K_OPEN], [mi], [-1], [], [])
+    assert not [e for e in c.heap if e[4][0] == "ptb"]
+    d._load_cl(k, h, h + HOUR)
+    ptb = [e for e in c.heap if e[4][0] == "ptb"]
+    assert len(ptb) == 1 and ptb[0][:4] == (at, 2, c.hour_seq[h] + 0.5, mi)
+    c._drain(T0 + 500_000)  # (finish would stop timers)
+    assert live.obs == rep.obs
+
+
+def test_ptb_deferred_until_hour_marked():
+    from test_engine import M1, T0, market_one, mdata, minfo
+
+    from polydata.bt.core import P_TIMER
+
+    c = _core()
+    h = T0 // HOUR * HOUR
+    c.mark_hour(h)
+    m = c.mkts[c.stage(M1, market_one(), h, h)]
+    c.schedule_ptb(m, h + HOUR + 5, 60000.0)  # revealed in the next hour, not marked yet
+    assert not c.heap
+    m2 = c.mkts[c.stage(minfo(T0 + 300_000), mdata(minfo(T0 + 300_000)), h, h)]
+    c.schedule_ptb(m2, T0 + 300_500, 61000.0)  # its hour is marked: pushed now
+    assert c.heap == [(T0 + 300_500, P_TIMER, c.hour_seq[h] + 0.5, m2.mi, ("ptb", m2, 61000.0))]
+    c.push(h + HOUR + 5, P_TIMER, ("timer", "x", 1))  # pushed before the mark: ahead of the reveal
+    c.mark_hour(h + HOUR)
+    e = [x for x in c.heap if x[4][0] == "ptb" and x[4][1] is m]
+    assert e == [(h + HOUR + 5, P_TIMER, c.hour_seq[h + HOUR] + 0.5, m.mi, ("ptb", m, 60000.0))]
+    assert not c._ptb_wait
+    c.push(h + HOUR + 5, P_TIMER, ("timer", "y", 1))  # pushed after the mark: behind it
+    c._drain(h + HOUR + 6)
+    assert m.pub.price_to_beat == 60000.0 and m2.pub.price_to_beat == 61000.0
+
+
+def test_ptb_reveal_time_respects_load_ms():
+    from test_engine import M1, T0, market_one
+
+    c = _core()
+    h = T0 // HOUR * HOUR
+    c.mark_hour(h)
+    m = c.mkts[c.stage(M1, market_one(), h, T0 + 10_000)]  # admitted after its window start and its reveal tick
+    c.schedule_ptb(m, T0 + 2_000, 60000.0)
+    assert [x[:4] for x in c.heap] == [(T0 + 10_000, 2, c.hour_seq[h] + 0.5, m.mi)]
+
+
+def _unresolved_markets(c):
+    from test_engine import T0, mdata, minfo
+
+    infos = [minfo(T0 + 600_000, outcome=None), minfo(T0 + 300_000, outcome=None), minfo(T0, "15m", outcome=None)]
+    for i in infos:
+        c.admit(c.stage(i, mdata(i), T0 - HOUR, T0 - HOUR))
+    return infos
+
+
+def test_settle_order_by_window_end_then_load():
+    from test_engine import T0
+
+    c = _core(defer_settle=True)
+    a, b, cc = _unresolved_markets(c)  # window ends T0 + 900 s, T0 + 600 s, T0 + 900 s
+    assert a.window_end_ms == cc.window_end_ms > b.window_end_ms
+    c.start(T0 - HOUR)
+    c._drain(T0 + 1_000_000)
+    assert all(m.closed for m in c.mkts) and not [e for e in c.heap if e[4][0] == "settle"]
+    seen, pf_seen = [], []
+    settle, pf_settle = c._settle, c.pf.settle
+
+    def spy(m, t):
+        seen.append((m.info.slug, t))
+        settle(m, t)
+
+    def pf_spy(slug, outcome, t):
+        pf_seen.append(slug)
+        return pf_settle(slug, outcome, t)
+
+    c._settle, c.pf.settle = spy, pf_spy
+    res = T0 + 2_000_000
+    for i in (cc, b, a):  # reverse load order, all received at the same ms
+        c.set_resolution(i.slug, "Up", res)
+    c.finish(T0 + 2_100_000)
+    assert seen == [(b.slug, res), (a.slug, res), (cc.slug, res)] and pf_seen == [b.slug, a.slug, cc.slug]
+    for i in (a, b, cc):
+        row = c.market_rows[i.slug]
+        assert row["outcome"] == "Up" and not row["voided"] and row["settle_ms"] == res + 60_000 and row["pnl"] == 0.0
+
+
+def _taker_cls():
+    from polydata.bt.strategy import Strategy
+
+    class Taker(Strategy):
+        name = "taker"
+        family = "test"
+
+        def on_market_open(self, ctx, market):
+            ctx.take(market.slug, "Up", "BUY", 5, 0.99)
+
+    return Taker
+
+
+@pytest.mark.parametrize("when,dt,outcome", [("before", 10, "Up"), ("before", 60_000, "Down"),
+                                             ("after", 10, "Down"), ("after", 60_000, "Up")])
+def test_set_resolution_before_and_after_close(when, dt, outcome):
+    import math
+
+    from test_engine import T0, mdata, minfo
+
+    from polydata.bt.core import K_OPEN
+
+    c = _core(_taker_cls()(), defer_settle=True)
+    info = minfo(T0, outcome=None)
+    md = mdata(info)
+    mi = c.stage(info, md, T0 - HOUR, T0 - HOUR)
+    c.admit(mi)
+    c.start(T0 - HOUR)
+    c.dispatch([int(md.snaps_recv[0])], [K_OPEN], [mi], [-1], [], [])
+    end, res = info.window_end_ms, info.window_end_ms + dt
+    seen = []
+    settle = c._settle
+    c._settle = lambda m, t: (seen.append(t), settle(m, t))
+    if when == "before":
+        c._drain(end - 1)
+        c.set_resolution(info.slug, outcome, res)
+        assert c.mkts[mi].resolved and not c.mkts[mi].closed
+    else:
+        c._drain(end + 1)
+        assert c.mkts[mi].closed and not [e for e in c.heap if e[4][0] == "settle"]
+        assert len(c.fill_rows) == 1 and math.isnan(c.fill_rows[0][16])  # outcome unknown at the close
+        c.set_resolution(info.slug, outcome, res)
+    c.finish(end + 200_000)
+    assert seen == [max(res, end + 126)]
+    f = c.result().fills
+    assert len(f) == 1 and f["settle_value"].iloc[0] == (1.0 if outcome == "Up" else 0.0)
+    row = c.market_rows[info.slug]
+    assert row["outcome"] == outcome and not row["voided"] and row["settle_ms"] == res + 60_000
+    assert row["pnl"] == pytest.approx((5.0 if outcome == "Up" else 0.0) - f["px"].iloc[0] * 5 - f["fee"].iloc[0])
+
+
+def test_finish_unresolved_voids():
+    import math
+
+    from test_engine import T0
+
+    c = _core(defer_settle=True)
+    a, b, cc = _unresolved_markets(c)
+    c.start(T0 - HOUR)
+    c._drain(b.window_end_ms + 1)  # b is closed; a and cc close during the final drain
+    c.set_resolution(a.slug, "Down", T0 + 950_000)
+    seen = []
+    settle = c._settle
+    c._settle = lambda m, t: (seen.append((m.info.slug, t)), settle(m, t))
+    c.finish_unresolved()
+    c.finish(T0 + 2_000_000)
+    assert seen == [(b.slug, b.window_end_ms + 126), (cc.slug, cc.window_end_ms + 126), (a.slug, T0 + 950_000)]
+    for i in (b, cc):
+        row = c.market_rows[i.slug]
+        assert row["voided"] is True and row["reason"] == "no outcome at settlement" and math.isnan(row["pnl"])
+    assert c.market_rows[a.slug]["voided"] is False
+
+
+def test_on_trades_appended_lowers_next_ex():
+    from test_engine import M1, market_one
+
+    c = _core()
+    mi = c.stage(M1, market_one(), 0, 0)
+    c.on_trades_appended(mi)  # not live: nothing to do
+    assert c.next_ex == float("inf")
+
+    class Ex:
+        def next_event_ms(self):
+            return 123
+
+    c.mkts[mi].ex = Ex()
+    c.live[mi] = c.mkts[mi]
+    c.on_trades_appended(mi)
+    assert c.next_ex == 123

@@ -36,6 +36,7 @@ K_ADMIT, K_OPEN, K_TOP, K_TRADE, K_CL, K_BN = 0, 1, 2, 3, 4, 5
 _RANK = np.array([0, 0, 0, 0, 1, 2], np.int8)  # stream rank: Polymarket 0, Chainlink 1, Binance 2
 # Internal events at an equal ms
 P_REPORT, P_CLOSE, P_TIMER, P_SETTLE, P_REDEEM, P_EQUITY = range(6)
+SETTLE_KEY_SHIFT = 2**20  # settle heap key: window_end_ms * 2**20 + load index
 
 ORDER_COLS = ["ms", "report_ms", "order_id", "slug", "event", "token", "side", "kind", "post_only", "px", "size",
               "reason", "queue_ahead"]
@@ -45,6 +46,7 @@ FILL_COLS = ["slug", "coin", "order_id", "ts_ms", "report_ms", "token", "side", 
 # mid_before: token-terms mid at ts_ms - 200 on the exchange clock. The recorded level change that our fill's trade
 # caused lands up to ~150 ms before the trade's ts, so mid_at_fill is already the post-trade mid. Post-hoc, metrics only.
 MID_BEFORE_MS = 200
+_TOKEN, _SETTLE_VALUE = FILL_COLS.index("token"), FILL_COLS.index("settle_value")
 # cash = total unlocked cash, realised profits included (not capped at the budget like ctx.cash)
 EQUITY_COLS = ["ms", "cash", "locked", "pending", "mtm", "equity"]
 MARKET_COLS = ["slug", "coin", "timeframe", "window_start_ms", "window_end_ms", "voided", "reason", "pnl",
@@ -178,22 +180,25 @@ class _Grid:
 
 class _Mkt:
     __slots__ = ("info", "pub", "mi", "md", "ex", "rs", "load_ms", "resolved", "open_ms", "opened", "closed",
-                 "last_mid", "raw_fills", "settle_ms", "ptb_sched")
+                 "close_ms", "last_mid", "raw_fills", "settle_ms", "settle_pushed", "fill_idx", "ptb_sched")
 
     def __init__(self, info: MarketInfo, mi: int, md: MarketData, ex: Exchange, rs: int, load_ms: int):
         self.info = info
         self.load_ms = load_ms  # when the driver staged it (the load index `mi` is its position in Core.mkts)
         self.resolved = info.outcome is not None
         # What the strategy may see: no outcome, and price_to_beat only once computed from received
-        # Chainlink ticks (see engine.ReplayDriver._schedule_ptb).
+        # Chainlink ticks (see Core.scan_ptb).
         self.pub = replace(info, outcome=None, resolution_recv_ms=None, price_to_beat=None)
         self.ptb_sched = False
         self.mi, self.md, self.ex, self.rs = mi, md, ex, rs
         self.open_ms: int | None = None
         self.opened = self.closed = False
+        self.close_ms: int | None = None
         self.last_mid = math.nan
         self.raw_fills: list[tuple] = []
         self.settle_ms: int | None = None
+        self.settle_pushed = False
+        self.fill_idx: list[int] = []  # fill rows annotated before the outcome was known (settle_value NaN)
 
     def reveal_ptb(self, value: float) -> None:
         self.pub = replace(self.pub, price_to_beat=value)
@@ -278,8 +283,12 @@ def _levels(md: MarketData, t: int, depth: int):
 
 class Core:
     def __init__(self, cfg: RunConfig, coins: list[str], budgets: dict[str, float], strategy: Strategy, *,
-                 trace: bool = False):
+                 trace: bool = False, defer_settle: bool = False):
         self.cfg, self.coins, self.strategy = cfg, list(coins), strategy
+        # False (replay): every outcome is known at load, the settle is pushed at the close. True (live and session
+        # replay): only once the market is resolved (set_resolution), or voided by finish_unresolved.
+        self.defer_settle = defer_settle
+        self._void_unresolved = False
         self.R = int(cfg.fill_report_latency_ms)
         self.lat, self.jitter = int(cfg.order_latency_ms), int(cfg.latency_jitter_ms)
         self.rng = np.random.default_rng([int(cfg.seed), zlib.crc32(",".join(self.coins).encode())])
@@ -288,6 +297,8 @@ class Core:
         self.ctx = SimCtx(self)
         self.heap: list[tuple] = []
         self._seq = 0
+        self.hour_seq: dict[int, int] = {}  # strategy-clock hour (and range start) -> _seq when it was marked
+        self._ptb_wait: dict[int, list[tuple]] = {}  # unmarked hour -> reveals (m, r, value) waiting for it
         self.next_ex = INF  # lower bound on the next exchange event over the live markets
         self.live: dict[int, _Mkt] = {}  # markets whose exchange has something pending
         self.mkts: list[_Mkt] = []  # by mi
@@ -325,7 +336,11 @@ class Core:
 
     # ------------------------------------------------------------------------------- scheduling
     # Heap entries are (t, prio, k, tie, payload). An ordinary event has k = push sequence and tie = 0, so events at
-    # an equal (t, prio) come in push order.
+    # an equal (t, prio) come in push order. Two kinds get a key that does not depend on when they are pushed (the
+    # live driver pushes them at other moments than the replay), chosen to equal the replay's push order:
+    # - ptb reveal: k = hour_seq[s*] + 0.5, tie = load index (`_push_ptb`);
+    # - settle: k = window_end_ms * 2**20 + load index, tie = 0 (`_push_settle`): the replay pushes settles at the
+    #   close, and closes run in (window_end_ms, load order).
     def push(self, t: int, prio: int, payload: tuple) -> None:
         self._seq += 1
         heapq.heappush(self.heap, (int(t), prio, self._seq, 0, payload))
@@ -562,14 +577,28 @@ class Core:
             self.strategy.on_market_close(self.ctx, m.pub)
         self._annotate(m)
         m.md = m.ex = None  # free the market data
-        res = m.info.resolution_recv_ms
-        self.push(max(res if res is not None else t, t + self.R), P_SETTLE, ("settle", m))
+        m.close_ms = t
+        if not self.defer_settle or m.resolved or self._void_unresolved:
+            self._push_settle(m)
+
+    def _push_settle(self, m: _Mkt) -> None:
+        """Settle once the resolution was received and every report is in: max(resolution, close + R)."""
+        t, res = m.close_ms, m.info.resolution_recv_ms
+        m.settle_pushed = True
+        heapq.heappush(self.heap, (int(max(res if res is not None else t, t + self.R)), P_SETTLE,
+                                   m.info.window_end_ms * SETTLE_KEY_SHIFT + m.mi, 0, ("settle", m)))
 
     def _settle(self, m: _Mkt, t: int) -> None:
         info, row = m.info, self.market_rows[m.info.slug]
         if info.outcome not in ("Up", "Down"):  # cannot happen for a replayed market; never settle at 0
             row.update(voided=True, reason="no outcome at settlement", pnl=math.nan)
             return
+        if m.fill_idx:  # fills annotated while the outcome was unknown
+            rows = self.fill_rows
+            for i in m.fill_idx:
+                r = rows[i]
+                rows[i] = r[:_SETTLE_VALUE] + (float(info.outcome == r[_TOKEN]),) + r[_SETTLE_VALUE + 1:]
+            m.fill_idx = []
         res = info.resolution_recv_ms if info.resolution_recv_ms is not None else info.window_end_ms
         credit = self.pf.settle(info.slug, info.outcome, res)
         m.settle_ms = credit
@@ -581,6 +610,7 @@ class Core:
     def _annotate(self, m: _Mkt) -> None:
         md, info = m.md, m.info
         end = info.window_end_ms
+        first = len(self.fill_rows)
         for f, o, rep, bn_move in m.raw_fills:
             up = _up_mid(md.top_at(f.ts_ms, "ts"))
             up10 = _up_mid(md.top_at(f.ts_ms + 10_000, "ts")) if f.ts_ms + 10_000 < end else math.nan
@@ -590,6 +620,8 @@ class Core:
                 info.slug, info.coin, o.id, f.ts_ms, rep, o.token, o.side, o.kind, f.px / PX_SCALE, f.size, f.fee,
                 f.liquidity, f.queue_ahead_at_fill, f.trade_ts_ms, 1 - up if dn else up, 1 - up10 if dn else up10,
                 math.nan if info.outcome is None else float(info.outcome == o.token), bn_move, 1 - ub if dn else ub))
+        if info.outcome is None:
+            m.fill_idx.extend(range(first, len(self.fill_rows)))  # _settle fills in settle_value
         m.raw_fills = []
 
     # ------------------------------------------------------------------------------- strategy queries
@@ -728,6 +760,7 @@ class Core:
                 window_end_ms=int(info.window_end_ms), voided=False, reason="", pnl=0.0, settle_ms=math.nan,
                 outcome=info.outcome)
         self.stats["markets"] += 1
+        self.scan_ptb()
 
     def add_market(self, info: MarketInfo, md, rs: int, load_ms: int, open_ms: int) -> _Mkt:
         """`stage` + `admit`, with the book trusted from `open_ms` (the replay's chunk load)."""
@@ -735,6 +768,82 @@ class Core:
         self.admit(m.mi)
         m.open_ms = open_ms
         return m
+
+    def set_resolution(self, slug: str, outcome: str, recv_ms: int) -> None:
+        """The market's outcome, received at recv_ms. A closed market's settle is pushed now; otherwise `_close`
+        pushes it."""
+        m = self.by_slug[slug]
+        m.info = replace(m.info, outcome=outcome, resolution_recv_ms=int(recv_ms))
+        m.resolved = True
+        row = self.market_rows.get(slug)
+        if row is not None:
+            row["outcome"] = outcome
+        if m.closed and not m.settle_pushed:
+            self._push_settle(m)
+
+    def finish_unresolved(self) -> None:
+        """No more resolutions will come (Decision 3): every closed, unresolved market settles at close + R, as the
+        replay does, and is voided "no outcome at settlement". Markets still open settle that way at their close.
+        Call it before `finish`. A settle may lie before ctx.now; it calls no strategy handler."""
+        self._void_unresolved = True
+        for m in self.mkts:
+            if m.closed and not m.settle_pushed:
+                self._push_settle(m)
+
+    def on_trades_appended(self, mi: int) -> None:
+        """A growing MarketData gained trades: the market's exchange may have an earlier next event."""
+        if mi in self.live:
+            n = self.mkts[mi].ex.next_event_ms()
+            if n < self.next_ex:
+                self.next_ex = n
+
+    # ------------------------------------------------------------------------------- price to beat
+    # The strategy's price_to_beat is the mean of the received Chainlink ticks with ts in [window_start - 60 s,
+    # window_start) (the settlement rule, docs/RECORDER.md), revealed when the first tick with ts >= window_start is
+    # received (at r). It stays None when no tick fell in that span or the span starts before the replay range.
+    # The reveal is a P_TIMER event at max(r, s*, load_ms), s* = max(rs, floor_hour(max(r, window_start, load_ms))),
+    # keyed (hour_seq[s*] + 0.5, load index): after every event pushed before hour s* was marked, before every event
+    # pushed after. That is where the replay used to push it, at the start of the hour segment in which it found the
+    # tick, whenever the reveal is found (the live driver finds it when the tick is released).
+    def mark_hour(self, s: int) -> None:
+        """Hour boundary (or range start) s of the strategy clock: everything before s is drained and no data event
+        at or after s has been dispatched. Reveals waiting for s are pushed."""
+        self.hour_seq[s] = self._seq
+        for m, r, v in self._ptb_wait.pop(s, []):  # in load order
+            self._push_ptb(m, r, v, s)
+
+    def scan_ptb(self) -> None:
+        """Look for the revealing tick of every admitted, open market whose reveal is not scheduled yet."""
+        top: dict[str, float] = {}
+        for m in self.loaded:
+            if m.ptb_sched:
+                continue
+            coin, ws = m.info.coin, m.info.window_start_ms
+            c = self.cl.get(coin)
+            if c is None or not len(c[1]):
+                continue
+            if coin not in top:
+                top[coin] = c[1].max()
+            if top[coin] < ws:
+                continue  # no tick with ts >= window_start received yet
+            hit = np.flatnonzero(c[1] >= ws)
+            m.ptb_sched = True
+            r = int(c[0][hit[0]])
+            sel = (c[1] >= ws - 60_000) & (c[1] < ws) & (c[0] <= r)
+            if ws - 60_000 < m.rs or not sel.any():
+                continue
+            self.schedule_ptb(m, r, float(c[2][sel].mean()))
+
+    def schedule_ptb(self, m: _Mkt, r: int, value: float | None) -> None:
+        s_star = max(m.rs, (max(r, m.info.window_start_ms, m.load_ms) // HOUR_MS) * HOUR_MS)
+        if s_star in self.hour_seq:
+            self._push_ptb(m, r, value, s_star)
+        else:
+            self._ptb_wait.setdefault(s_star, []).append((m, r, value))
+
+    def _push_ptb(self, m: _Mkt, r: int, value: float | None, s_star: int) -> None:
+        heapq.heappush(self.heap, (int(max(r, s_star, m.load_ms)), P_TIMER, self.hour_seq[s_star] + 0.5, m.mi,
+                                   ("ptb", m, value)))
 
     def reset_range(self) -> None:
         """A new replay range: the Binance/Chainlink history (and so sig15) restarts."""
@@ -753,6 +862,7 @@ class Core:
         for c, part in seg.items():
             old = self.cl.get(c)
             self.cl[c] = part if old is None else tuple(np.r_[a, b] for a, b in zip(old, part))
+        self.scan_ptb()
 
     # ------------------------------------------------------------------------------- run
     def start(self, t: int) -> None:
