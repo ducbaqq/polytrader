@@ -1,6 +1,6 @@
 # Wallets: are some takers persistently informed, and can we follow them?
 
-**Status:** pre-registered (this section was committed before any wallet skill, markout or settlement edge was
+**Status:** done, abandoned (the pre-registration below was committed before any wallet skill, markout or settlement edge was
 computed) | **Family:** `copy-trading` | **Data:** train day 2026-11-24 from 10:36 UTC only (2026-11-25 is
 sealed and never read) | Code: `research/wallets/`
 
@@ -12,7 +12,7 @@ the spread and the taker fee?
 
 ## Data semantics (checked before the pre-registration; no outcome or price path was looked at)
 Markets with `window_start` in [2026-11-24 10:36, 2026-11-25 00:00) UTC, 5m / 15m / 1h (the 14 4h markets are
-left out): 391,688 rows, ~6.9k wallets, 1,582 markets, all resolved.
+left out): 391,688 rows, 6,825 wallets, 1,582 markets, all resolved.
 
 - **One row per taker order, from the taker's point of view.** `tx_hash` is unique per row (392,696 rows,
   392,696 hashes). 99.6% of rows (390,978) match a CLOB WebSocket trade (`pm_trade`) by `tx_hash`, and every
@@ -79,3 +79,89 @@ H2 maker $ losses (sum of negative maker markouts) and their net maker $ P&L, fo
 
 **Variants counted:** 2 selection rules × 2 attribution delays = 4 (plus the by-product, which is descriptive).
 Committed docs show wallets only as their first 6 characters.
+
+## Results
+
+Reproduce: `uv run --project analysis python research/wallets/build.py OUT.parquet` (per-trade table, ~5 s),
+then `research/wallets/analyze.py OUT.parquet [results.json]`. ¢/share, size-weighted unless "eqw" (equal
+weight per trade). CIs: 95%, 15-min block bootstrap.
+
+**Sanity.** Copying a BUY 200 ms after the WS trade costs the trade price at the median (0.0¢), so the
+combined-book join lines up with the trades.
+
+**All takers** (the baseline every set is compared with): settlement edge H1 −0.37 / H2 −0.55, 60 s markout
+H1 −0.45 / H2 −0.14. Takers lose on average, as the calibration study found.
+
+**H1 selection.** 1,598 eligible wallets (≥ 20 trades in ≥ 5 markets; 89% of H1 trades). S60: 124 wallets
+(4.2% of H1 trades), Sset: 171 (6.8%), overlap 80.
+
+### Persistence H1 → H2 (step 3): none
+
+| | S60 (primary) | Sset |
+|---|---|---|
+| H1 settlement edge (in-sample) | +3.41 | +5.98 |
+| H1 60 s markout (in-sample) | +3.17 | +1.85 |
+| **H2 settlement edge** | **−0.10 [−1.94, +1.42]** | −1.00 [−4.02, +1.69] |
+| H2 60 s markout | −0.12 [−1.23, +0.90] | +0.10 [−1.13, +1.30] |
+| H2 10 s markout | −0.09 [−0.51, +0.35] | −0.26 [−0.84, +0.27] |
+| H2 settlement / 60 s, eqw | +1.51 / +0.91 | +0.87 / +0.45 |
+| Random sets (500, same size by activity decile), H2 settlement p50 / p95 | −0.06 / +1.72 | −0.07 / +1.40 |
+| Percentile of the sharp set among random sets (settlement / 60 s) | 49% / 38% | 19% / 47% |
+| Spearman, H1 t vs H2 mean, 905 wallets with ≥ 20 trades in both | 0.08 | 0.13 |
+
+The sharp sets are exactly as good as random wallets of the same activity on H2. The primary metric fails
+(CI spans 0, 49th percentile of the random sets). The rank correlation between halves is slightly positive,
+but too weak to pick a followable set. Per the pre-registration the study stops here; step 4 is printed for
+completeness only.
+
+### Copying (step 4, for completeness): not actionable
+
+One share per copied trade, combined ask + taker fee, spread ≤ 10¢; settlement P&L [CI] and 60 s markout.
+
+| Set, attribution delay | H1 (biased) settle / 60 s | H2 (honest) settle | H2 60 s | H2 n |
+|---|---|---|---|---|
+| S60, L = 0 | +3.13 / +2.61 | +0.53 [−0.90, +1.82] | −0.12 [−1.05, +0.76] | 7,586 |
+| S60, block + 1 s | +2.97 / +2.52 | +0.27 [−1.20, +1.70] | −0.38 [−1.34, +0.51] | 7,200 |
+| Sset, L = 0 | +4.27 / +1.01 | −0.04 [−1.53, +1.31] | −0.47 [−1.27, +0.27] | 11,037 |
+| Sset, block + 1 s | +4.19 / +0.89 | −0.33 [−1.84, +0.98] | −0.75 [−1.63, +0.01] | 10,670 |
+
+The H1 rows show the selection bias (+3 to +4¢ on the half the set was chosen on). On H2 nothing is
+distinguishable from zero even with an instant wallet feed. Copying costs 0.45–0.6¢ more than the
+wallet paid at L = 0 and 0.7–0.85¢ at block time (the book has already moved), plus a ~0.45¢ fee.
+
+### By-product: maker adverse selection by taker wallet
+
+Maker P&L per trade = −taker edge × size. Wallets ranked by H1 total taker $ 60 s markout; shares measured
+on H2 (out of sample). H2 maker losses (sum of negative maker 60 s markouts): $318k; net maker 60 s P&L +$6.9k.
+
+| H1 top-k takers | Share of H2 volume | Share of H2 maker 60 s losses | Net maker $ vs them (60 s / settlement) |
+|---|---|---|---|
+| 10 | 8.1% | 10.2% | −3.6k / −1.2k |
+| 50 | 16.9% | 20.0% | −7.1k / +6.4k |
+| 100 | 23.9% | 27.4% | −5.2k / +8.1k |
+
+Ranked on H2 itself (in-sample, hindsight) the top 10 / 50 / 100 take 20 / 35 / 43% of the losses. Out of
+sample, the H1-top wallets take only slightly more than their volume share of the losses. **A wallet
+blacklist would not help a market maker much**; adverse flow is better predicted by market state (see
+[adverse-flow.md](adverse-flow.md)) than by who is trading. (Makers can't see the taker before the fill
+anyway; the use would be pulling quotes after a known-toxic wallet starts trading a market.)
+
+### Caveats and lessons
+- **Degenerate t-stats.** A few wallets have a market-clustered standard error of ~0 (e.g. they only buy
+  0.98 favourites that all won, so every market's edge is identical); their t is astronomically large.
+  The pre-registered rule includes them. They are a small share of the set's trades and don't change the
+  verdict, but a future version should floor the standard error (e.g. at the binomial one).
+- **One day, one regime.** ~13 h of data, 905 wallets active in both halves. Persistence over days (a
+  wallet sharp on day 1 and day 2) is untested; re-run on validation days once they exist (the scripts are
+  date-agnostic apart from the constants at the top of `build.py`).
+- **Timing of a live feed is unknown.** The recorder fetches Data API trades only after resolution. L = 0
+  assumes a wallet-tagged feed as fast as the CLOB WebSocket (~130 ms median after the match); the
+  block-time variant is the realistic chain/Data-API bound. Since even L = 0 fails, measuring it isn't
+  worth it now.
+- **What a live strategy would need** (not built): a `ctx` stream of wallet-tagged trades (Polymarket's
+  live activity feed or Polygon `OrderFilled` logs) with its own receive time, recorded by the recorder
+  first so it can be replayed. Today `ctx`/`on_trade` only sees anonymous CLOB trades.
+
+**Variants tried: 4** (2 selection rules × 2 attribution delays), plus the descriptive by-product and one
+in-sample comparison. **Verdict: abandoned** — no wallet set chosen on H1 kept an edge on H2, and copying
+it is ~0 after costs.
