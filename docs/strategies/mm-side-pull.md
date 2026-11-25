@@ -69,7 +69,7 @@ Markout = spread + adverse per share.
 | **s1 defaults (chosen)** | `2026-11-25T0203-39761e` | **second** | **-$116.20** | [-240, 6] | 658 | +0.81 / -2.05 / -1.17 | **-1.24** |
 | parent baseline, for reference | `mm-binance-pull/2026-11-25T0056-0abdaa` | second | -$93.46 | [-230, 45] | 1,562 | +0.64 / -1.73 / +0.23 | -1.09 |
 
-Latency (s1, whole day): LATENCY_ROWS
+Latency (s1, whole day): run `2026-11-25T0404-41fbb6` (`--latency-sweep`): 100 ms -$39.63 (1,069 fills), 200 ms -$97.99 (1,019), 400 ms -$28.63 (1,145). Negative at every latency; the non-monotone order is settlement noise, so 400 ms is no better or worse in any meaningful sense.
 
 On the first half the one-sided pull did what it was built for: adverse selection per share fell from -1.42
 to -0.54 c (BTC 5m from -1.2 to +0.3 c) and the markout turned slightly positive. It cost 75% of the fills.
