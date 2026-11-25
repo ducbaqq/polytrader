@@ -48,3 +48,23 @@ def test_fingerprint_order_sensitive():
     assert len(o) > 1
     res.coins["btc"].orders = o.iloc[::-1].reset_index(drop=True)
     assert ri.fingerprint(res, c)["hashes.json"] != base
+
+
+def test_frame_hash_nan_none_empty_distinct():
+    import numpy as np
+    import pandas as pd
+
+    f = lambda v: ri._frame_hash(pd.DataFrame({"a": pd.Series([v, "x"], dtype=object)}))  # noqa: E731
+    assert len({f(None), f(float("nan")), f("")}) == 3
+    g = lambda v: ri._frame_hash(pd.DataFrame({"a": [v, 1.0]}))  # noqa: E731
+    assert len({g(np.nan), g(np.inf), g(-np.inf)}) == 3
+    assert ri._frame_hash(pd.DataFrame({"a": [1, 2]})) != ri._frame_hash(pd.DataFrame({"a": [1.0, 2.0]}))
+
+
+def test_log_hash_unambiguous():
+    c = _cfg()
+    res = _res(c)
+    res.coins["btc"].log = ["a\nb"]
+    h1 = ri.fingerprint(res, c)["hashes.json"]
+    res.coins["btc"].log = ["a", "b"]
+    assert ri.fingerprint(res, c)["hashes.json"] != h1

@@ -3,6 +3,8 @@
     cd analysis && POLYDATA_DIR=$PD uv run python tools/replay_identity.py save --out DIR [--only NAME ...]
     cd analysis && POLYDATA_DIR=$PD uv run python tools/replay_identity.py check --ref DIR [--only NAME ...]
 
+The CLI re-execs itself with PYTHONHASHSEED=0 when it is unset, so spawned workers share one hash seed.
+
 Each case writes `<DIR>/<case>/results.json` (summary + metrics, canonical JSON) and `hashes.json` (sha256 per
 result frame, row order kept, plus the log). Timings (`stats`, `elapsed_s`) are deliberately not part of it.
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from dataclasses import replace
@@ -45,6 +48,19 @@ def _sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def _frame_hash(df) -> str:
+    """sha256 of dtypes plus CSV; NaN, None and empty string render distinctly, row order kept."""
+    df = df.copy()
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = [
+                "<None>" if v is None else "<NaN>" if isinstance(v, float) and v != v else v for v in df[c]
+            ]
+    head = json.dumps([[str(c), str(t)] for c, t in df.dtypes.items()])
+    body = df.to_csv(index=False, lineterminator="\n", na_rep="<NA>")  # float NaN -> <NA>; inf/-inf print as inf
+    return _sha((head + "\0" + body).encode())
+
+
 def fingerprint(res, cfg) -> dict[str, bytes]:
     from polydata.bt import metrics, runs
     from polydata.bt.splits import day_kind
@@ -59,8 +75,8 @@ def fingerprint(res, cfg) -> dict[str, bytes]:
         df = getattr(res, name, None)
         if df is None:
             continue
-        hashes[name] = _sha(df.to_csv(index=False, lineterminator="\n").encode())
-    hashes["log"] = _sha("\n".join(res.log).encode())
+        hashes[name] = _frame_hash(df)
+    hashes["log"] = _sha(json.dumps(list(res.log)).encode())
     return {"results.json": results, "hashes.json": json.dumps(hashes, indent=1).encode()}
 
 
@@ -102,14 +118,9 @@ def cmd_check(a) -> int:
             if not p.exists():
                 diff = f"{fn}: missing reference"
             elif p.read_bytes() != b:
-                if fn == "hashes.json":
-                    old, new = json.loads(p.read_bytes()), json.loads(b)
-                    k = next((k for k in sorted(set(old) | set(new)) if old.get(k) != new.get(k)), "?")
-                    diff = f"hashes.json: {k}"
-                else:
-                    old, new = json.loads(p.read_bytes()), json.loads(b)
-                    k = next((k for k in sorted(set(old) | set(new)) if old.get(k) != new.get(k)), "?")
-                    diff = f"results.json: {k}"
+                old, new = json.loads(p.read_bytes()), json.loads(b)
+                k = next((k for k in sorted(set(old) | set(new)) if old.get(k) != new.get(k)), "?")
+                diff = f"{fn}: {k}"
             if diff:
                 break
         if diff:
@@ -118,6 +129,8 @@ def cmd_check(a) -> int:
             same += 1
             print(f"ok   {name}")
     print(f"identical: {same}/{total}")
+    if total < len(CASES):
+        print(f"PARTIAL ({total} of {len(CASES)} cases): not the full gate")
     return 0 if same == total else 1
 
 
@@ -131,6 +144,8 @@ def main(argv=None) -> int:
     for x in (s, c):
         x.add_argument("--only", nargs="+", metavar="NAME")
     a = p.parse_args(argv)
+    if os.environ.get("PYTHONHASHSEED") != "0":
+        os.execve(sys.executable, [sys.executable, *sys.argv], {**os.environ, "PYTHONHASHSEED": "0"})
     return cmd_save(a) if a.cmd == "save" else cmd_check(a)
 
 
