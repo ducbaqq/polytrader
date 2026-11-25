@@ -192,3 +192,67 @@ def test_traced_ctx_formatter_error_is_not_a_raise():
         ctx._call("top", "s", lambda: {}["x"])
     assert rows[-1][8] == "raise:KeyError"
     assert ctx._call("top", "s", lambda: 2.5) == 2.5 and rows[-1][8] == "2.5"
+
+
+# ------------------------------------------------------------------------------------------ entry points
+
+def _core(strategy=None, **kw):
+    from test_engine import Recorder, cfg
+
+    from polydata.bt.core import Core
+
+    return Core(cfg(), ["btc"], {"btc": 1000.0}, strategy if strategy is not None else Recorder(), **kw)
+
+
+def test_kinds_keep_their_relative_order():
+    from polydata.bt.core import _RANK, K_ADMIT, K_BN, K_CL, K_OPEN, K_TOP, K_TRADE
+
+    assert (K_ADMIT, K_OPEN, K_TOP, K_TRADE, K_CL, K_BN) == (0, 1, 2, 3, 4, 5)
+    assert _RANK.tolist() == [0, 0, 0, 0, 1, 2]
+
+
+def test_stage_then_admit():
+    import math
+
+    from test_engine import M1, market_one
+
+    from polydata.bt.core import P_CLOSE
+
+    c = _core()
+    mi = c.stage(M1, market_one(), 1, 2)
+    m = c.mkts[mi]
+    assert mi == 0 and c.by_slug[M1.slug] is m and m.load_ms == 2 and m.rs == 1 and m.resolved
+    assert not c.loaded and not c.heap and M1.slug not in c.market_rows and M1.slug not in c.pf.positions
+    c.admit(mi)
+    assert c.loaded == [m] and M1.slug in c.pf.positions
+    assert [(h[0], h[1], h[3], h[4][0]) for h in c.heap] == [(M1.window_end_ms, P_CLOSE, 0, "close")]
+    row = c.market_rows[M1.slug]
+    assert row["voided"] is False and row["reason"] == "" and row["pnl"] == 0.0 and math.isnan(row["settle_ms"])
+    assert row["outcome"] == "Up" and row["window_end_ms"] == M1.window_end_ms
+
+
+def test_admit_keeps_driver_row_and_takes_given_row():
+    from test_engine import M1, market_one, mdata, minfo
+
+    c = _core()
+    pre = {"slug": M1.slug, "marker": 1}
+    c.market_rows[M1.slug] = pre
+    c.admit(c.stage(M1, market_one(), 0, 0))
+    assert c.market_rows[M1.slug] is pre
+    m2 = minfo(M1.window_end_ms)
+    given = {"slug": m2.slug, "marker": 2}
+    c.admit(c.stage(m2, mdata(m2), 0, 0), given)
+    assert c.market_rows[m2.slug] is given
+
+
+def test_dispatch_admit_calls_no_strategy():
+    from test_engine import M1, market_one
+
+    from polydata.bt.core import K_ADMIT
+
+    c = _core()
+    s = c.strategy
+    mi = c.stage(M1, market_one(), 0, 0)
+    c.dispatch([M1.window_start_ms - 100_000], [K_ADMIT], [mi], [-1], [], [])
+    assert c.loaded == [c.mkts[mi]] and c.ctx.now == M1.window_start_ms - 100_000 and s.events == []
+

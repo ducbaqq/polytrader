@@ -53,10 +53,9 @@ import pandas as pd
 
 from .config import RunConfig
 from .core import (  # noqa: F401 (re-exported: the engine's public API)
-    _EMPTY_BN, _RANK, EQUITY_COLS, FILL_COLS, HOUR_MS, INF, K_BN, K_CL, K_OPEN, K_TOP, K_TRADE, MARKET_COLS,
+    _EMPTY_BN, _RANK, EQUITY_COLS, FILL_COLS, HOUR_MS, INF, K_ADMIT, K_BN, K_CL, K_OPEN, K_TOP, K_TRADE, MARKET_COLS,
     ORDER_COLS, P_CLOSE, P_TIMER, CoinResult, Core, RunResult, SimCtx, _Bn, _Grid, _Mkt, sym_of,
 )
-from .exchange import Exchange
 from .gaps import gap_table, voided_markets
 from .marketdata import LOOKBACK_WINDOWS, load_coin
 from .splits import REPLAY_START_MS, day_kind
@@ -182,19 +181,13 @@ class ReplayDriver:
                     self.core.market_rows[r.slug].update(voided=True, reason="no data", pnl=math.nan)
                     continue
                 info = md.info
-                m = _Mkt(info, len(self.core.mkts), md, Exchange(md, self.core.exc), c.rs)
                 sn = md.snaps_recv
                 i = int(np.searchsorted(sn, max(c.rs, seg_start)))
                 if i >= len(sn) or sn[i] >= info.window_end_ms:
                     self.core.market_rows[r.slug].update(voided=True, reason="no book snapshot", pnl=math.nan)
                     continue
-                m.open_ms = int(sn[i])  # the first snapshot in range: the book is trusted from here
-                self.core.mkts.append(m)
-                self.core.by_slug[info.slug] = m
-                self.core.loaded.append(m)
-                self.core.pf.add_market(info)
-                self.core.push(info.window_end_ms, P_CLOSE, ("close", m))
-                self.core.stats["markets"] += 1
+                # the first snapshot in range: the book is trusted from here
+                self.core.add_market(info, md, c.rs, seg_start, int(sn[i]))
         self.core.stats["load_s"] += time.perf_counter() - t0
 
     # ------------------------------------------------------------------------------- data per hour
@@ -207,14 +200,14 @@ class ReplayDriver:
                 FROM bn_fut_bbo WHERE date = ? AND sym IN (SELECT unnest(?)) AND recv_ms >= ? AND recv_ms < ?
                 GROUP BY ALL ORDER BY sym, b""", [_date(s), self.core.syms, s, e]).fetchnumpy()
         sym = np.asarray(d["sym"]).astype(str) if len(d["sym"]) else np.empty(0, str)
-        self.core.bn_prev, self.core.bn_cur = self.core.bn_cur, {}
+        bns = {}
         for x in self.core.syms:
             sel = sym == x
-            bn = _Bn(np.asarray(d["b"])[sel].astype(np.int64) * step + step - 1, np.asarray(d["bid"])[sel].astype(float),
-                     np.asarray(d["ask"])[sel].astype(float), np.asarray(d["bid_qty"])[sel].astype(float),
-                     np.asarray(d["ask_qty"])[sel].astype(float)) if len(sym) else _EMPTY_BN
-            self.core.bn_cur[x] = bn
-            self.core.grid.setdefault(x, _Grid()).append(s // 1000, -(-e // 1000), bn)
+            bns[x] = _Bn(np.asarray(d["b"])[sel].astype(np.int64) * step + step - 1,
+                         np.asarray(d["bid"])[sel].astype(float), np.asarray(d["ask"])[sel].astype(float),
+                         np.asarray(d["bid_qty"])[sel].astype(float),
+                         np.asarray(d["ask_qty"])[sel].astype(float)) if len(sym) else _EMPTY_BN
+        self.core.add_bn_hour(s, e, bns)
 
     def _load_cl(self, con, s: int, e: int) -> dict[str, tuple]:
         d = con.execute(
@@ -227,11 +220,9 @@ class ReplayDriver:
         out = {}
         for c in self.core.coins:
             sel = coin == c
-            seg = (np.asarray(d["recv_ms"])[sel].astype(np.int64), np.asarray(d["ts_ms"])[sel].astype(np.int64),
-                   np.asarray(d["price"])[sel].astype(float))
-            out[c] = seg
-            old = self.core.cl.get(c)
-            self.core.cl[c] = seg if old is None else tuple(np.r_[a, b] for a, b in zip(old, seg))
+            out[c] = (np.asarray(d["recv_ms"])[sel].astype(np.int64), np.asarray(d["ts_ms"])[sel].astype(np.int64),
+                      np.asarray(d["price"])[sel].astype(float))
+        self.core.add_cl(out)
         return out
 
     def _segment(self, con, s: int, e: int) -> None:
@@ -318,7 +309,7 @@ class ReplayDriver:
             self.core.start(ranges[0][0])
         ci = 0
         for ri, (rs, re) in enumerate(ranges):
-            self.core.grid, self.core.bn_cur, self.core.bn_prev, self.core.cl = {}, {}, {}, {}  # vol history restarts per range
+            self.core.reset_range()  # vol history restarts per range
             s = rs
             while s < re:
                 e = min((s // HOUR_MS + 1) * HOUR_MS, re)

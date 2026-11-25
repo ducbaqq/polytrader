@@ -30,9 +30,10 @@ HOUR_MS = 3_600_000
 INF = float("inf")
 SIG_WINDOW_S = 900  # sig15: 15 min of 1 s Binance returns
 
-# Data event kinds, in delivery order at an equal recv_ms. The first three are Polymarket.
-K_OPEN, K_TOP, K_TRADE, K_CL, K_BN = 0, 1, 2, 3, 4
-_RANK = np.array([0, 0, 0, 1, 2], np.int8)  # stream rank: Polymarket 0, Chainlink 1, Binance 2
+# Data event kinds, in delivery order at an equal recv_ms. The first four are Polymarket. K_ADMIT (a market joins the
+# run at that recv_ms) is used by the live and session drivers only; the replay admits markets at their chunk load.
+K_ADMIT, K_OPEN, K_TOP, K_TRADE, K_CL, K_BN = 0, 1, 2, 3, 4, 5
+_RANK = np.array([0, 0, 0, 0, 1, 2], np.int8)  # stream rank: Polymarket 0, Chainlink 1, Binance 2
 # Internal events at an equal ms
 P_REPORT, P_CLOSE, P_TIMER, P_SETTLE, P_REDEEM, P_EQUITY = range(6)
 
@@ -176,11 +177,13 @@ class _Grid:
 
 
 class _Mkt:
-    __slots__ = ("info", "pub", "mi", "md", "ex", "rs", "open_ms", "opened", "closed", "last_mid", "raw_fills",
-                 "settle_ms", "ptb_sched")
+    __slots__ = ("info", "pub", "mi", "md", "ex", "rs", "load_ms", "resolved", "open_ms", "opened", "closed",
+                 "last_mid", "raw_fills", "settle_ms", "ptb_sched")
 
-    def __init__(self, info: MarketInfo, mi: int, md: MarketData, ex: Exchange, rs: int):
+    def __init__(self, info: MarketInfo, mi: int, md: MarketData, ex: Exchange, rs: int, load_ms: int):
         self.info = info
+        self.load_ms = load_ms  # when the driver staged it (the load index `mi` is its position in Core.mkts)
+        self.resolved = info.outcome is not None
         # What the strategy may see: no outcome, and price_to_beat only once computed from received
         # Chainlink ticks (see engine.ReplayDriver._schedule_ptb).
         self.pub = replace(info, outcome=None, resolution_recv_ms=None, price_to_beat=None)
@@ -321,9 +324,11 @@ class Core:
             self.ctx = TracedCtx(self, self.decisions)
 
     # ------------------------------------------------------------------------------- scheduling
+    # Heap entries are (t, prio, k, tie, payload). An ordinary event has k = push sequence and tie = 0, so events at
+    # an equal (t, prio) come in push order.
     def push(self, t: int, prio: int, payload: tuple) -> None:
         self._seq += 1
-        heapq.heappush(self.heap, (int(t), prio, self._seq, payload))
+        heapq.heappush(self.heap, (int(t), prio, self._seq, 0, payload))
 
     def _advance(self, T: int) -> None:
         nxt = INF
@@ -490,7 +495,7 @@ class Core:
 
     # ------------------------------------------------------------------------------- internal events
     def _handle(self, item: tuple) -> None:
-        t, _, _, p = item
+        t, _, _, _, p = item
         self.ctx.now = t
         kind = p[0]
         if kind == "rep":
@@ -687,13 +692,67 @@ class Core:
             elif k == K_CL:
                 a = cl_lists[j]
                 on_cl(ctx, a[0], a[1][i])
-            else:  # K_OPEN
+            elif k == K_OPEN:
                 m = mkts[j]
                 if m.closed:
                     continue
                 m.opened = True
                 open_[m.info.slug] = m
                 S.on_market_open(ctx, m.pub)
+            else:  # K_ADMIT: no strategy call
+                self.admit(j)
+
+    # ------------------------------------------------------------------------------- driver entry points
+    def stage(self, info: MarketInfo, md, rs: int, load_ms: int) -> int:
+        """Create a market's state (exchange included) and give it the next load index. Nothing is scheduled
+        and the market is not live until `admit`."""
+        mi = len(self.mkts)
+        m = _Mkt(info, mi, md, Exchange(md, self.exc), rs, load_ms)
+        self.mkts.append(m)
+        self.by_slug[info.slug] = m
+        return mi
+
+    def admit(self, mi: int, row: dict | None = None) -> None:
+        """A staged market joins the run: the portfolio knows it, its close is scheduled at window_end_ms and it
+        gets a result row (`row`, else the one the driver already made, else a default)."""
+        m = self.mkts[mi]
+        info = m.info
+        self.loaded.append(m)
+        self.pf.add_market(info)
+        self.push(info.window_end_ms, P_CLOSE, ("close", m))
+        if row is not None:
+            self.market_rows[info.slug] = row
+        elif info.slug not in self.market_rows:
+            self.market_rows[info.slug] = dict(
+                slug=info.slug, coin=info.coin, timeframe=info.timeframe, window_start_ms=int(info.window_start_ms),
+                window_end_ms=int(info.window_end_ms), voided=False, reason="", pnl=0.0, settle_ms=math.nan,
+                outcome=info.outcome)
+        self.stats["markets"] += 1
+
+    def add_market(self, info: MarketInfo, md, rs: int, load_ms: int, open_ms: int) -> _Mkt:
+        """`stage` + `admit`, with the book trusted from `open_ms` (the replay's chunk load)."""
+        m = self.mkts[self.stage(info, md, rs, load_ms)]
+        self.admit(m.mi)
+        m.open_ms = open_ms
+        return m
+
+    def reset_range(self) -> None:
+        """A new replay range: the Binance/Chainlink history (and so sig15) restarts."""
+        self.grid, self.bn_cur, self.bn_prev, self.cl = {}, {}, {}, {}
+
+    def add_bn_hour(self, s: int, e: int, bns: dict[str, _Bn]) -> None:
+        """The Binance bundles of the hour [s, e), one per symbol."""
+        self.bn_prev, self.bn_cur = self.bn_cur, {}
+        for x in self.syms:
+            bn = bns[x]
+            self.bn_cur[x] = bn
+            self.grid.setdefault(x, _Grid()).append(s // 1000, -(-e // 1000), bn)
+
+    def add_cl(self, seg: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]) -> None:
+        """Received Chainlink ticks (recv_ms, ts_ms, price) per coin, appended in recv order."""
+        for c, part in seg.items():
+            old = self.cl.get(c)
+            self.cl[c] = part if old is None else tuple(np.r_[a, b] for a, b in zip(old, part))
 
     # ------------------------------------------------------------------------------- run
     def start(self, t: int) -> None:
