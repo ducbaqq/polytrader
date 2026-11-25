@@ -343,9 +343,10 @@ class ReplayDriver:
 
 def _replay(cfg: RunConfig, coins: list[str], budgets: dict[str, float], con_factory: Callable,
             loader: Callable | None = None, strategy: Strategy | None = None,
-            rec_events: pd.DataFrame | None = None, clip: tuple[int, int] | None = None) -> CoinResult:
+            rec_events: pd.DataFrame | None = None, clip: tuple[int, int] | None = None,
+            trace: bool = False) -> CoinResult:
     strategy = strategy if strategy is not None else get_strategy(cfg.strategy)(cfg.params)
-    r = ReplayDriver(Core(cfg, coins, budgets, strategy), loader or load_coin, rec_events, clip)
+    r = ReplayDriver(Core(cfg, coins, budgets, strategy, trace=trace), loader or load_coin, rec_events, clip)
     con = con_factory()
     try:
         con.execute("SET memory_limit='4GB'")  # load_coin's peak is DuckDB's buffer pool
@@ -358,32 +359,35 @@ def _replay(cfg: RunConfig, coins: list[str], budgets: dict[str, float], con_fac
 
 def run_coin(cfg: RunConfig, coin: str, con_factory: Callable = default_con_factory, *, loader: Callable | None = None,
              strategy: Strategy | None = None, budget: float | None = None,
-             rec_events: pd.DataFrame | None = None, clip: tuple[int, int] | None = None) -> CoinResult:
+             rec_events: pd.DataFrame | None = None, clip: tuple[int, int] | None = None,
+             trace: bool = False) -> CoinResult:
     """Replay one coin's markets with its own budget (default `capital / len(coins)`).
 
     `loader(con, coin, timeframes, start_ms, end_ms, slugs=...)` defaults to `marketdata.load_coin`;
     `strategy` (an instance) defaults to the registry's `cfg.strategy` built with `cfg.params`;
     `rec_events` defaults to the daily `rec_events` catalog (see `gaps.gap_table`); `clip=(start_ms,
-    end_ms)` narrows the replay ranges (smoke runs and tests)."""
+    end_ms)` narrows the replay ranges (smoke runs and tests); `trace=True` records every strategy call in
+    `decisions` (trace.py)."""
     b = cfg.capital / len(cfg.coins) if budget is None else budget
-    return _replay(cfg, [coin], {coin: b}, con_factory, loader, strategy, rec_events, clip)
+    return _replay(cfg, [coin], {coin: b}, con_factory, loader, strategy, rec_events, clip, trace)
 
 
 def _worker(args) -> tuple[str, CoinResult]:
-    cfg_d, coin, budget, con_factory = args
-    return coin, run_coin(RunConfig.from_dict(cfg_d), coin, con_factory, budget=budget)
+    cfg_d, coin, budget, con_factory, trace = args
+    return coin, run_coin(RunConfig.from_dict(cfg_d), coin, con_factory, budget=budget, trace=trace)
 
 
-def run(cfg: RunConfig, con_factory: Callable = default_con_factory, workers: int | None = None) -> RunResult:
+def run(cfg: RunConfig, con_factory: Callable = default_con_factory, workers: int | None = None, *,
+        trace: bool = False) -> RunResult:
     """Run the config. Per-coin mode: one process per coin (at most `workers`, default
     min(coins, 4): each process can use ~4 GB), budgets `capital / len(coins)`. Global mode: every
-    coin in one replay with one shared balance."""
+    coin in one replay with one shared balance. `trace=True` fills `decisions`."""
     t0 = time.perf_counter()
     if cfg.capital_mode == "global":
-        res = {"*": _replay(cfg, list(cfg.coins), {"*": cfg.capital}, con_factory)}
+        res = {"*": _replay(cfg, list(cfg.coins), {"*": cfg.capital}, con_factory, trace=trace)}
         return RunResult(cfg, res, time.perf_counter() - t0)
     budget = cfg.capital / len(cfg.coins)
-    args = [(cfg.to_dict(), c, budget, con_factory) for c in cfg.coins]
+    args = [(cfg.to_dict(), c, budget, con_factory, trace) for c in cfg.coins]
     n = min(len(args), workers or min(4, os.cpu_count() or 1))
     if n <= 1:
         out = [_worker(a) for a in args]

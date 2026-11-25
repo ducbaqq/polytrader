@@ -70,6 +70,7 @@ class CoinResult:
     markets: pd.DataFrame  # MARKET_COLS: every market considered, voided ones with a reason and NaN P&L
     log: list[str]
     stats: dict = field(default_factory=dict)
+    decisions: pd.DataFrame = field(default_factory=lambda: _decisions_frame(None))  # trace.DECISION_COLS
 
 
 @dataclass
@@ -99,8 +100,18 @@ class RunResult:
         return self._cat("markets")
 
     @property
+    def decisions(self) -> pd.DataFrame:
+        return self._cat("decisions")
+
+    @property
     def log(self) -> list[str]:
         return [line for r in self.coins.values() for line in r.log]
+
+
+def _decisions_frame(rows: list[tuple] | None) -> pd.DataFrame:
+    from .trace import DECISION_COLS  # trace imports SimCtx from here
+
+    return pd.DataFrame(rows or [], columns=DECISION_COLS)
 
 
 # ---------------------------------------------------------------------------------------- state
@@ -263,7 +274,8 @@ def _levels(md: MarketData, t: int, depth: int):
 # ---------------------------------------------------------------------------------------- core
 
 class Core:
-    def __init__(self, cfg: RunConfig, coins: list[str], budgets: dict[str, float], strategy: Strategy):
+    def __init__(self, cfg: RunConfig, coins: list[str], budgets: dict[str, float], strategy: Strategy, *,
+                 trace: bool = False):
         self.cfg, self.coins, self.strategy = cfg, list(coins), strategy
         self.R = int(cfg.fill_report_latency_ms)
         self.lat, self.jitter = int(cfg.order_latency_ms), int(cfg.latency_jitter_ms)
@@ -299,6 +311,14 @@ class Core:
         self.cl: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         self.stats = {"events": 0, "segments": 0, "load_s": 0.0, "data_s": 0.0, "markets": 0}
         self.want = {h: type(strategy).overrides(h) for h in ("on_book", "on_trade", "on_binance", "on_chainlink")}
+        # Call tracing (trace.py): every handler and ctx call as a row. `want` above stays the wrapped class's.
+        self.decisions: list[tuple] | None = None
+        if trace:
+            from .trace import TracedCtx, TracedStrategy
+
+            self.decisions = []
+            self.strategy = TracedStrategy(strategy, self.decisions)
+            self.ctx = TracedCtx(self, self.decisions)
 
     # ------------------------------------------------------------------------------- scheduling
     def push(self, t: int, prio: int, payload: tuple) -> None:
@@ -701,7 +721,7 @@ class Core:
         for c in ("pnl", "settle_ms"):
             markets[c] = markets[c].astype(float)
         markets["reason"] = markets["reason"].astype(str)
-        return CoinResult(orders, fills, equity, markets, self.log, self.stats)
+        return CoinResult(orders, fills, equity, markets, self.log, self.stats, _decisions_frame(self.decisions))
 
 
 def _book_loader(md: MarketData, t: int):
