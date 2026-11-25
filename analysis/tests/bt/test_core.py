@@ -99,3 +99,56 @@ def test_run_result_decisions_concat():
     r = _run_traced(True)
     rr = RunResult(None, {"btc": r})
     assert len(rr.decisions) == len(r.decisions) and set(rr.decisions["budget"]) == {"btc"}
+
+
+def test_trace_records_inputs_ms_and_post_only():
+    d = _run_traced(True).decisions
+    p = d[d["call"] == "place"].iloc[0]
+    assert p["flag"] is True or p["flag"] == True  # noqa: E712 (Recorder places post_only=True by default)
+    t = d[d["call"] == "take"].iloc[0]
+    assert t["flag"] is None or t["flag"] != t["flag"]
+    timers = d[d["call"] == "set_timer"]
+    assert timers.iloc[0]["size"] == 1_000.0 and set(timers["size"]) == {1_000.0, 10_000.0}
+    cl = d[d["call"] == "on_chainlink"]
+    assert len(cl) and all(isinstance(float(r), float) for r in cl["ret"])  # repr(price) round-trips
+    assert d[d["call"] == "on_binance"]["ret"].str.startswith("Bbo(").all()
+    assert d[d["call"] == "on_trade"]["ret"].str.startswith("Trade(").all()
+    od = d[d["call"] == "on_order"]
+    assert od["ret"].str.startswith("('accepted'").any() and od["ret"].str.contains("'fill'").any()
+    assert d.loc[d["call"].isin(["on_book", "on_market_open", "on_market_close"]), "ret"].isna().all()
+
+
+def test_traced_ctx_records_raise():
+    import pytest
+
+    from polydata.bt.strategy import Strategy
+
+    class Bad(Strategy):
+        name = "bad"
+
+        def on_market_open(self, ctx, market):
+            ctx.place(market.slug, "Sideways", "BUY", 0.5, 5)
+
+    rows = []
+
+    class Spy(Bad):
+        def on_market_open(self, ctx, market):
+            rows.append(ctx._rows)
+            super().on_market_open(ctx, market)
+
+    with pytest.raises(ValueError):
+        _run_traced(True, Spy())
+    last = rows[0][-1]
+    assert last[2] == "place" and last[8] == "raise:ValueError" and last[4] == "Sideways" and last[6] == 0.5
+
+
+def test_traced_strategy_forwards_attributes():
+    from polydata.bt.config import RunConfig
+    from polydata.bt.core import Core
+    from test_engine import Recorder
+
+    s = Recorder({"x": 1})
+    c = Core(RunConfig(strategy="recorder", coins=["btc"], timeframes=["5m"], days=["2026-11-24"]), ["btc"],
+             {"btc": 100.0}, s, trace=True)
+    assert c.strategy is not s and c.strategy.name == "recorder" and c.strategy.params == s.params
+    assert c.strategy.events is s.events
