@@ -44,7 +44,35 @@ df = con.sql("SELECT * FROM pm_trade WHERE slug = 'btc-updown-5m-1795509000'").d
 
 Session time zone is UTC. Filter on `date` (a partition column, e.g. `WHERE date = '2026-11-24'`) or on
 the instrument (`sym`, `asset`/`slug`, `symbol`) to read less data. Parquet files are sorted by
-instrument, then `recv_ms`.
+instrument, then `recv_ms`, then `seq`.
+
+Every TSV stream has a derived `seq` column (not in the recorder files): the raw arrival order within
+the stream-hour (5-minute files in name order, then row order). Many rows share a `recv_ms` (one
+WebSocket message changes several levels), so order same-ms rows by `seq`, e.g.
+`ORDER BY ts_ms, recv_ms, seq` to replay `pm_price_change` in recorded order. Hours built before
+build format 2 have `seq` NULL; `uv run polydata build --force` rebuilds them (a plain `build` also
+rebuilds them, since the format is part of each hour's manifest).
+
+## Backtester
+
+Guide: [docs/BACKTESTER.md](../docs/BACKTESTER.md). Journals: [docs/strategies/](../docs/strategies/README.md).
+
+```bash
+uv run polydata bt validate                               # simulator validation suite (per sim_version)
+uv run polydata bt run configs/mm-binance-pull.yaml       # [--days A B..C] [--coins ..] [--set k=v ..] [--latency-sweep] [--final]
+uv run polydata bt sweep configs/mm-binance-pull.yaml --grid pull_k=1,2,3 --jobs 2
+uv run polydata bt runs [--strategy S] [--family F] [--tag T] [--search TEXT] [--passed]
+uv run polydata bt screen endgame-favourite               # screening tier
+uv run polydata bt push                                   # upload data/runs; `bt pull` fetches other machines' runs
+```
+
+Existing machines, after pulling this version:
+
+- **Parquet format 2 adds `seq` and forces a one-time full rebuild.** Run `uv run polydata update` (or
+  `build --force`); every hour is rebuilt because the format is part of each hour's manifest.
+- **`data/polytrader.duckdb` needs `uv run polydata db`** to refresh its views, which now leave out the
+  sealed days (every third day from 2026-11-25). Until then the file shows the old, unfiltered views.
+  Do not use sealed days to tune strategies; see the sealed rule in BACKTESTER.md.
 
 ## Views
 

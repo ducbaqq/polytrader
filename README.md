@@ -24,6 +24,8 @@ top of it.
 | `analysis/` | `polydata` (Python, DuckDB): sync, Parquet build, SQL views, notebooks, tests |
 | `docs/RECORDER.md` | Every stream and column, operations, data quality log |
 | `docs/FEES.md` | Verified fee formula, rates, rebates and what they mean for strategies |
+| `docs/BACKTESTER.md` | The backtester: quick start, writing a strategy, config, fill model, reports |
+| `docs/strategies/` | Strategy journals and the family glossary |
 | `docs/TODO.md` | What's next |
 | `analysis/README.md` | Views, query examples, backtest rules |
 
@@ -76,6 +78,23 @@ con.sql("SELECT * FROM pm_trade WHERE slug = 'btc-updown-5m-1795509000'").df()
   `--days 2026-11-24` or `--streams 'pm_*' rtds_price` to fetch less.
 - **Speed:** queries over hundreds of millions of rows take about a second.
 - **Tests:** `uv run pytest` checks the pipeline on synthetic data, with no credentials needed.
+
+## Backtesting
+
+`polydata.bt` replays the recorded data to a strategy and simulates our orders (back-of-queue fills, measured
+delays, exact fees, a $5,000 capital limit), then writes a run folder with a verdict report.
+`polydata.screen` tests taker-style ideas in seconds first.
+
+```bash
+cd analysis
+uv run polydata bt validate
+uv run polydata bt run configs/mm-binance-pull.yaml
+uv run polydata bt runs
+```
+
+- Guide (strategy API, config, fill model, splits, reports): [docs/BACKTESTER.md](docs/BACKTESTER.md)
+- Strategy journals, family glossary, how to find runs: [docs/strategies/README.md](docs/strategies/README.md)
+- Every third recorded day is sealed for `--final` runs and hidden from the views.
 
 ## Backtesting rules
 

@@ -4,7 +4,12 @@
     data/parquet/markets.parquet                          one row per Up/Down market
 
 Incremental: each Parquet file has a sidecar `HH.src` listing the raw files (name + size) it was
-built from; an hour is rebuilt only when that list changes (e.g. more files were synced).
+built from, plus the build format; an hour is rebuilt only when that changes (e.g. more files were
+synced, or `FORMAT` was bumped).
+
+TSV streams get a derived `seq` column: the raw arrival order within the stream-hour (5-minute
+files in name order, then row order within each file). Files are sorted by (instrument, recv_ms,
+seq), so rows that share a recv_ms keep their recorded order.
 """
 
 from __future__ import annotations
@@ -14,6 +19,8 @@ import time
 from pathlib import Path
 
 import duckdb
+import numpy as np
+import pyarrow as pa
 
 from . import schema
 from .config import paths
@@ -31,8 +38,29 @@ def _has_rows(f: Path) -> bool:
     return len(lines) > (1 if ".tsv." in f.name else 0)
 
 
+# Bump when the Parquet layout changes, so `build` rebuilds existing hours.
+# 2: TSV streams gain `seq` and are sorted by (instrument, recv_ms, seq).
+FORMAT = 2
+
+
 def _sources(files: list[Path]) -> str:
-    return "\n".join(f"{f.name}:{f.stat().st_size}" for f in files)
+    return f"# format {FORMAT}\n" + "\n".join(f"{f.name}:{f.stat().st_size}" for f in files)
+
+
+def _read_tsv(path: Path, columns) -> pa.Table:
+    """One raw TSV file as an Arrow table of strings, in file order (empty field -> NULL, like
+    DuckDB's read_csv). Arrow's CSV reader keeps row order, which a row number over DuckDB's
+    parallel read_csv does not guarantee."""
+    import pyarrow.csv as pacsv
+
+    return pacsv.read_csv(
+        pa.input_stream(path.as_posix(), compression="zstd"),
+        read_options=pacsv.ReadOptions(block_size=64 << 20),
+        parse_options=pacsv.ParseOptions(delimiter="\t", quote_char=False, double_quote=False,
+                                         escape_char=False, newlines_in_values=False),
+        convert_options=pacsv.ConvertOptions(column_types={c: pa.string() for c in columns},
+                                             strings_can_be_null=True, null_values=[""]),
+    )
 
 
 def _sql_list(files: list[Path]) -> str:
@@ -42,17 +70,24 @@ def _sql_list(files: list[Path]) -> str:
 def _convert(con: duckdb.DuckDBPyConnection, stream: str, files: list[Path], out: Path) -> int:
     src = _sql_list(files)
     if stream in schema.TSV:
-        opts = "delim='\t', header=true, quote='', escape='', union_by_name=true"
         # Columns can be added over time (rtds_price gained `conn` on 2026-11-24): type the columns
-        # the files have, fill the others with NULL, so every hour has the same schema.
-        present = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_csv({src}, {opts}, all_varchar=true)").fetchall()}
+        # each file has, fill the others with NULL, so every hour has the same schema.
         types = schema.TSV[stream]
-        unknown = present - set(types)
-        if unknown:
-            raise duckdb.Error(f"columns not in schema.py: {sorted(unknown)}")
-        cols = "{" + ", ".join(f"'{k}': '{v}'" for k, v in types.items() if k in present) + "}"
-        select = ", ".join(k if k in present else f"NULL::{v} AS {k}" for k, v in types.items())
-        rel = f"SELECT {select} FROM read_csv({src}, {opts}, types={cols}) ORDER BY {schema.SORT[stream]}, recv_ms"
+        con.execute("DROP TABLE IF EXISTS _tsv")
+        con.execute("CREATE TEMP TABLE _tsv (" + ", ".join(f"{k} {v}" for k, v in types.items()) + f", {schema.SEQ_COLUMN} BIGINT)")
+        offset = 0
+        for f in files:
+            tbl = _read_tsv(f, types)
+            unknown = set(tbl.column_names) - set(types)
+            if unknown:
+                raise duckdb.Error(f"columns not in schema.py: {sorted(unknown)}")
+            tbl = tbl.append_column(schema.SEQ_COLUMN, pa.array(np.arange(offset, offset + tbl.num_rows, dtype=np.int64)))
+            offset += tbl.num_rows
+            select = ", ".join(f"CAST({k} AS {v})" if k in tbl.column_names else f"NULL::{v}" for k, v in types.items())
+            con.register("_arrow", tbl)
+            con.execute(f"INSERT INTO _tsv SELECT {select}, {schema.SEQ_COLUMN} FROM _arrow")
+            con.unregister("_arrow")
+        rel = f"SELECT * FROM _tsv ORDER BY {schema.SORT[stream]}, recv_ms, {schema.SEQ_COLUMN}"
     else:
         con.execute(
             f"CREATE OR REPLACE TEMP VIEW src AS SELECT * FROM read_json({src}, format='newline_delimited', "
@@ -62,6 +97,7 @@ def _convert(con: duckdb.DuckDBPyConnection, stream: str, files: list[Path], out
     tmp = out.with_suffix(".tmp")
     con.execute(f"COPY ({rel}) TO '{tmp.as_posix()}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 250000)")
     tmp.replace(out)
+    con.execute("DROP TABLE IF EXISTS _tsv")
     return con.execute(f"SELECT count(*) FROM '{out.as_posix()}'").fetchall()[0][0]
 
 

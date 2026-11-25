@@ -23,3 +23,22 @@ Guidelines for AI assistants working on this codebase.
 - Test SQL against real data before committing, e.g. `cd analysis && uv run polydata sql "..."`.
 - After changing `analysis/`, run `cd analysis && uv run pytest`.
 - After changing `src/recorder/`, run `npm run build`. Deploy steps are in `docs/RECORDER.md#operations`.
+
+## Backtester (`analysis/src/polydata/bt/`, `screen.py`)
+
+Guide: `docs/BACKTESTER.md`. Journals: `docs/strategies/`.
+
+- **Never tune on, or read, sealed days** (every third day from 2026-11-25; hidden in the views). Reading them
+  needs `include_sealed=True` with a purpose and is logged as a look.
+- **`--final` only after `bt validate` passes for the current `sim_version`**, and at most once per
+  (strategy version, sim version, data). Each final run is a look that raises the bar for every strategy.
+- **Every run that matters gets a line** in its strategy journal (`docs/strategies/<strategy>.md`), including
+  failures and the variant count.
+- **Run folders live under `data/runs`** (gitignored) and are shared with `polydata bt push`. Commit only
+  journals, the glossary and `docs/runs-index.csv`.
+- **A change to `bt/` simulator files, `bt/strategies/sanity.py`, `fees.py` or the data layer (`views.py`,
+  `build.py`, `schema.py`) changes `sim_version`**, so re-run `bt validate` before trusting results or using
+  `--final`.
+- **Strategies use only `ctx`** and the handler arguments: no DuckDB, files, clocks or global state, so the same
+  class can run in the live runner.
+- A screen can only reject or promote; only a simulator run can pass.
