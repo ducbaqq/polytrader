@@ -309,6 +309,11 @@ simulator.
 - **A screen can only reject or promote** (promote = lower CI bound on validation days > 0). A promoted idea
   becomes a strategy class and goes through the simulator; only that can pass.
 
+Signal rows may use token `Both` (one Up and one Down share, payoff exactly 1, a fee per leg, always held) for
+complete-set ideas. The research-round screens (`complete-set-arb`, `settlement-lock`, `fair-value-deviation`,
+`binance-momentum`) live in `screen_ideas.py`; `python -m polydata.research.screen_halves RULE "dict(...)" [by]` scores a rule on each
+half of the train day (tune on the first, report the second).
+
 To add a screen, in `analysis/src/polydata/screen.py` write a function taking the snapshot frame and returning
 rows `slug, t_ms, token ('Up'|'Down')` and optionally `size`, then register it:
 

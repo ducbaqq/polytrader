@@ -170,20 +170,28 @@ def fills(snap: pd.DataFrame, signals: pd.DataFrame, latency_ms: int = 300, exit
     need = ["slug", "t_ms", "fee_rate", "outcome_up", "up_bid", "dn_bid", f"up_ask_{latency_ms}", f"dn_ask_{latency_ms}"]
     f = sg.merge(snap[need], on=["slug", "t_ms"], how="inner")
     up = f.token == "Up"
-    f["price"] = np.where(up, f[f"up_ask_{latency_ms}"], f[f"dn_ask_{latency_ms}"]).astype(float)
+    both = f.token == "Both"  # a complete set: one Up and one Down share, worth exactly 1 at resolution
+    pu, pd_ = f[f"up_ask_{latency_ms}"].astype(float), f[f"dn_ask_{latency_ms}"].astype(float)
+    f["price"] = np.where(both, pu + pd_, np.where(up, pu, pd_)).astype(float)
     f["size"] = f["size"].fillna(size).astype(float) if "size" in f else float(size)
-    f = f[(f.price > 0) & (f.price < 1) & (f["size"] > 0)].copy()
+    legs_ok = ~both | ((pu > 0) & (pu < 1) & (pd_ > 0) & (pd_ < 1))
+    f = f[(f.price > 0) & ((f.price < 1) | both) & legs_ok & (f["size"] > 0)].copy()
+    up, both = up[f.index], both[f.index]
+    pu, pd_ = pu[f.index], pd_[f.index]
     f["fee"] = [taker_fee(n, p, r) for n, p, r in zip(f["size"], f.price, f.fee_rate)]
-    won = np.where(up[f.index], f.outcome_up, 1 - f.outcome_up).astype(float)
-    f["exit_px"] = np.where(won > 0, 1.0, 0.0)  # settlement payoff per share
+    if both.any():  # one fee per leg, each on its own price
+        f.loc[both, "fee"] = [taker_fee(n, a, r) + taker_fee(n, b, r) for n, a, b, r in
+                              zip(f["size"][both], pu[both], pd_[both], f.fee_rate[both])]
+    won = np.where(up, f.outcome_up, 1 - f.outcome_up).astype(float)
+    f["exit_px"] = np.where(both, 1.0, np.where(won > 0, 1.0, 0.0))  # settlement payoff per share (set)
     f["exit_fee"] = 0.0
-    if exit == "bid" and len(f):
+    if exit == "bid" and len(f):  # complete sets ("Both") are always held to resolution (payoff exactly 1)
         grid = snap[["slug", "t_ms", "up_bid", "dn_bid"]].rename(columns={"t_ms": "exit_t", "up_bid": "xu", "dn_bid": "xd"})
         left = f.assign(exit_t=f.t_ms + EXIT_DELAY_MS, _i=np.arange(len(f))).sort_values("exit_t")
         m = pd.merge_asof(left, grid.sort_values("exit_t"), on="exit_t", by="slug", direction="forward", tolerance=MAX_EXIT_WAIT_MS - EXIT_DELAY_MS)
         m = m.sort_values("_i")
         bid = np.where(m.token == "Up", m.xu, m.xd).astype(float)
-        ok = np.isfinite(bid) & (bid > 0) & (bid < 1)
+        ok = np.isfinite(bid) & (bid > 0) & (bid < 1) & (m.token != "Both").to_numpy()
         f["exit_px"] = np.where(ok, bid, f.exit_px)
         f["exit_fee"] = [taker_fee(n, b, r) if o else 0.0 for n, b, r, o in zip(f["size"], bid, f.fee_rate, ok)]
     f["pnl"] = f["size"] * (f.exit_px - f.price) - f.fee - f.exit_fee
@@ -297,3 +305,6 @@ def run(name: str, latency_ms: int = 300, exit: str = "hold", size: float = DEFA
     if rebuild_index:
         runs.rebuild_index()
     return d, results
+
+
+from . import screen_ideas  # noqa: E402,F401  (registers the research-round screens)
