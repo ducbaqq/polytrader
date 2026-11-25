@@ -103,3 +103,7 @@ Binance moves that we can see, so a Binance-triggered pull (one- or two-sided) h
   trades at our price with queue left; if the former carry the adverse selection, quote only where we would
   be early in the queue (join new levels, do not requote into old ones).
 - Re-run s1 and the parent with `pull_k` 1.0 on every new train/validation day before believing either way.
+- Done offline in [adverse-flow](../research/adverse-flow.md): of 26 pre-fill features (Polymarket flow, book,
+  Chainlink, Binance spot/futures, context, sibling markets) only the 2 s Binance return predicts adverse fills in
+  both halves, weakly in H2; about two thirds of the adverse selection happens inside the last 200 ms before the
+  fill, beyond any cancel.
