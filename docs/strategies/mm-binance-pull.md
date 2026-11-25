@@ -53,6 +53,19 @@ The cap removes 2.8% of fills (2.5% of shares), mostly cheap ones: spread earned
 selection is unchanged, so the loss grows by $20. The earlier numbers were slightly optimistic; the conclusion
 (5m loses, 15m/1h about flat) does not change.
 
+**After the trade-through cap (sim_version 2127ec99eafd).** A trade printed at a price worse than our quote
+now fills us only with `max(0, x - B - Q)`: what is left of the (one-row) sweep after the better levels' recorded
+drops and the queue ahead of us. Same strategy version and range:
+
+| Run | Scope | Kind | P&L | Fills (shares) | Spread / adverse / inventory, $ | After move | By timeframe 5m / 15m / 1h |
+|---|---|---|---|---|---|---|---|
+| `data/runs/market-making/mm-binance-pull/2026-11-25T0044-2b7f3e` | 8 coins x 3 tf, 10:36-21:50 | train | -$201.24 | 2,636 (18.2k) | +106 / -300 / -7 | 2.7% | -135 / -80 / +13 |
+
+Two thirds of the fills are gone (7,739 to 2,636): most earlier fills were trade-throughs that our queue, not
+us, would have absorbed. The loss shrinks with volume, but per share the picture is the same: spread +0.58 c
+against adverse -1.65 c (before: +0.66 / -1.94). Still a loser; 5m remains the problem. The join-best
+validation run drops the same way (12,601 to 5,234 fills).
+
 On the markets ending by 17:45 (the first runs' range): gated -$322 vs ungated -$341 (the first run had
 -$351 there; a few more markets are unvoided in the refreshed data). The gate saves ~$20-30 and ~7% of
 fills; per-share adverse selection is unchanged (-1.80 vs -1.85 cents). 1h is identical (with
