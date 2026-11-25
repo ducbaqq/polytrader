@@ -73,6 +73,19 @@ fills; per-share adverse selection is unchanged (-1.80 vs -1.85 cents). 1h is id
 
 By timeframe (first defaults run): 5m -$377, 15m +$9, 1h +$17. BTC carries most of the fills (3,855 of 5,336).
 
+## Research round 2026-11-25 (branch `research-mm`): pre-registration
+Written before any run of this round.
+
+- **Hypothesis.** The loss is adverse selection (-1.65 c/share against +0.58 c of spread). Variants that
+  (a) avoid the markets where flow is most informed (BTC, 5m), (b) demand more edge per fill (wider
+  `half_spread`, quote off the fair value instead of the mid), (c) pull harder, or (d) avoid the end of the
+  window and wide books should cut adverse selection per share faster than they cut spread.
+- **Primary metric.** P&L ($) on the first half of 2026-11-24 (markets with `window_start` < 17:15 UTC),
+  read with the per-share attribution. Variants are chosen on the first half only; the chosen one is then
+  reported on the second half (>= 17:15) unchanged, with a 15-minute-block bootstrap CI, and at 400 ms.
+- Each run covers the whole day; the halves are split per market afterwards
+  (`window_start_ms` from `markets.parquet`). Second-half numbers are read only for the chosen variants.
+
 ## Lessons
 - **Pulling works on the flow it targets.** Against the same strategy with pulls off, it cuts the
   fills that follow a Binance move from 13% to 2.7%, adverse selection from -2.32 to -1.87 cents
