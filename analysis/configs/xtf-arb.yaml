@@ -1,0 +1,16 @@
+# cross-timeframe arb (docs/strategies/xtf-arb.md). Run with:
+#   cd analysis && uv run polydata bt run configs/xtf-arb.yaml --days 2026-11-24 [--set order_latency_ms=400]
+strategy: xtf-arb
+params:
+  margin: 0.0           # locked edge per pair after both taker fees
+  size: 50              # max pairs per entry (capped by the visible depth that qualifies)
+  max_spread: 0.10      # both books
+  timeframes: [5m, 15m, 1h, 4h]
+  max_entries: 10       # entries per market pair
+  retry_ms: 1000
+  min_tau_s: 1.0
+  min_kgap_bp: 0.0
+coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]
+timeframes: [5m, 15m, 1h, 4h]
+day_kinds: [train]
+days: [2026-11-24]
