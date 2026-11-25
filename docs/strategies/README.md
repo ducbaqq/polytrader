@@ -18,6 +18,7 @@ reported on the second half unchanged. No validation day yet (first: 2026-11-26)
 | [mm-side-pull](mm-side-pull.md) | market-making | sim | abandoned | H1 +$18, H2 −$116 [−240, 6]; H2 adverse flow isn't preceded by Binance moves |
 | [fair-value-deviation](fair-value-deviation.md) | fair-value | screen | promoted to sim | +6.0 / +5.1¢/sh per half, CIs span 0 |
 | [fv-taker](fv-taker.md) | fair-value | sim | abandoned | H1 +9.6¢/sh, H2 −4.9¢/sh [−13, 4]; margin 3–4¢ positive in both halves (post hoc, re-test on validation days) |
+| [endgame-maker](endgame-maker.md) | endgame | sim | testing (needs validation days) | V2 (5m, last 120 s): H1 +2.0c/sh [-5.9, 9.1], H2 +4.3c/sh [-3.0, 10.4] (80 mkts), +2.3c at 400 ms; edge is settlement, not spread |
 | [complete-set-arb](complete-set-arb.md) | complete-set-arb | screen | abandoned | the two asks never sum below 1 in 5 s snapshots (break-even ≈ 0.97–0.99 after fees) |
 | [settlement-lock](settlement-lock.md) | endgame | screen | abandoned | once the average locks the outcome, nothing is offered below 0.99 |
 | [binance-momentum](binance-momentum.md) | momentum | screen | abandoned | negative in all four half-variants, CIs span 0; the book has already repriced |
