@@ -1,0 +1,19 @@
+# fair-value taker (docs/strategies/fv-taker.md). Run with:
+#   cd analysis && uv run polydata bt run configs/fv-taker.yaml --days 2026-11-24 --latency-sweep [--set params.margin=0.03 ...]
+strategy: fv-taker
+params:
+  margin: 0.02          # buy when fair - ask - fee > margin
+  min_tau_s: 300        # time-left band, seconds
+  max_tau_s: 1200
+  timeframes: [15m, 1h]
+  size: 10              # shares, capped at the visible ask size at the limit
+  max_entries: 1        # entries per market
+  max_tries: 5          # orders per market (an order that fills nothing may be retried)
+  retry_ms: 1000
+  check_ms: 1000        # re-evaluate every second as well as on every book change
+  max_spread: 0.10
+  fee_aware: true       # limit solves limit + fee <= fair - margin (the screen's rule)
+coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]
+timeframes: [15m, 1h]
+day_kinds: [train]
+days: [2026-11-24]
