@@ -142,3 +142,17 @@ Reading:
 ## Next
 Round 1 and 2 (2026-11-25) found no config or one-sided pull that survives the second half of the one train
 day. See [mm-side-pull](mm-side-pull.md#next) for what to test next. More train days first.
+
+## Queue-model sensitivity (controller, 2026-11-25)
+Question: is the adverse selection caused by our pessimistic queue model (`cancel_model: behind`, so a resting quote only
+fills after the whole queue ahead trades, mostly on sweeps)? Same config and day (2026-11-24) with `cancel_model: proportional`
+(others' cancels also shrink the queue ahead of us), sim_version 2127ec99eafd, run `2026-11-25T0519-a0c1a9`:
+
+| Cancel model | Fills | P&L | Spread ¢/sh | Adverse ¢/sh | Inventory ¢/sh | Markout ¢/sh |
+|---|---|---|---|---|---|---|
+| behind (default), run `2026-11-25T0056-0abdaa` | 3,014 | −$224 | +0.59 | −1.58 | −0.08 | −0.99 |
+| proportional | 9,182 | −$353 | +0.81 | −1.66 | +0.26 | −0.85 |
+
+A better queue position triples the fills and earns more spread, but adverse selection per share is unchanged. The loss is not an artefact
+of the queue model: symmetric quoting at the touch loses ~1.6¢/share to the next 10 s under either model. Market making in this form is
+dead in simulation; the next MM idea needs a different source of edge (where we quote, or when), not a better pull trigger.
