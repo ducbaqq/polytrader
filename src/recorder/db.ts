@@ -84,11 +84,17 @@ export async function migrate(): Promise<void> {
   `);
 }
 
-/** Fire-and-forget query; failures are logged, never thrown into the data path. */
-export function bg(sql: string, params: unknown[]): void {
+/**
+ * Fire-and-forget query; failures are logged, never thrown into the data path. The returned promise
+ * always resolves (after the query finished or failed), so a dependent query can be chained after it.
+ */
+export function bg(sql: string, params: unknown[]): Promise<void> {
   const p = getPool();
-  if (!p) return;
-  p.query(sql, params).catch((e) => console.error('[db]', e.message, '|', sql.slice(0, 80)));
+  if (!p) return Promise.resolve();
+  return p.query(sql, params).then(
+    () => undefined,
+    (e) => console.error('[db]', e.message, '|', sql.slice(0, 80)),
+  );
 }
 
 export async function closeDb(): Promise<void> {
