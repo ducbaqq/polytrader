@@ -37,7 +37,15 @@ Count: see the table (each parameter set is one variant).
 | Version | What changed | Why |
 |---|---|---|
 
-## Results
+## Selection (written before reading any second-half number)
+Chosen on the first half: **the defaults (`side_k` 0.5, `side_window_ms` 2000, `side_cooldown_ms` 3000), all
+coins and timeframes** (version of run `2026-11-25T0203-39761e`). Reasons: the pre-registered parameters,
+first-half P&L positive (+$18), and spread + adverse (the 10 s markout) positive per share for the first
+time (+0.06 c against -0.88 c for the baseline). `side_k` 0.25 had a slightly better markout (+0.11 c) on
+half the fills and less P&L; the combination with `pull_k` 1 had more P&L (+$31) but a worse markout
+(-0.47 c), i.e. luckier inventory, so it was not chosen. Comparator carried to the second half: the parent
+with `pull_k` 1.0 (best markout among the Round 1 config variants, +0.14 c on 551 fills).
+
 | Run | Scope | Half | P&L | Fills (shares) | Spread / adverse / inventory, c/share | Notes |
 |---|---|---|---|---|---|---|
 
