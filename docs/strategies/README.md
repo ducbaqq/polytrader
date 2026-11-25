@@ -24,6 +24,8 @@ reported on the second half unchanged. No validation day yet (first: 2026-11-26)
 | [settlement-lock](settlement-lock.md) | endgame | screen | abandoned | once the average locks the outcome, nothing is offered below 0.99 |
 | [binance-momentum](binance-momentum.md) | momentum | screen | abandoned | negative in all four half-variants, CIs span 0; the book has already repriced |
 | [martingale-streak-reversal](martingale-streak-reversal.md) | martingale | screen | abandoned | outcomes are close to independent; escalation only reshapes losses |
+| [sharp-wallet copy (study)](../research/wallets.md) | copy-trading | study | abandoned | wallets chosen on H1 at the 49th pct of random sets on H2; copy +0.3–0.5¢/sh, CIs span 0 |
+| [adverse-flow (study)](../research/adverse-flow.md) | market-making | study | done | 26 pre-fill features, none stable H1→H2; ~2/3 of adverse is inside the 200 ms cancel latency |
 
 ## Validation queue
 
