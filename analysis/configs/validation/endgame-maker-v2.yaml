@@ -1,0 +1,19 @@
+# FROZEN for validation (docs/strategies/README.md#validation-queue). Do not edit; run unchanged:
+#   cd analysis && uv run polydata bt run configs/validation/endgame-maker-v2.yaml --days <validation day> --latency-sweep
+# endgame maker (docs/strategies/endgame-maker.md). Run with:
+#   cd analysis && uv run polydata bt run configs/endgame-maker.yaml --days 2026-11-24 [--latency-sweep] [--set params.start_tau_s=120 ...]
+strategy: endgame-maker
+params:
+  timeframes: [5m]
+  start_tau_s: 120      # quote from this many seconds before the window end
+  stop_tau_s: 5         # ... until this many (cancel then)
+  band_lo: 0.75         # favourite's mid band
+  band_hi: 0.95
+  max_spread: 0.02      # book spread cap (wide books are fake prices)
+  size: 10              # shares, one position per market
+  check_ms: 1000
+  fair_guard: false     # variant: require fair value >= bid + guard_margin
+  guard_margin: 0.0
+coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]
+timeframes: [5m]
+day_kinds: [validation]

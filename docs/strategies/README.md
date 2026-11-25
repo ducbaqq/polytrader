@@ -25,6 +25,25 @@ reported on the second half unchanged. No validation day yet (first: 2026-11-26)
 | [binance-momentum](binance-momentum.md) | momentum | screen | abandoned | negative in all four half-variants, CIs span 0; the book has already repriced |
 | [martingale-streak-reversal](martingale-streak-reversal.md) | martingale | screen | abandoned | outcomes are close to independent; escalation only reshapes losses |
 
+## Validation queue
+
+Fixed on 2026-11-25, before any validation data exists. Each is run **unchanged** on every validation day
+(first: 2026-11-26, then every third day) from the frozen configs in `analysis/configs/validation/`, with
+`--latency-sweep`. Each run is one look and goes into the strategy's journal, pass or fail.
+
+| Config | Why it's queued | Pass on a validation day means |
+|---|---|---|
+| `endgame-maker-v2.yaml` | positive in both train halves (+2.0 / +4.3 ¢/sh), CIs span 0 | the run's verdict passes; at minimum ¢/sh > 0 at 200 and 400 ms |
+| `fv-taker-m3.yaml` | margin 3¢ positive in both halves, but chosen after seeing both (post hoc) | as above |
+| `mm-side-pull.yaml` | best per-share markout on H1; checks whether H2's quiet-evening failure repeats | as above |
+
+```bash
+cd analysis && uv run polydata update --days 2026-11-26
+for c in endgame-maker-v2 fv-taker-m3 mm-side-pull; do
+  uv run polydata bt run configs/validation/$c.yaml --days 2026-11-26 --latency-sweep
+done
+```
+
 ## Family glossary
 
 A strategy's `family` (a class attribute) names the run folder: `data/runs/<family>/<strategy>/...`.
