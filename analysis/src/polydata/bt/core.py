@@ -9,6 +9,7 @@ documented in `engine`'s module docstring.
 from __future__ import annotations
 
 import heapq
+import logging
 import math
 import zlib
 from dataclasses import dataclass, field, replace
@@ -25,6 +26,8 @@ from .marketdata import SIDES, TOKENS, MarketData
 from .portfolio import Portfolio
 from .strategy import BookView, FillInfo, OrderView, Strategy
 from .types import NO_ASK_PX, NO_BID_PX, PX_SCALE, Bbo, ChainlinkTick, MarketInfo, Top, Trade
+
+log = logging.getLogger(__name__)
 
 HOUR_MS = 3_600_000
 INF = float("inf")
@@ -584,9 +587,12 @@ class Core:
     def _push_settle(self, m: _Mkt) -> None:
         """Settle once the resolution was received and every report is in: max(resolution, close + R)."""
         t, res = m.close_ms, m.info.resolution_recv_ms
+        at = int(max(res if res is not None else t, t + self.R))
+        # only the void of an unresolved market after finish_unresolved may lie before now (Decision 3)
+        if at < self.ctx.now and not (self._void_unresolved and not m.resolved):
+            raise RuntimeError(f"{m.info.slug}: settle pushed into the past (at {at} < now {self.ctx.now})")
         m.settle_pushed = True
-        heapq.heappush(self.heap, (int(max(res if res is not None else t, t + self.R)), P_SETTLE,
-                                   m.info.window_end_ms * SETTLE_KEY_SHIFT + m.mi, 0, ("settle", m)))
+        heapq.heappush(self.heap, (at, P_SETTLE, m.info.window_end_ms * SETTLE_KEY_SHIFT + m.mi, 0, ("settle", m)))
 
     def _settle(self, m: _Mkt, t: int) -> None:
         info, row = m.info, self.market_rows[m.info.slug]
@@ -773,6 +779,10 @@ class Core:
         """The market's outcome, received at recv_ms. A closed market's settle is pushed now; otherwise `_close`
         pushes it."""
         m = self.by_slug[slug]
+        if m.settle_pushed:  # a duplicate or corrected resolution, or one after finish_unresolved: too late
+            self.stats["late_resolutions"] = self.stats.get("late_resolutions", 0) + 1
+            log.warning("%s: resolution %s at %d ignored: its settle is already scheduled", slug, outcome, recv_ms)
+            return
         m.info = replace(m.info, outcome=outcome, resolution_recv_ms=int(recv_ms))
         m.resolved = True
         row = self.market_rows.get(slug)
@@ -809,7 +819,7 @@ class Core:
         """Hour boundary (or range start) s of the strategy clock: everything before s is drained and no data event
         at or after s has been dispatched. Reveals waiting for s are pushed."""
         self.hour_seq[s] = self._seq
-        for m, r, v in self._ptb_wait.pop(s, []):  # in load order
+        for m, r, v in self._ptb_wait.pop(s, []):  # in scan order; the heap tie (load index) orders them
             self._push_ptb(m, r, v, s)
 
     def scan_ptb(self) -> None:
@@ -842,8 +852,10 @@ class Core:
             self._ptb_wait.setdefault(s_star, []).append((m, r, value))
 
     def _push_ptb(self, m: _Mkt, r: int, value: float | None, s_star: int) -> None:
-        heapq.heappush(self.heap, (int(max(r, s_star, m.load_ms)), P_TIMER, self.hour_seq[s_star] + 0.5, m.mi,
-                                   ("ptb", m, value)))
+        at = int(max(r, s_star, m.load_ms))
+        if at < self.ctx.now:
+            raise RuntimeError(f"{m.info.slug}: ptb reveal pushed into the past (at {at} < now {self.ctx.now})")
+        heapq.heappush(self.heap, (at, P_TIMER, self.hour_seq[s_star] + 0.5, m.mi, ("ptb", m, value)))
 
     def reset_range(self) -> None:
         """A new replay range: the Binance/Chainlink history (and so sig15) restarts."""
@@ -871,6 +883,8 @@ class Core:
         self.strategy.on_start(self.ctx)
 
     def finish(self, end_ms: int) -> None:
+        if self.defer_settle and not self._void_unresolved:
+            raise RuntimeError("finish with defer_settle needs finish_unresolved() first")
         self.ending = True
         self._drain(INF)
         self._equity_sample(max(self.ctx.now, end_ms))

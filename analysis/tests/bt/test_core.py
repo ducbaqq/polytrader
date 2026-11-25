@@ -403,6 +403,7 @@ def test_settle_order_by_window_end_then_load():
     res = T0 + 2_000_000
     for i in (cc, b, a):  # reverse load order, all received at the same ms
         c.set_resolution(i.slug, "Up", res)
+    c.finish_unresolved()
     c.finish(T0 + 2_100_000)
     assert seen == [(b.slug, res), (a.slug, res), (cc.slug, res)] and pf_seen == [b.slug, a.slug, cc.slug]
     for i in (a, b, cc):
@@ -452,6 +453,7 @@ def test_set_resolution_before_and_after_close(when, dt, outcome):
         assert c.mkts[mi].closed and not [e for e in c.heap if e[4][0] == "settle"]
         assert len(c.fill_rows) == 1 and math.isnan(c.fill_rows[0][16])  # outcome unknown at the close
         c.set_resolution(info.slug, outcome, res)
+    c.finish_unresolved()
     c.finish(end + 200_000)
     assert seen == [max(res, end + 126)]
     f = c.result().fills
@@ -499,3 +501,69 @@ def test_on_trades_appended_lowers_next_ex():
     c.live[mi] = c.mkts[mi]
     c.on_trades_appended(mi)
     assert c.next_ex == 123
+
+
+# ------------------------------------------------------------------------------------------ guards
+
+def test_resolution_after_settle_pushed_is_ignored(caplog):
+    import logging
+
+    from test_engine import T0
+
+    c = _core(defer_settle=True)
+    a, b, cc = _unresolved_markets(c)
+    c.start(T0 - HOUR)
+    c._drain(b.window_end_ms + 1)
+    c.set_resolution(b.slug, "Up", b.window_end_ms + 500)
+    m = c.by_slug[b.slug]
+    info, row = m.info, dict(c.market_rows[b.slug])
+    with caplog.at_level(logging.WARNING, logger="polydata.bt.core"):
+        c.set_resolution(b.slug, "Down", b.window_end_ms + 900)  # a corrected resolution: too late
+    assert m.info is info and c.market_rows[b.slug] == row and c.stats["late_resolutions"] == 1
+    assert b.slug in caplog.text and "ignored" in caplog.text
+    c.finish_unresolved()  # voids cc (closes during finish) and a
+    c.set_resolution(a.slug, "Up", T0 + 950_000)  # a is still open: accepted
+    c.finish(T0 + 2_000_000)
+    c.set_resolution(cc.slug, "Up", T0 + 2_000_000)  # after the void
+    assert c.stats["late_resolutions"] == 2 and c.market_rows[cc.slug]["voided"] is True
+    assert c.market_rows[cc.slug]["outcome"] is None and c.market_rows[b.slug]["outcome"] == "Up"
+    assert c.market_rows[a.slug]["voided"] is False and not c.log
+
+
+def test_no_push_into_the_past():
+    from test_engine import M1, T0, market_one
+
+    c = _core(defer_settle=True)
+    h = T0 // HOUR * HOUR
+    c.mark_hour(h)
+    m = c.mkts[c.stage(M1, market_one(), h, h)]
+    c.ctx.now = T0 + 5_000
+    with pytest.raises(RuntimeError, match=rf"{M1.slug}: ptb reveal pushed into the past.*{T0 + 2_000}.*{T0 + 5_000}"):
+        c.schedule_ptb(m, T0 + 2_000, 60000.0)
+    # a resolution received well after the close, applied when the clock is even later
+    a, b, cc = _unresolved_markets(_c2 := _core(defer_settle=True))
+    _c2.start(T0 - HOUR)
+    _c2._drain(b.window_end_ms + 1)
+    _c2.ctx.now = b.window_end_ms + 10_000
+    with pytest.raises(RuntimeError, match=rf"{b.slug}: settle pushed into the past"):
+        _c2.set_resolution(b.slug, "Up", b.window_end_ms + 5_000)
+    # the voids of finish_unresolved may lie in the past (Decision 3)
+    a, b, cc = _unresolved_markets(_c3 := _core(defer_settle=True))
+    _c3.start(T0 - HOUR)
+    _c3._drain(b.window_end_ms + 1)
+    _c3.ctx.now = b.window_end_ms + 10_000
+    _c3.finish_unresolved()
+    assert [e[0] for e in _c3.heap if e[4][0] == "settle"] == [b.window_end_ms + 126]
+
+
+def test_finish_with_defer_settle_needs_finish_unresolved():
+    from test_engine import T0
+
+    c = _core(defer_settle=True)
+    _unresolved_markets(c)
+    c.start(T0 - HOUR)
+    with pytest.raises(RuntimeError, match="finish_unresolved"):
+        c.finish(T0 + 2_000_000)
+    r = _core()  # replay mode: no such requirement
+    r.start(T0 - HOUR)
+    r.finish(T0)
