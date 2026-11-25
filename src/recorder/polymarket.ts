@@ -27,6 +27,7 @@ interface Market {
   done: boolean;          // unsubscribed after end
   resolved: boolean;
   tradesFetched: boolean;
+  inserted?: Promise<void>; // the rec_markets INSERT; row updates are chained after it
   failures?: number;      // consecutive REST failures while resolving (drives backoff)
   nextTry?: number;       // don't retry before this time (ms)
 }
@@ -181,7 +182,7 @@ function registerMarket(series: SeriesDef, event: any, now: number): void {
   tokenKey.set(up, `${mk.slug}|U`);
   tokenKey.set(down, `${mk.slug}|D`);
   marketMeta({ series: series.slug, event }, now);
-  bg(
+  mk.inserted = bg(
     `INSERT INTO rec_markets (slug, series_slug, coin, recurrence, condition_id, up_token_id, down_token_id,
        window_start, window_end, resolution_source, twap_lookback_s, fee_schedule, tick_size, min_order_size)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (slug) DO NOTHING`,
@@ -212,6 +213,11 @@ async function discover(): Promise<void> {
   updateSubscriptions();
 }
 
+/** Runs a row update for `m` once its INSERT has finished (now() is evaluated when the UPDATE runs: ms later). */
+function afterInsert(m: Market, sql: string): void {
+  void (m.inserted ?? Promise.resolve()).then(() => bg(sql, [m.slug]));
+}
+
 function updateSubscriptions(): void {
   const now = Date.now();
   const add = new Map<string, string[]>();
@@ -221,11 +227,13 @@ function updateSubscriptions(): void {
     if (!m.subscribed && now >= m.start - leadMs(m) && now < m.end + CONFIG.unsubscribeAfterEndMs) {
       m.subscribed = true;
       push(add, m);
-      bg('UPDATE rec_markets SET subscribed_at = now(), updated_at = now() WHERE slug = $1', [m.slug]);
+      // A market discovered in this same tick (4h/daily: lookahead == subscription lead) has its INSERT
+      // still in flight; an UPDATE racing ahead of it matched no row and lost subscribed_at.
+      afterInsert(m, 'UPDATE rec_markets SET subscribed_at = now(), updated_at = now() WHERE slug = $1');
     } else if (m.subscribed && !m.done && now >= m.end + CONFIG.unsubscribeAfterEndMs) {
       m.done = true;
       push(remove, m);
-      bg('UPDATE rec_markets SET unsubscribed_at = now(), updated_at = now() WHERE slug = $1', [m.slug]);
+      afterInsert(m, 'UPDATE rec_markets SET unsubscribed_at = now(), updated_at = now() WHERE slug = $1');
     }
   }
   for (const [group, ids] of add) {
