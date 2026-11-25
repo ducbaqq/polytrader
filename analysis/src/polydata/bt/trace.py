@@ -39,7 +39,10 @@ class TracedStrategy:
         self._s, self._rows = strategy, rows
 
     def __getattr__(self, name):
-        return getattr(self._s, name)
+        # only reached for attributes the wrapper lacks; never for its own slots (unset in a bare or copied instance)
+        if name in TracedStrategy.__slots__ or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(object.__getattribute__(self, "_s"), name)
 
     def _row(self, ctx, call: str, key, ret=None) -> None:
         rows = self._rows
@@ -94,17 +97,18 @@ class TracedCtx(SimCtx):
         self._rows = rows
 
     def _call(self, call: str, key, fn, fmt=repr, token=None, side=None, price=_NAN, size=_NAN, flag=None):
-        ret = None
+        rows = self._rows
         try:
             v = fn()
-            ret = fmt(v)
-            return v
         except BaseException as e:
-            ret = "raise:" + type(e).__name__
+            rows.append((len(rows), self.now, call, key, token, side, price, size, "raise:" + type(e).__name__, flag))
             raise
+        ret = None
+        try:
+            ret = fmt(v)  # a formatter error is a trace bug, not a raise of the call: the row keeps ret None
         finally:
-            rows = self._rows
             rows.append((len(rows), self.now, call, key, token, side, price, size, ret, flag))
+        return v
 
     def place(self, slug, token, side, price, size, post_only=True) -> int:
         return self._call("place", slug, lambda: SimCtx.place(self, slug, token, side, price, size, post_only),

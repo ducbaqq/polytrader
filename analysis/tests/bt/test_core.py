@@ -152,3 +152,43 @@ def test_traced_strategy_forwards_attributes():
              {"btc": 100.0}, s, trace=True)
     assert c.strategy is not s and c.strategy.name == "recorder" and c.strategy.params == s.params
     assert c.strategy.events is s.events
+
+
+def test_traced_strategy_getattr_no_recursion():
+    import copy
+
+    import pytest
+
+    from polydata.bt.trace import TracedStrategy
+
+    bare = TracedStrategy.__new__(TracedStrategy)
+    with pytest.raises(AttributeError):
+        bare.foo  # noqa: B018
+    with pytest.raises(AttributeError):
+        bare._s  # noqa: B018
+    inner = object()
+    c = copy.copy(TracedStrategy(inner, []))
+    assert c._s is inner
+    with pytest.raises(AttributeError):
+        c.missing  # noqa: B018
+
+
+def test_traced_ctx_formatter_error_is_not_a_raise():
+    import pytest
+
+    from polydata.bt.trace import TracedCtx
+
+    rows = []
+    ctx = TracedCtx.__new__(TracedCtx)
+    ctx._rows, ctx.now = rows, 5
+
+    def bad_fmt(v):
+        raise RuntimeError("fmt")
+
+    with pytest.raises(RuntimeError):
+        ctx._call("top", "s", lambda: 1, bad_fmt)
+    assert rows[-1][2] == "top" and rows[-1][8] is None
+    with pytest.raises(KeyError):
+        ctx._call("top", "s", lambda: {}["x"])
+    assert rows[-1][8] == "raise:KeyError"
+    assert ctx._call("top", "s", lambda: 2.5) == 2.5 and rows[-1][8] == "2.5"
