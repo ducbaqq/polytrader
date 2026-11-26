@@ -306,7 +306,7 @@ def cmd_screen(a) -> None:
 
 
 def cmd_push(a) -> None:
-    print(f"uploaded {runs.push()} files")
+    print(f"uploaded {runs.push(with_sessions=a.with_sessions)} files")
 
 
 def cmd_pull(a) -> None:
@@ -356,5 +356,7 @@ def register(bt: argparse.ArgumentParser) -> None:
     sp.add_argument("--timeframes", nargs="+")
     sp.set_defaults(fn=cmd_screen)
 
-    sub.add_parser("push", help="upload data/runs to the bucket, rebuild the index").set_defaults(fn=cmd_push)
+    sp = sub.add_parser("push", help="upload data/runs to the bucket, rebuild the index")
+    sp.add_argument("--with-sessions", action="store_true", help="also upload paper sessions (large)")
+    sp.set_defaults(fn=cmd_push)
     sub.add_parser("pull", help="download runs from the bucket, rebuild the index").set_defaults(fn=cmd_pull)

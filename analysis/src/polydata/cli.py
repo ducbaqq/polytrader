@@ -168,6 +168,10 @@ def main(argv: list[str] | None = None) -> None:
 
     register(sub.add_parser("bt", help="backtester: run, sweep, validate, runs, push, pull"))
 
+    from .paper.cli import register as register_paper
+
+    register_paper(sub)
+
     a = ap.parse_args(argv)
     a.fn(a)
 
