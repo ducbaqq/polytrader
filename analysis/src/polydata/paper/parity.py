@@ -89,6 +89,7 @@ BEFORE_N = 10
 def load_run(run_dir: Path) -> tuple[RunConfig, dict]:
     d = yaml.safe_load((Path(run_dir) / "config.yaml").read_text()) or {}
     d.pop("paper", None)
+    d.setdefault("taker_delay_ms", 0)  # a run from before the simulated taker delay ran without it
     man = json.loads((Path(run_dir) / "session" / "manifest.json").read_text())
     return RunConfig.from_dict(d), man
 

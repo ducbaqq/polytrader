@@ -208,8 +208,25 @@ def _live(res) -> pd.DataFrame:
 
 
 def _mk(con) -> pd.DataFrame:
-    return con.execute("SELECT slug, outcome, fee_rate, fee_exponent, min_order_size, window_end_ms FROM _v_mk").df()\
+    return con.execute("SELECT slug, coin, timeframe, outcome, fee_rate, fee_exponent, min_order_size, window_end_ms "
+                       "FROM _v_mk").df()\
         .set_index("slug")
+
+
+def _held(con, q: pd.DataFrame, side: str, mk: pd.DataFrame, taker_delay_ms: int,
+          taker_delay_markets: Iterable[str]) -> pd.DataFrame:
+    """q[qid, slug, t] with t moved to when the take is matched: Polymarket holds a marketable order (the `side`
+    it takes from is not empty at its arrival t) for `taker_delay_ms` on a delayed market (its coin-timeframe is
+    in `taker_delay_markets`), then matches it against the book of that time."""
+    delayed = {str(x) for x in taker_delay_markets}
+    if not taker_delay_ms or not delayed or not len(q):
+        return q
+    hold = np.array([f"{mk.loc[s].coin}-{mk.loc[s].timeframe}" in delayed for s in q.slug])
+    if not hold.any():
+        return q
+    top = _best(con, q, side).set_index("qid").reindex(q.qid)
+    hold &= top.px.notna().to_numpy()
+    return q.assign(t=q.t.to_numpy() + np.where(hold, int(taker_delay_ms), 0))
 
 
 def _placed(res, side: str) -> pd.DataFrame:
@@ -300,9 +317,11 @@ def check_noop(res) -> dict:
             "markets": len(live), "orders": len(res.orders), "pnl_total": float(pnl.sum())}
 
 
-def check_buy_and_hold(con, res, order_latency_ms: int = 200, days: Iterable[str] | None = None) -> dict:
+def check_buy_and_hold(con, res, order_latency_ms: int = 200, days: Iterable[str] | None = None,
+                       taker_delay_ms: int = 0, taker_delay_markets: Iterable[str] = ()) -> dict:
     """P&L = size * (outcome_up - ask) - taker_fee(size, ask) with the Up best ask when the order arrives:
-    the market's open (its first in-range snapshot received, `ref_open_ms`) + latency."""
+    the market's open (its first in-range snapshot received, `ref_open_ms`) + latency (+ the taker hold on a
+    delayed market, `_held`)."""
     live = _live(res)
     _stage(con, live.slug)
     mk = _mk(con)
@@ -311,6 +330,7 @@ def check_buy_and_hold(con, res, order_latency_ms: int = 200, days: Iterable[str
     slugs = [s for s in pl.index if s in opened.index]
     q = pd.DataFrame({"slug": slugs, "t": [int(opened[s]) + order_latency_ms for s in slugs]})
     q["qid"] = np.arange(len(q))
+    q = _held(con, q, "SELL", mk, taker_delay_ms, taker_delay_markets)
     ask = _best(con, q, "SELL").set_index("qid")
     sim = live.set_index("slug").pnl.astype(float)
     rows, skipped = [], []
@@ -327,9 +347,10 @@ def check_buy_and_hold(con, res, order_latency_ms: int = 200, days: Iterable[str
     return _compare(rows, skipped, missing, failures)
 
 
-def check_always_cross(con, res, order_latency_ms: int = 200, days: Iterable[str] | None = None) -> dict:
+def check_always_cross(con, res, order_latency_ms: int = 200, days: Iterable[str] | None = None,
+                       taker_delay_ms: int = 0, taker_delay_markets: Iterable[str] = ()) -> dict:
     """Loss = (ask_t1 - bid_t2) * size + fee(ask) + fee(bid): ask at the buy's arrival (reference open +
-    latency), bid at the sell's. Only a thin top level (< min_order_size) is a skip; a market with a
+    latency), bid at the sell's; each + the taker hold on a delayed market (`_held`). Only a thin top level (< min_order_size) is a skip; a market with a
     fillable buy but no sell, or a sell arriving after the window end, is a failure."""
     live = _live(res)
     _stage(con, live.slug)
@@ -340,9 +361,11 @@ def check_always_cross(con, res, order_latency_ms: int = 200, days: Iterable[str
     slugs = [s for s in buy.index if s in opened.index]
     q = pd.DataFrame({"slug": slugs, "t": [int(opened[s]) + order_latency_ms for s in slugs]})
     q["qid"] = np.arange(len(q))
+    q = _held(con, q, "SELL", mk, taker_delay_ms, taker_delay_markets)
     ask = _best(con, q, "SELL").set_index("qid")
     q2 = q[q.slug.isin(sell.index)].copy()
     q2["t"] = [int(sell[s]) + order_latency_ms for s in q2.slug]
+    q2 = _held(con, q2, "BUY", mk, taker_delay_ms, taker_delay_markets)
     bid = _best(con, q2, "BUY").set_index("qid") if len(q2) else pd.DataFrame(columns=["px", "size"])
     sim = live.set_index("slug").pnl.astype(float)
     rows, skipped = [], []
@@ -615,14 +638,16 @@ def run_suite(days: list[str], coins=("btc", "sol"), timeframes=("5m",), *, con_
         cfg = RunConfig(strategy=name.split("#")[0], **base)
         runs[name] = engine.run(cfg, con_factory, workers)
         timing[name] = round(time.perf_counter() - t, 1)
-    lat = RunConfig(strategy="noop", **base).order_latency_ms
+    ref_cfg = RunConfig(strategy="noop", **base)
+    lat = ref_cfg.order_latency_ms
+    hold = dict(taker_delay_ms=ref_cfg.taker_delay_ms, taker_delay_markets=ref_cfg.taker_delay_markets)
     con = con_factory()
     try:
         checks = {
             "book_reconstruction": check_reconstruction(con, runs["noop"], timeframes, recon_rows),
             "noop": check_noop(runs["noop"]),
-            "buy_and_hold_up": check_buy_and_hold(con, runs["buy-and-hold-up"], lat, base["days"]),
-            "always_cross": check_always_cross(con, runs["always-cross"], lat, base["days"]),
+            "buy_and_hold_up": check_buy_and_hold(con, runs["buy-and-hold-up"], lat, base["days"], **hold),
+            "always_cross": check_always_cross(con, runs["always-cross"], lat, base["days"], **hold),
             "fill_support": check_fill_support(con, runs["join-best"], lat),
             "maker_edge": check_maker_edge(con, runs["join-best"]),
             "determinism": check_determinism(runs["join-best"], runs["join-best#2"]),

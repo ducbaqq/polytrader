@@ -484,3 +484,29 @@ def test_run_suite_synthetic(tmp_path, monkeypatch):
         assert c[k]["passed"], (k, c[k])
     assert out["passed"] == all(x["passed"] for x in c.values())
     assert validate.is_validated(out["sim_version"]) == out["passed"]
+
+
+def _held_raw() -> Raw:
+    # the best ask goes during the buy's taker hold, the best bid during the sell's
+    ws = M1.window_start_ms
+    return Raw().market(M1, bids="0.48:100|0.47:100", asks="0.52:100|0.53:100",
+                        changes=[(ws - 59_600, "SELL", 0.52, 0, 0.48, 0.53), (ws - 59_000, "BUY", 0.48, 0, 0.47, 0.53)])
+
+
+def test_references_account_for_the_taker_delay():
+    r = _held_raw()
+    hold = dict(taker_delay_ms=250, taker_delay_markets=["btc-5m"])
+    res = run(r, "buy-and-hold-up", taker_delay_ms=250)
+    assert res.fills.px.tolist() == [0.53]
+    assert validate.check_buy_and_hold(r.con(), res, order_latency_ms=200, **hold)["passed"]
+    assert not validate.check_buy_and_hold(r.con(), res, order_latency_ms=200)["passed"]
+    res = run(r, "always-cross", taker_delay_ms=250)
+    f = res.fills.sort_values("ts_ms")
+    assert f.px.tolist() == [0.53, 0.47]
+    assert f.ts_ms.iloc[1] - f.ts_ms.iloc[0] == 126 + 200 + 250
+    chk = validate.check_always_cross(r.con(), res, order_latency_ms=200, **hold)
+    assert chk["passed"] and chk["compared"] == 1, chk
+    assert not validate.check_always_cross(r.con(), res, order_latency_ms=200)["passed"]
+    # sol is not a delayed market: the reference ignores the hold there
+    assert validate.check_always_cross(r.con(), run(r, "always-cross", taker_delay_ms=0), order_latency_ms=200,
+                                       taker_delay_ms=250, taker_delay_markets=["sol-5m"])["passed"]

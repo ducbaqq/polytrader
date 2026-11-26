@@ -56,7 +56,7 @@ class FinalRefused(Exception):
 # them could loosen the evaluation. Strategy params, coins, timeframes, tags and seed are free.
 FINAL_FIXED_FIELDS = ("order_latency_ms", "latency_jitter_ms", "fill_report_latency_ms", "cancel_model",
                       "impact_reset_ms", "capital", "capital_mode", "redeem_delay_s", "max_gap_ms_pm", "max_gap_ms_bn",
-                      "bn_step_ms", "min_usd_per_day")
+                      "bn_step_ms", "min_usd_per_day", "taker_delay_ms", "taker_delay_markets")
 
 
 def check_final_config(cfg: RunConfig) -> None:

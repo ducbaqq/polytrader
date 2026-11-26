@@ -142,6 +142,8 @@ new parameters is a new version.
 | `fill_report_latency_ms` | 126 | Exchange event to the strategy's `on_order` |
 | `cancel_model` | `behind` | `behind` (others' cancels are behind us, pessimistic) or `proportional` |
 | `impact_reset_ms` | 5000 | How long liquidity we took stays removed from a level |
+| `taker_delay_ms` | 250 | Polymarket's hold of marketable orders on delayed markets (0 turns it off) |
+| `taker_delay_markets` | `[btc-5m, eth-5m, btc-15m]` | Delayed markets as `coin-timeframe`. Provisional, see below (`[]` turns it off) |
 | `capital` | 5000.0 | Total, split into equal fixed per-coin budgets |
 | `capital_mode` | `per_coin` | `global` replays all coins in one pass with one shared balance |
 | `redeem_delay_s` | 60 | Delay from the recorded resolution to the payout |
@@ -189,6 +191,19 @@ Conservative by default: when in doubt, we do not get filled.
 - **Taker orders** walk the recorded book at arrival, limited to the visible depth. One fee per order, on the
   average price (`taker_fee`, verified on-chain; makers pay 0, rebates 0%). Liquidity we take stays removed
   from the level until it empties in the recording or `impact_reset_ms` passes.
+- **Taker delay.** On some crypto up/down markets Polymarket holds a marketable order for 250 ms, then
+  validates it again and matches it or places it on the book (docs: concepts/order-lifecycle; per-market
+  flag `itode` from `clob-markets/{condition_id}`). Held orders are pending and cannot be cancelled. In the
+  simulator a non-post-only order (take or limit) that crosses the recorded top when it arrives is held
+  `taker_delay_ms`, then processed as if it arrived at the hold's end: accepted, matched against the book of
+  that time (others' cancels during the hold count), the rest cancelled (take) or resting from then (limit).
+  A cancel reaching it during the hold gets `cancel_rejected` ("taker delay"); a hold ending at or after the
+  window end is rejected. Makers (non-crossing orders, post-only, cancels) are not delayed. Reports come
+  `fill_report_latency_ms` after the real match time. **Provisional:** the recorder does not capture
+  `itode` yet, so the delayed markets come from `taker_delay_markets` (BTC 5m confirmed 2026-11-26; ETH 5m and
+  BTC 15m reported); a `MarketInfo.taker_delay` flag set by the data also counts. The delay length is
+  config because sources disagreed (50, 150, 250 ms; the live docs say 250). Runs before sim_version
+  with this feature had no delay; `taker_delay_ms: 0` reproduces them exactly.
 - **Latency.** Defaults: 200 ms for orders and cancels, 126 ms for fill reports (measured feed delay).
   `--latency-sweep` shows 100/200/400 ms.
 - **Window end.** No new orders after `window_end_ms`; resting orders expire and no fills happen at or after
@@ -246,7 +261,7 @@ Every recorded day has one permanent kind, set by its date: day number = days si
   for the current `sim_version`, and refused (listing the fields) if the config changes any simulator,
   capital or pass setting from its default: `order_latency_ms`, `latency_jitter_ms`, `fill_report_latency_ms`,
   `cancel_model`, `impact_reset_ms`, `capital`, `capital_mode`, `redeem_delay_s`, `max_gap_ms_pm`,
-  `max_gap_ms_bn`, `bn_step_ms`, `min_usd_per_day`. Strategy params, coins, timeframes, tags and seed are free.
+  `max_gap_ms_bn`, `bn_step_ms`, `min_usd_per_day`, `taker_delay_ms`, `taker_delay_markets`. Strategy params, coins, timeframes, tags and seed are free.
 - `--final` first runs `bt pull` so earlier finals and looks of other machines count. Offline use is allowed:
   if the pull fails it warns and records `pulled: false` in `provenance.json`.
 - One final run per (strategy version, `sim_version`, data fingerprint). A simulator fix or re-synced data
@@ -336,7 +351,8 @@ with references computed independently in DuckDB SQL over the raw views:
 1. **Book reconstruction:** the combined book's best bid and ask match `pm_best_bid_ask` in at least 99.5% of
    sampled moments, per market.
 2. **Sanity strategies:** `noop` earns exactly 0; `buy-and-hold-up` and `always-cross` match a direct DuckDB
-   computation to the cent.
+   computation to the cent (on a delayed market the reference reads the book `taker_delay_ms` after the
+   arrival when the order was marketable then).
 3. **Fill realism:** every `join-best` maker fill is re-derived from the raw trades with the fill model's
    rules (checked order by order); and `join-best` earns less per share than the average maker in the
    calibration study.

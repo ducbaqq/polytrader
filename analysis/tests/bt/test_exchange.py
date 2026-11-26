@@ -507,3 +507,97 @@ def test_no_open_orders_skips_trades():
     o = order(px=480, size=10, arrival=T0 + 2500)
     ex.submit(o)
     assert fills(ex.advance(T0 + 5000)) == []  # all trades are in the past
+
+
+# ------------------------------------------------------------------------------------------ taker delay
+
+DELAY = ExchangeConfig(taker_delay_ms=250)
+
+
+def test_taker_delay_fills_at_book_after_hold():
+    # the ask improves 100 ms after arrival and worsens 300 ms after: the take sees the book at arrival + 250
+    md = market("0.48:100", "0.52:100", changes=[(T0 + 1100, "SELL", 0.51, 50), (T0 + 1300, "SELL", 0.51, 0)])
+    ex = Exchange(md, DELAY)
+    o = order(px=550, size=10, kind="take")
+    ex.submit(o)
+    assert ex.advance(T0 + 1249) == [] and o.status == "pending"
+    ev = ex.advance(T0 + 1250)
+    assert [e.kind for e in ev] == ["accepted", "fill"] and ev[0].ts_ms == T0 + 1250
+    f = fills(ev)
+    assert f[0].px == 510 and f[0].ts_ms == T0 + 1250 and f[0].liquidity == "taker"
+    assert f[0].fee == pytest.approx(taker_fee(10, 0.51, 0.05, 1.0)) and o.status == "filled"
+
+
+def test_taker_delay_off_fills_at_arrival():
+    md = market("0.48:100", "0.52:100", changes=[(T0 + 1100, "SELL", 0.51, 50)])
+    ex = Exchange(md, ExchangeConfig())
+    o = order(px=550, size=10, kind="take")
+    ex.submit(o)
+    f = fills(ex.advance(T0 + 1000))
+    assert f[0].px == 520 and f[0].ts_ms == T0 + 1000
+
+
+def test_maker_cancel_inside_hold_beats_taker():
+    # the 0.52 ask is cancelled 100 ms into the hold: the take walks to 0.53, or gets nothing under its limit
+    chg = [(T0 + 1100, "SELL", 0.52, 0)]
+    md = market("0.48:100", "0.52:100|0.53:100", changes=chg)
+    ex = Exchange(md, DELAY)
+    o = order(px=550, size=10, kind="take")
+    ex.submit(o)
+    f = fills(ex.advance(T0 + 2000))
+    assert [x.px for x in f] == [530] and f[0].ts_ms == T0 + 1250
+    md = market("0.48:100", "0.52:100|0.53:100", changes=chg)
+    ex = Exchange(md, DELAY)
+    o = order(px=520, size=10, kind="take")
+    ex.submit(o)
+    ev = ex.advance(T0 + 2000)
+    assert [e.kind for e in ev] == ["accepted", "cancelled"] and ev[1].reason == "ioc remainder"
+    assert o.filled == 0 and ev[1].ts_ms == T0 + 1250
+
+
+def test_cancel_of_held_taker_rejected():
+    md = market("0.48:100", "0.52:100")
+    ex = Exchange(md, DELAY)
+    o = order(px=520, size=130, kind="limit")
+    ex.submit(o)
+    ex.request_cancel(o.id, T0 + 1000)  # the same ms as its arrival: the order is processed first, then held
+    ex.request_cancel(o.id, T0 + 1200)
+    ev = ex.advance(T0 + 1250)
+    assert [(e.kind, e.ts_ms, e.reason) for e in ev[:2]] == [("cancel_rejected", T0 + 1000, "taker delay"),
+                                                             ("cancel_rejected", T0 + 1200, "taker delay")]
+    assert [e.kind for e in ev[2:]] == ["accepted", "fill"]
+    # the crossing limit's remainder rests from the hold's end; a cancel now works
+    assert o.status == "open" and o.filled == 100 and o.book_ms == T0 + 1250
+    ex.request_cancel(o.id, T0 + 1300)
+    assert [e.kind for e in ex.advance(T0 + 1300)] == ["cancelled"]
+
+
+def test_held_limit_rests_if_no_longer_crossing():
+    # the ask moves away during the hold: the limit is placed on the book at the hold's end, behind the bid level
+    md = market("0.50:40", "0.52:100", changes=[(T0 + 1100, "SELL", 0.52, 0), (T0 + 1100, "SELL", 0.55, 100),
+                                                (T0 + 1150, "BUY", 0.52, 70)])
+    ex = Exchange(md, DELAY)
+    o = order(px=520, size=10)
+    ex.submit(o)
+    ev = ex.advance(T0 + 1250)
+    assert [e.kind for e in ev] == ["accepted"] and ev[0].ts_ms == T0 + 1250
+    assert o.status == "open" and o.queue_ahead == 70 and o.book_ms == T0 + 1250
+
+
+def test_non_crossing_and_post_only_not_delayed():
+    md = market("0.48:100", "0.52:100")
+    ex = Exchange(md, DELAY)
+    a, b = order(px=480), order(token="Up", side="SELL", px=530, post_only=True)
+    ex.submit(a)
+    ex.submit(b)
+    ev = ex.advance(T0 + 1000)
+    assert [e.kind for e in ev] == ["accepted", "accepted"] and a.book_ms == T0 + 1000
+
+
+def test_hold_past_window_end_rejected():
+    md = market("0.48:100", "0.52:100")
+    ex = Exchange(md, DELAY)
+    o = order(px=550, size=10, kind="take", arrival=T0 + 299_900)
+    ex.submit(o)
+    ev = ex.close(T0 + 300_000)
+    assert [(e.kind, e.reason) for e in ev] == [("rejected", "after window end")] and o.status == "rejected"
