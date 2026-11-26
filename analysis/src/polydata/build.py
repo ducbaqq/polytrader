@@ -24,7 +24,7 @@ import pyarrow as pa
 
 from . import schema
 from .config import paths
-from .views import MARKETS_SQL
+from .views import MARKETS_SQL, markets_sql
 
 
 def _has_rows(f: Path) -> bool:
@@ -150,7 +150,12 @@ def build_markets(con: duckdb.DuckDBPyConnection | None = None) -> None:
     con = con or duckdb.connect()
     out = p.parquet / "markets.parquet"
     tmp = out.with_suffix(".tmp")
-    con.execute(f"COPY ({MARKETS_SQL.format(P=p.parquet.as_posix())}) TO '{tmp.as_posix()}' (FORMAT parquet)")
+    sql = MARKETS_SQL.format(P=p.parquet.as_posix())
+    if not list((p.parquet / "pm_resolution").glob("*/*.parquet")):
+        # no market resolved yet (a short paper session): an empty resolution relation instead of a failing glob
+        sql = markets_sql(f"read_parquet('{p.parquet.as_posix()}/pm_market_meta/*/*.parquet')",
+                          "(SELECT NULL::BIGINT AS recv_ms, NULL::JSON AS d WHERE false)")
+    con.execute(f"COPY ({sql}) TO '{tmp.as_posix()}' (FORMAT parquet)")
     tmp.replace(out)
     n = con.execute(f"SELECT count(*) FROM '{out.as_posix()}'").fetchall()[0][0]
     print(f"  markets.parquet {n:,} markets")
