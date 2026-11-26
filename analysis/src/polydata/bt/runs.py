@@ -319,9 +319,17 @@ def final_preflight(strategy_cls: type, params: dict, days: list[str], sim_ver: 
 
 # ---------------------------------------------------------------------------------------- sharing
 
-def _shared_files() -> list[Path]:
+def _is_session(rel: Path) -> bool:
+    """A file of a paper run's `session/` folder (`<family>/<strategy>/<run>/session/...`): large, pushed only on
+    request."""
+    return "session" in rel.parts[3:-1]
+
+
+def _shared_files(with_sessions: bool = False) -> list[Path]:
     r = runs_dir()
-    return sorted(f for f in r.rglob("*") if f.is_file() and f.name not in _NOT_SHARED and not f.name.endswith((".part", ".tmp")))
+    return sorted(f for f in r.rglob("*") if f.is_file() and f.name not in _NOT_SHARED
+                  and not f.name.endswith((".part", ".tmp", ".lock"))
+                  and (with_sessions or not _is_session(f.relative_to(r))))
 
 
 def _remote(client, bucket_name: str) -> dict[str, int]:
@@ -339,8 +347,9 @@ def _client(client, bucket_name):
     return client, bucket_name
 
 
-def push(client=None, bucket_name: str | None = None, csv_path: Path | None = None) -> int:
-    """Upload run files that are missing in the bucket (or differ in size), then rebuild the index."""
+def push(client=None, bucket_name: str | None = None, csv_path: Path | None = None, with_sessions: bool = False) -> int:
+    """Upload run files that are missing in the bucket (or differ in size), then rebuild the index. Paper sessions
+    (`*/session/**`) only `with_sessions`."""
     client, bucket_name = _client(client, bucket_name)
     local_looks = runs_dir() / "looks.jsonl"
     if local_looks.exists():  # shared under a per-host name so machines never overwrite each other's looks
@@ -348,7 +357,7 @@ def push(client=None, bucket_name: str | None = None, csv_path: Path | None = No
         shutil.copyfile(local_looks, runs_dir() / "looks" / f"{host_hash()}.jsonl")
     remote = _remote(client, bucket_name)
     n = 0
-    for f in _shared_files():
+    for f in _shared_files(with_sessions):
         key = "runs/" + f.relative_to(runs_dir()).as_posix()
         if remote.get(key) != f.stat().st_size:
             client.upload_file(str(f), bucket_name, key)
