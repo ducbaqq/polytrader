@@ -1,0 +1,77 @@
+{
+ "messages": [
+  [
+   "a",
+   "{\"topic\": \"crypto_prices_chainlink\", \"type\": \"update\", \"timestamp\": 1005, \"payload\": {\"symbol\": \"btc/usd\", \"timestamp\": 1000, \"value\": 87000, \"full_accuracy_value\": \"87000000000000000000\"}}"
+  ],
+  [
+   "b",
+   "{\"topic\": \"crypto_prices_chainlink\", \"type\": \"update\", \"timestamp\": 1005, \"payload\": {\"symbol\": \"btc/usd\", \"timestamp\": 1000, \"value\": 87000, \"full_accuracy_value\": \"87000000000000000000\"}}"
+  ],
+  [
+   "b",
+   "{\"topic\": \"crypto_prices_chainlink\", \"type\": \"update\", \"timestamp\": 2005, \"payload\": {\"symbol\": \"btc/usd\", \"timestamp\": 2000, \"value\": 87001, \"full_accuracy_value\": \"87001000000000000000\"}}"
+  ],
+  [
+   "a",
+   "{\"topic\": \"crypto_prices_chainlink\", \"type\": \"update\", \"timestamp\": 2005, \"payload\": {\"symbol\": \"btc/usd\", \"timestamp\": 2000, \"value\": 87001, \"full_accuracy_value\": \"87001000000000000000\"}}"
+  ],
+  [
+   "a",
+   "{\"topic\": \"crypto_prices_chainlink\", \"type\": \"update\", \"timestamp\": 1505, \"payload\": {\"symbol\": \"btc/usd\", \"timestamp\": 1500, \"value\": 1, \"full_accuracy_value\": \"1000000000000000\"}}"
+  ],
+  [
+   "a",
+   "{\"topic\": \"crypto_prices\", \"type\": \"subscribed\", \"payload\": {}}"
+  ],
+  [
+   "a",
+   "PONG"
+  ]
+ ],
+ "expected": [
+  [
+   [
+    "rtds_price",
+    [
+     "crypto_prices_chainlink",
+     "btc/usd",
+     "1000",
+     "87000",
+     "87000000000000000000",
+     "1005",
+     "a"
+    ]
+   ]
+  ],
+  [],
+  [
+   [
+    "rtds_price",
+    [
+     "crypto_prices_chainlink",
+     "btc/usd",
+     "2000",
+     "87001",
+     "87001000000000000000",
+     "2005",
+     "b"
+    ]
+   ]
+  ],
+  [],
+  [],
+  [
+   [
+    "rtds_other",
+    {
+     "conn": "a",
+     "topic": "crypto_prices",
+     "type": "subscribed",
+     "payload": {}
+    }
+   ]
+  ],
+  []
+ ]
+}

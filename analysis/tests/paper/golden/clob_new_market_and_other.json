@@ -1,0 +1,24 @@
+{
+ "raw": "[{\"event_type\": \"new_market\", \"id\": \"1\", \"slug\": \"x\", \"timestamp\": \"1764000000500\"}, {\"event_type\": \"tick_size_change\", \"asset_id\": \"TUP\", \"old_tick_size\": \"0.01\", \"new_tick_size\": \"0.001\", \"timestamp\": \"1764000000600\"}]",
+ "expected": [
+  [
+   "pm_new_market",
+   {
+    "event_type": "new_market",
+    "id": "1",
+    "slug": "x",
+    "timestamp": "1764000000500"
+   }
+  ],
+  [
+   "pm_other",
+   {
+    "event_type": "tick_size_change",
+    "asset_id": "TUP",
+    "old_tick_size": "0.01",
+    "new_tick_size": "0.001",
+    "timestamp": "1764000000600"
+   }
+  ]
+ ]
+}

@@ -1,0 +1,15 @@
+{
+ "raw": "{\"event_type\": \"best_bid_ask\", \"asset_id\": \"TDN\", \"timestamp\": \"1764000000300\", \"best_bid\": \"0.45\", \"best_ask\": \"0.47\", \"spread\": \"0.02\"}",
+ "expected": [
+  [
+   "pm_best_bid_ask",
+   [
+    "1764000000300",
+    "s|D",
+    "0.45",
+    "0.47",
+    "0.02"
+   ]
+  ]
+ ]
+}

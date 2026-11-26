@@ -1,0 +1,41 @@
+{
+ "raw": "{\"event_type\": \"price_change\", \"market\": \"0xc\", \"timestamp\": \"1764000000200\", \"price_changes\": [{\"asset_id\": \"TUP\", \"price\": \"0.46\", \"size\": \"5\", \"side\": \"BUY\", \"best_bid\": \"0.46\", \"best_ask\": \"0.55\"}, {\"asset_id\": \"TDN\", \"price\": \"0.54\", \"size\": \"5\", \"side\": \"SELL\", \"best_bid\": \"0.45\", \"best_ask\": \"0.54\"}, {\"asset_id\": \"TUP\", \"price\": \"0.5\", \"size\": \"0\", \"side\": \"SELL\", \"best_bid\": \"0.46\", \"best_ask\": null}]}",
+ "expected": [
+  [
+   "pm_price_change",
+   [
+    "1764000000200",
+    "s|U",
+    "BUY",
+    "0.46",
+    "5",
+    "0.46",
+    "0.55"
+   ]
+  ],
+  [
+   "pm_price_change",
+   [
+    "1764000000200",
+    "s|D",
+    "SELL",
+    "0.54",
+    "5",
+    "0.45",
+    "0.54"
+   ]
+  ],
+  [
+   "pm_price_change",
+   [
+    "1764000000200",
+    "s|U",
+    "SELL",
+    "0.5",
+    "0",
+    "0.46",
+    ""
+   ]
+  ]
+ ]
+}
