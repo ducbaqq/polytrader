@@ -222,7 +222,16 @@ def _search(arr: np.ndarray, t: int) -> int:
 
 
 class MarketData:
-    """One market's Polymarket data in Up terms. Build with `from_frames` or `load_coin`."""
+    """One market's Polymarket data in Up terms. Build with `from_frames` or `load_coin`.
+
+    `recv_cap` (a paper run's `end_ms`, else None): receive-clock queries are answered as of `min(t, recv_cap - 1)`, so
+    nothing received at or after it is visible (not even to a close at `recv_cap`)."""
+
+    recv_cap: int | None = None
+
+    def _rt(self, t: int, clock: str) -> int:
+        cap = self.recv_cap
+        return cap - 1 if clock == "recv" and cap is not None and t >= cap else t
 
     def __init__(self, info: MarketInfo, arrays: dict):
         self.info = info
@@ -293,6 +302,7 @@ class MarketData:
         raise ValueError(f"unknown clock {clock!r}")
 
     def size_at(self, up_side: Side, px: int, t: int, clock: Clock = "ts") -> float:
+        t = self._rt(t, clock)
         lv = self._levels.get((up_side, int(px)))
         if lv is None:
             return 0.0
@@ -320,7 +330,7 @@ class MarketData:
             e = np.empty(0, np.int64)
             return e, e, np.empty(0, np.float64)
         times = self._times(lv, clock)
-        a, b = np.searchsorted(times, [t0, t1], side="right")
+        a, b = np.searchsorted(times, [self._rt(t0, clock), self._rt(t1, clock)], side="right")
         return lv.ts_ms[a:b], lv.recv_ms[a:b], lv.size[a:b]
 
     def prices(self, up_side: Side) -> list[int]:
@@ -338,6 +348,7 @@ class MarketData:
         tops = self.tops_recv if clock == "recv" else self.tops if clock == "ts" else None
         if tops is None:
             raise ValueError(f"unknown clock {clock!r}")
+        t = self._rt(t, clock)
         i = _search(tops.recv_ms if clock == "recv" else tops.ts_ms, t)
         if i < 0:
             return Top(0, 0, NO_BID_PX, 0.0, NO_ASK_PX, 0.0)
@@ -371,7 +382,7 @@ class MarketData:
         tk = self.ticks if clock == "ts" else self._ticks_recv if clock == "recv" else None
         if tk is None:
             raise ValueError(f"unknown clock {clock!r}")
-        i = _search(tk.ts_ms if clock == "ts" else tk.recv_ms, t)
+        i = _search(tk.ts_ms if clock == "ts" else tk.recv_ms, self._rt(t, clock))
         return int(tk.tick_px[i]) if i >= 0 else self.info.tick_px
 
     # -- construction
