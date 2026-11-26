@@ -10,7 +10,13 @@ the Parquet build numbers them) and buffers what the core needs:
   `GrowingMarketData` (`add_ts`, one whole `ts_ms` at a time, in `(ts_ms, slug)` order). A row is *late* if its
   `ts_ms <= H` when it arrives, *future-stamped* if `ts_ms > recv_ms + skew_ms`; both are dropped (listed in
   `late`), never buffered; so is one of them received at or before `H` (a broken stamp). Any other row received at
-  or before `H` raises: only these rows can be late.
+  or before `H` raises: only these rows can be late. **Exception:** a late row of a market whose open is not
+  decided yet (a candidate, or admitted with no snapshot at or after its admission released: the engine's "first
+  accepted snapshot opens it") is accepted ("ok", `stats["late_accepted"]`): it is inserted into the market's
+  `GrowingMarketData` at its `ts_ms`, which rebuilds it from its history (`insert_late`). Nothing of the market was
+  visible to the strategy, and the row's receive time lies after the strategy clock, so a stale opening snapshot
+  of a quiet book (its `timestamp` is the book's last change) opens the market at its receipt, as in the session
+  replay, which reads the row from the session's normal streams.
 - Binance rows are bucketed (`LiveBn`, one per hour and symbol) up to `H` as well, so every Binance lookup the core
   can make (fill times included) is answered from complete buckets; `K_BN` events are still dispatched on the
   strategy clock.
@@ -261,6 +267,7 @@ class LiveSource:
                 if i >= len(sn):
                     continue
                 x.open_ms = int(sn[i]) if sn[i] < x.end else _NEVER
+                md.drop_history()  # the open is decided: late rows are dropped from now on
                 if x.open_ms == _NEVER:
                     continue
             if not m.opened and a <= x.open_ms < lim:
@@ -358,7 +365,8 @@ class LiveRouter:
         self.admitted: list[dict] = []
         self.late: list[tuple[LiveRow, int]] = []
         self.new_resolutions: list[Resolution] = []
-        self.stats: dict = {"rows": {}, "late": 0, "future": 0, "orphan_rows": 0, "ignored_resolutions": 0,
+        self.stats: dict = {"rows": {}, "late": 0, "late_accepted": 0, "future": 0, "orphan_rows": 0,
+                            "ignored_resolutions": 0,
                             "duplicate_resolutions": 0, "meta_changed": 0, "bad_meta": 0}
         self._last_recv = _FAR
         self._done = _FAR  # strategy-clock rows processed up to here
@@ -395,6 +403,9 @@ class LiveRouter:
             if ts > recv + self.skew_ms:
                 return self._drop(row, ts - recv - self.skew_ms, "future")
             if ts <= self.H_ts:
+                if self._accept_late(row, ts):
+                    self.stats["late_accepted"] += 1
+                    return "ok"
                 return self._drop(row, self.H_ts - ts, "late")
             seq = self._next_seq(row.stream)
             if row.stream == "pm_best_bid_ask":
@@ -427,22 +438,51 @@ class LiveRouter:
         self.stats[kind] += 1
         return kind
 
-    def _buffer_pm(self, row: LiveRow, ts: int, seq: int) -> None:
+    def _pm_entry(self, row: LiveRow, seq: int) -> tuple[str, int, tuple] | None:
+        """(slug, add_ts index, entry) of a Polymarket ts-clock row; None for an orphan (counted)."""
         if row.stream == "pm_other":
             cond = row.values.get("market")
             slug = self._cond.get(cond)
             if slug is None:
                 self._orphans.add(cond)
                 self.stats["orphan_rows"] += 1
-                return
-            entry = (slug, 3, (int(row.recv_ms), float(row.values["new_tick_size"])))
+                return None
+            return slug, 3, (int(row.recv_ms), float(row.values["new_tick_size"]))
+        slug = row.values[1].split("|", 1)[0]
+        if slug not in self._known:
+            self._orphans.add(slug)
+            self.stats["orphan_rows"] += 1
+            return None
+        return slug, _MD_INDEX[row.stream], (int(row.recv_ms), seq, row.values)
+
+    def _accept_late(self, row: LiveRow, ts: int) -> bool:
+        """A late row of a market whose open is not decided (module docstring): numbered and inserted; True. False:
+        the row is dropped as late (opened, closed, refused or forgotten market, orphan)."""
+        if row.stream == "pm_other":
+            slug = self._cond.get(row.values.get("market"))
         else:
             slug = row.values[1].split("|", 1)[0]
-            if slug not in self._known:
-                self._orphans.add(slug)
-                self.stats["orphan_rows"] += 1
-                return
-            entry = (slug, _MD_INDEX[row.stream], (int(row.recv_ms), seq, row.values))
+        src = self._md_src.get(slug) if slug is not None else None
+        md = src.mds.get(slug) if src is not None else None
+        if md is None or not md.has_history:
+            return False
+        a = src.adm_by_slug.get(slug)
+        if a is not None:
+            m = src.core.mkts[a.mi]
+            if a.open_ms is not None or m.opened or m.closed or m.ex.orders:
+                return False
+        seq = self._next_seq(row.stream)
+        if row.stream == "pm_best_bid_ask":
+            return True  # recorded, not used by the simulator
+        _, k, entry = self._pm_entry(row, seq)
+        md.insert_late(ts, k, entry)
+        return True
+
+    def _buffer_pm(self, row: LiveRow, ts: int, seq: int) -> None:
+        entry = self._pm_entry(row, seq)
+        if entry is None:
+            return
+        slug = entry[0]
         if slug not in self._md_src:
             return  # a market this run never admits
         b = self._ts_buf.get(ts)
@@ -647,6 +687,7 @@ class LiveRouter:
             return
         if (self.stopping or slug in self._orphans or info.window_end_ms <= t
                 or (self.admit_filter is not None and not self.admit_filter(info, t))):
+            src.mds[slug].drop_history()  # never admitted: never opened, late rows are dropped
             return
         a = src.stage(slug, src.mds[slug], t)
         key = next(k for k, s in self.sources.items() if s is src)

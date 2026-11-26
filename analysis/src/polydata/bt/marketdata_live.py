@@ -32,6 +32,12 @@ runner releases them (spec "The hold-back"):
 Every row with `recv_ms <= T` has `ts_ms <= T + skew = H_ts`, so with the hold-back every query the core makes
 (ts clock `<= H_ts`, recv clock `<= T`) is answered from complete data, and appending never changes an answer
 that was already visible: arrays only grow at the end (capacity-doubling buffers, exposed as views).
+
+**Late rows before the open** (`insert_late`): until the router decides the market's open (`drop_history`), every
+`add_ts` call is kept. A late row of a market that has not opened (spec "Gaps", quiet book) is inserted at its
+`ts_ms` and the market data is rebuilt in place from that history (ts side in `ts_ms` order, then the recv side up
+to where it was released), so it equals what `load_coin` builds from the session's rows. Nothing of a market is
+visible to the strategy before its open, and the late row's recv entries lie after the strategy clock.
 """
 
 from __future__ import annotations
@@ -230,6 +236,8 @@ class GrowingMarketData(MarketData):
         self._pending: list[tuple] = []  # heap of recv-side entries: (recv_ms, k, seq, kind, ts_ms, ref)
         self.last_ts: int | None = None  # last ts_ms released
         self.last_recv: int | None = None  # last recv_ms released on the recv side
+        self._hist: list[tuple] | None = []  # every add_ts call until drop_history (for insert_late)
+        self._released: int | None = None  # the recv side is released up to here
 
     # -- views
     tops = property(lambda self: self._tops.get())
@@ -294,6 +302,8 @@ class GrowingMarketData(MarketData):
         if self.last_ts is not None and ts <= self.last_ts:
             raise ValueError(f"{self.info.slug}: ts_ms {ts} released after {self.last_ts}")
         self.last_ts = ts
+        if self._hist is not None:
+            self._hist.append((ts, list(changes), list(books), list(trades), list(ticks)))
         if ticks:
             self._add_ticks(ts, ticks)
         if not self._lo <= ts <= self._hi:
@@ -406,7 +416,43 @@ class GrowingMarketData(MarketData):
         """`add_recv(take_recv(t))`; returns the number of entries released."""
         rows = self.take_recv(t)
         self.add_recv(rows)
+        if self._released is None or t > self._released:
+            self._released = int(t)
         return len(rows)
+
+    # -- late rows before the open
+    @property
+    def has_history(self) -> bool:
+        return self._hist is not None
+
+    def drop_history(self) -> None:
+        """The market's open is decided: no late row is inserted any more."""
+        self._hist = None
+
+    def insert_late(self, ts_ms: int, k: int, entry: tuple) -> None:
+        """Insert one late row (`k`: 0 change, 1 book, 2 trade as `(recv_ms, seq, values)`; 3 tick size as
+        `(recv_ms, new_tick_size)`) at its `ts_ms` (already released), and rebuild in place from the history: the
+        ts side in `ts_ms` order, then the recv side up to where it was released."""
+        if self._hist is None:
+            raise ValueError(f"{self.info.slug}: no history (the market's open is decided)")
+        ts = int(ts_ms)
+        hist = self._hist
+        i = bisect.bisect_left(hist, ts, key=lambda h: h[0])
+        if i < len(hist) and hist[i][0] == ts:
+            hist[i][1 + k].append(entry)
+        else:
+            g = (ts, [], [], [], [])
+            g[1 + k].append(entry)
+            hist.insert(i, g)
+        cap = self.__dict__.get("recv_cap")
+        released = self._released
+        self.__init__(self.info)
+        if cap is not None:
+            self.recv_cap = cap
+        for h in hist:
+            self.add_ts(*h)
+        if released is not None:
+            self.release_recv(released)
 
     def pending_recv(self) -> int:
         return len(self._pending)
