@@ -115,19 +115,29 @@ def gamma_columns(markets: pd.DataFrame, fills: pd.DataFrame, answers: dict[str,
     return mk
 
 
-def paper_markets(res: RunResult, router, voids: pd.DataFrame | None = None, session: Path | None = None
-                  ) -> pd.DataFrame:
-    """bt's market columns plus `pnl_raw` (`voids.apply`), `admitted_ms` and `gamma_columns`, with the answers and
-    outcome sources read back from the finished session. P&L keeps the outcome the run settled with."""
+def paper_markets(res: RunResult, admitted: list[dict], voids: pd.DataFrame | None = None,
+                  session: Path | None = None) -> pd.DataFrame:
+    """bt's market columns plus `pnl_raw` (`voids.apply`), `admitted_ms` (from `admitted`: the router's list, which
+    the session manifest holds) and `gamma_columns`, with the answers and outcome sources read back from the finished
+    session. P&L keeps the outcome the run settled with. `paper replay` builds the replay's markets with this too."""
     from polydata.paper import voids as voids_mod
 
     mk = voids_mod.apply(res.markets.copy(), voids)
     answers = load_gamma_answers(session) if session is not None else {}
     sources = load_outcome_sources(session) if session is not None else {}
     mk = gamma_columns(mk, res.fills, answers, sources)
-    adm = {a["slug"]: int(a["admitted_ms"]) for a in router.admitted}
+    adm = {a["slug"]: int(a["admitted_ms"]) for a in admitted}
     mk["admitted_ms"] = pd.Series([adm.get(s) for s in mk["slug"]], index=mk.index, dtype="Int64")
     return mk
+
+
+def voided_with_orders(mk: pd.DataFrame, orders: pd.DataFrame) -> dict[str, str]:
+    """Voided markets the strategy placed orders in (spec risk 7: its P&L there is left out), slug -> reason."""
+    if not len(mk) or not len(orders):
+        return {}
+    traded = set(orders["slug"])
+    v = mk[mk["voided"].astype(bool) & mk["slug"].isin(traded)]
+    return dict(zip(v.slug, v.reason.astype(str)))
 
 
 def write_paper_run(d: Path, cfg, opts, res: RunResult, router, manifest: dict, *, stats: dict | None = None,
@@ -150,7 +160,7 @@ def write_paper_run(d: Path, cfg, opts, res: RunResult, router, manifest: dict, 
                            pythonhashseed=os.environ.get("PYTHONHASHSEED"), elapsed_s=round(res.elapsed_s, 1))
     (d / "provenance.json").write_text(json.dumps(prov, indent=1, sort_keys=True, default=str))
 
-    mk = paper_markets(res, router, voids, d / "session")
+    mk = paper_markets(res, router.admitted, voids, d / "session")
     summary = runs.summary(res, cfg)
     summary["verdict"] = None
     pnl = float(mk["pnl"].astype(float).fillna(0).sum()) if len(mk) else 0.0
@@ -184,6 +194,8 @@ def write_paper_run(d: Path, cfg, opts, res: RunResult, router, manifest: dict, 
         "gamma_fallbacks": len(confirm.fallbacks) if confirm is not None else None,
         "api_trades": {"markets": len(api), "rows": sum(api.values())},
         "void_reasons": dict(zip(mk.slug[mk.voided.astype(bool)], mk.reason[mk.voided.astype(bool)])),
+        "voided_with_orders": voided_with_orders(mk, res.orders),
+        "never_opened": list(voids.attrs.get("never_opened", [])) if voids is not None else None,
     })
     summary = _clean(summary)
     (d / "results.json").write_text(json.dumps(summary, indent=1, sort_keys=True, allow_nan=False) + "\n")
@@ -198,4 +210,5 @@ def write_paper_run(d: Path, cfg, opts, res: RunResult, router, manifest: dict, 
     return summary
 
 
-__all__ = ["paper_markets", "paper_version", "write_paper_run"]
+__all__ = ["gamma_columns", "load_gamma_answers", "load_outcome_sources", "paper_markets", "paper_version",
+           "voided_with_orders", "write_paper_run"]

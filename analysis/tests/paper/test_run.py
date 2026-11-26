@@ -8,7 +8,6 @@ import os
 import sys
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 import pytest
 
@@ -18,13 +17,10 @@ from synth import make_session  # noqa: E402
 from test_live import H11, cfg_of  # noqa: E402,F401  (registers the parity-probe strategies)
 
 from polydata.bt import runs  # noqa: E402
-from polydata.bt.core import MARKET_COLS  # noqa: E402
-from polydata.bt.engine import SessionPlan, run_session  # noqa: E402
-from polydata.build import build  # noqa: E402
 from polydata.paper import cli as paper_cli  # noqa: E402
+from polydata.paper import parity  # noqa: E402
 from polydata.paper.runner import PaperOpts, PaperRefused, PaperRun  # noqa: E402
 from polydata.bt.strategy import Strategy, register  # noqa: E402
-from polydata.views import create_views  # noqa: E402
 
 RUN_FILES = ["config.yaml", "provenance.json", "results.json", "orders.parquet", "fills.parquet", "equity.parquet",
              "markets.parquet", "decisions.parquet", "log.txt", "session/manifest.json"]
@@ -93,33 +89,13 @@ def paper_run(tmp_path, monkeypatch, start, minutes, opts, *, strategy="parity-p
     return cfg, d, run, lines
 
 
-def replay_and_compare(cfg, d: Path, monkeypatch):
-    sess = d / "session"
-    monkeypatch.setenv("POLYDATA_DIR", str(sess))
-    build()
-    man = json.loads((sess / "manifest.json").read_text())
-
-    def con_factory():
-        con = duckdb.connect()
-        con.execute("SET TimeZone = 'UTC'")
-        create_views(con, parquet=sess / "parquet", include_sealed=True)
-        return con
-
-    plan = SessionPlan(man["rs"], man["end_ms"], [(a["slug"], a["admitted_ms"]) for a in man["admitted"]])
-    rep = run_session(cfg, con_factory, plan)
-    tmp = d.parent / (d.name + "-replay")
-    tmp.mkdir()
-    for name in ("decisions", "orders", "fills", "equity"):
-        getattr(rep, name).to_parquet(tmp / f"{name}.parquet", index=False)
-        a, b = pd.read_parquet(d / f"{name}.parquet"), pd.read_parquet(tmp / f"{name}.parquet")
-        assert a.equals(b), name
-    a = pd.read_parquet(d / "markets.parquet")[MARKET_COLS + ["budget"]]
-    rep.markets.to_parquet(tmp / "markets.parquet", index=False)
-    b = pd.read_parquet(tmp / "markets.parquet")[MARKET_COLS + ["budget"]]
-    assert a.equals(b)
-    strategy_lines = [x for x in (d / "log.txt").read_text().splitlines() if not x.startswith("#")]
-    assert strategy_lines == list(map(str, rep.log))
-    return rep, man
+def replay_and_compare(cfg, d: Path, monkeypatch=None):
+    """`paper replay`'s comparison (`paper.parity`): the session replay must give `passed`."""
+    rep = parity.replay(d)
+    res = parity.compare(d, rep)
+    assert res["passed"] and res["verdict"] == "passed", json.dumps(res, indent=1, default=str)[:4000]
+    assert all(t["mismatches"] == 0 for t in res["tables"].values())
+    return rep, json.loads((d / "session" / "manifest.json").read_text())
 
 
 def test_paper_run_fake_rows_end_to_end(tmp_path, monkeypatch):

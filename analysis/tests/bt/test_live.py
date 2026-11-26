@@ -272,17 +272,23 @@ def test_ingest_classification():
     assert r.ingest(pc(H11 - 50_000, H11 - 50_000 + 1001)) == "future"
     r.tick(H11 - 40_000)  # H = H11 - 43000
     assert r.H_ts == H11 - 43_000 and r.T == H11 - 44_000
-    assert r.ingest(pc(H11 - 39_000, H11 - 43_000)) == "late"  # ts <= H
+    # ts <= H: late; the market has not opened (no snapshot yet), so the row is accepted (fix round 1 ruling A)
+    assert r.ingest(pc(H11 - 39_000, H11 - 43_000)) == "ok"
     assert r.ingest(pc(H11 - 39_000, H11 - 42_999)) == "ok"
     tick = LiveRow("pm_other", H11 - 38_000, {"event_type": "tick_size_change", "market": f"0xbtc5m{H11 // 1000}",
                                               "new_tick_size": "0.001", "timestamp": str(H11 - 44_000)})
-    assert is_late_candidate(tick) and r.ingest(tick) == "late"
+    assert is_late_candidate(tick) and r.ingest(tick) == "ok"
     other = LiveRow("pm_other", H11 - 38_000, {"event_type": "market_resolved", "timestamp": "1"})
     assert not is_late_candidate(other) and r.ingest(other) == "ok"
     bbo = LiveRow("pm_best_bid_ask", H11 - 38_000, (str(H11 - 44_000), f"{slug}|U", "0.5", "0.51", "0.01"))
-    assert is_late_candidate(bbo) and r.ingest(bbo) == "late"
-    assert r.stats["late"] == 3 and r.stats["future"] == 1
-    assert [x[1] for x in r.late] == [1, 0, 1000, 1000]  # future: beyond recv + skew; late: behind H
+    assert is_late_candidate(bbo) and r.ingest(bbo) == "ok"
+    # a late row of a market this run cannot admit (discovered with its window before rs) is still dropped
+    old_slug = slug_of("btc", "5m", H11 - 600_000)
+    r.ingest(meta_row("btc", "5m", H11 - 600_000, H11 - 38_000))
+    assert r.ingest(LiveRow("pm_price_change", H11 - 38_000, (str(H11 - 44_000), f"{old_slug}|U", "BUY", "0.5", "1",
+                                                              "0.5", "0.51"))) == "late"
+    assert r.stats["late"] == 1 and r.stats["late_accepted"] == 3 and r.stats["future"] == 1
+    assert [x[1] for x in r.late] == [1, 1000]  # future: beyond recv + skew; late: behind H
     with pytest.raises(ValueError, match="went back"):
         r.ingest(pc(H11 - 38_001, H11 - 38_000))
     # a Chainlink row received after the released horizon is used, never late
