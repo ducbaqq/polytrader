@@ -15,14 +15,14 @@
 - **The repo is PUBLIC.** Never commit secrets, IPs, hostnames, bucket names or credentials, not even in test fixtures, docs or log lines. Host identity is `runs.host_hash()` only. `data/` (run folders, sessions, identity references) is gitignored.
 - **No real orders, ever.** Nothing in this plan authenticates, signs, holds keys or wallets, or calls an order endpoint. Feeds use public WebSocket and REST endpoints only.
 - **Sealed days are never read.** 2026-11-25 (today) is sealed (every third day from 2026-11-25). Tests use 2026-11-24 data only. `paper run` refuses sealed strategy-clock days unless `--allow-sealed --purpose` is given (spec "My calls"). Never pass `include_sealed=True` outside the session-replay path the spec allows.
-- **Test data:** offline tests use synthetic data. Real-data tests live under `analysis/tests/**/realdata/` and are skipped unless `POLYDATA_REALDATA=1`. Run them with `POLYDATA_DIR=/private/tmp/claude-501/-Users-ducba--paradev-worktrees-polytrader-claude-scan-repository-mine-e4497e50/f2da7beb-7e9c-42f6-a2f6-e09637f48bd4/scratchpad/pd` (below: `$PD`). It holds raw + Parquet for 2026-11-23 18:50 to 2026-11-24 ~14:45 UTC.
+- **Test data:** offline tests use synthetic data. Real-data tests live under `analysis/tests/**/realdata/` and are skipped unless `POLYDATA_REALDATA=1`. Run them with `POLYDATA_DIR=$POLYDATA_DIR` (below: `$PD`). It holds raw + Parquet for 2026-11-23 18:50 to 2026-11-24 ~14:45 UTC.
 - **Strategies use only `ctx`** and handler arguments: no clocks, files, DuckDB or global state. The paper runner must not give them anything else.
 - **Byte-identical replay.** After every commit that touches a `sim_version` file (`bt/*.py` except `report.py`, `runs.py`, `cli.py`; `fees.py`, `views.py`, `build.py`, `schema.py`, `bt/strategies/sanity.py`), run the identity harness (Task 1) against the reference saved in Task 1. Any difference blocks the commit. Moves and behaviour changes go in separate commits.
 - **Suite:** `cd analysis && uv run pytest -q` is green after every task.
 - **Validation:** `cd analysis && POLYDATA_DIR=$PD uv run polydata bt validate` passes at the final `sim_version` before the plan is complete (Final verification). Task 13 is a separate PR with its own validate.
 - **DuckDB 2.0 idioms:** `lambda x: …`, `fetchall()[0]`, `SET TimeZone='UTC'`.
 - **Prices are integer px** (`round(float(text) * 1000)`) inside the simulator. An empty `best_bid` maps to 0 and an empty `best_ask` to 1000, as `marketdata._BID`/`_ASK` do.
-- **Paper defaults** (spec): `hold_back_ms` 3000, `skew_ms` 1000, tick 20 ms, warm-up 60 s, `--max-drain` 15 min, `--confirm-wait` 15 min, zstd level 3, flush every 10 s, Binance thinning at 10 ms. Require `skew_ms + fill_report_latency_ms ≥ trade_explain_ms` (150), because `Exchange._explained` looks 150 ms ahead on the ts clock.
+- **Paper defaults** (spec): `hold_back_ms` 10000 (was 3000, see the spec's "Changes during implementation"), `skew_ms` 1000, tick 20 ms, warm-up 60 s, `--max-drain` 15 min, `--confirm-wait` 15 min, zstd level 3, flush every 10 s, Binance thinning at 10 ms. Require `skew_ms + fill_report_latency_ms ≥ trade_explain_ms` (150), because `Exchange._explained` looks 150 ms ahead on the ts clock.
 - **`PYTHONHASHSEED=0`** for `paper run` and `paper replay`: the CLI re-execs itself if it is unset.
 - **Model tiers** per task: *cheap* (mechanical, fully specified), *standard* (integration and judgment within one area), *most capable* (simulation semantics where an ordering slip silently breaks parity).
 
@@ -239,7 +239,7 @@ Binance live bundles: per symbol, the last row by `(recv_ms, update_id)` of each
 - [ ] **Step 2:** Run `uv run pytest tests/bt/test_marketdata_live.py -q`. Expect FAIL.
 - [ ] **Step 3:** Implement. Factor out `_grid_segment` and `markets_sql` first, in a separate commit, then run the identity check (`identical: 7/7`). Then add `marketdata_live.py`.
 - [ ] **Step 4: Real-data equivalence** (`test_marketdata_live_realdata.py`, `POLYDATA_REALDATA=1`):
-  - `test_real_hour_equivalence[btc|sol]`: for BTC and SOL 5m markets overlapping 2026-11-24 11:00–12:00, read the raw rows (`pm_price_change`, `pm_book`, `pm_trade`, tick changes from `pm_other`) via DuckDB `read_csv` of `$PD/raw/2026-11-24/{10,11,12}/*.tsv.zst`, keeping file order as `seq`. Feed them in `recv` order to `GrowingMarketData`, releasing `ts ≤ recv − 3000` as the live path would. Compare with `load_coin`'s `MarketData` on both clocks every 50 ms.
+  - `test_real_hour_equivalence[btc|sol]`: for BTC and SOL 5m markets overlapping 2026-11-24 11:00–12:00, read the raw rows (`pm_price_change`, `pm_book`, `pm_trade`, tick changes from `pm_other`) via DuckDB `read_csv` of `$PD/raw/2026-11-24/{10,11,12}/*.tsv.zst`, keeping file order as `seq`. Feed them in `recv` order to `GrowingMarketData`, releasing `ts ≤ recv − hold_back_ms` as the live path would. Compare with `load_coin`'s `MarketData` on both clocks every 50 ms.
   - `test_real_grid_bitwise`: run `LiveGrid` and `_Grid` on `bn_fut_bbo` BTCUSDT for the same hour; `sig15` is equal at every second.
 
   Run: `POLYDATA_REALDATA=1 POLYDATA_DIR=$PD uv run pytest tests/bt/realdata/test_marketdata_live_realdata.py -q`. Expect PASS.
@@ -262,7 +262,7 @@ Binance live bundles: per symbol, the last row by `(recv_ms, update_id)` of each
   - `PM_TS_STREAMS = ("pm_book", "pm_price_change", "pm_best_bid_ask", "pm_trade")`.
   - `is_late_candidate(row) -> bool` (the streams above, plus `pm_other` with `event_type == "tick_size_change"`).
   - `class Resolution(NamedTuple)`: `slug`, `outcome`, `recv_ms`, `source`, `ptb: float | None`, `close_twap: float | None`.
-  - `class LiveRouter`, with `LiveRouter(cfg: RunConfig, rs: int, *, hold_back_ms: int = 3000, skew_ms: int = 1000, trace: bool = True, admit_filter: Callable[[MarketInfo, int], bool] | None = None, settler=None)`:
+  - `class LiveRouter`, with `LiveRouter(cfg: RunConfig, rs: int, *, hold_back_ms: int = 10000, skew_ms: int = 1000, trace: bool = True, admit_filter: Callable[[MarketInfo, int], bool] | None = None, settler=None)`:
     - `ingest(row: LiveRow) -> Literal["ok", "late", "future"]`: classifies (Decision 5), assigns per-stream `seq` to ok rows and buffers them.
     - `tick(wall_ms: int) -> None`
     - `request_stop(t_ms: int) -> None` sets `end_ms = max(t_ms, last admitted window_end_ms)`, stops admissions, and stops dispatch at `end_ms`.
@@ -424,7 +424,7 @@ After `T ≥ end_ms`, nothing is dispatched. Rows are still released (resolution
   - `settle.resolution_row(res: Resolution, discovery_event: dict) -> dict`: `{slug, outcome, event: deepcopy(event) with eventMetadata.priceToBeat = ptb and finalPrice = close_twap, source}`.
   - `runner.PaperRun`, with `PaperRun(cfg: RunConfig, out: Path, opts: PaperOpts, feeds_factory)`:
     - `async run() -> Path` (the run folder).
-    - `PaperOpts` dataclass: `hold_back_ms=3000, skew_ms=1000, tick_ms=20, warmup_s=60, max_drain_s=900, confirm_wait_s=900, duration_s: int | None = None, allow_sealed=False, purpose: str | None = None`.
+    - `PaperOpts` dataclass: `hold_back_ms=10000, skew_ms=1000, tick_ms=20, warmup_s=60, max_drain_s=900, confirm_wait_s=900, duration_s: int | None = None, allow_sealed=False, purpose: str | None = None`.
     - `feeds_factory(ingest, clock) -> list[awaitable]` builds the live feeds (Task 6) or the fake feed (Task 10).
   - `results.write_paper_run(d: Path, cfg, opts, res: RunResult, router, manifest: dict) -> dict` writes `config.yaml` (cfg + `paper:` block), `provenance.json`, `results.json`, the parquet files, `decisions.parquet` and `log.txt`.
     - `provenance.json`: `runs.provenance(cls, params, [], "paper", validated=…, paper_version=…, session_fingerprint=sha256(manifest.json), pythonhashseed=os.environ["PYTHONHASHSEED"])`.

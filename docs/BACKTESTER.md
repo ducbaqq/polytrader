@@ -344,6 +344,10 @@ with references computed independently in DuckDB SQL over the raw views:
 
 It is internal consistency only. It cannot say whether the queue and delay model matches the real exchange.
 
+## Session-mode replay
+
+The paper runner reuses this engine: `run_session` replays a paper session (recorded rows, the admitted markets at their admission times, explicit range) so `polydata paper replay` can check that the live run and the simulator agree exactly. See [PAPER.md](PAPER.md).
+
 ## Known limitations
 
 - **Fill model: unverified.** Until our own real fills (minimum-size orders in the live project) are compared

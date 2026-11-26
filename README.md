@@ -99,7 +99,7 @@ uv run polydata bt runs
 **Research status (2026-11-25):** one train day (2026-11-24) tested, no validation day yet. Nothing has passed.
 Symmetric market making loses ~1.6¢/share to adverse selection under either queue model, and no pre-fill feature
 predicts the bad fills ([adverse-flow study](docs/research/adverse-flow.md)). The fair-value taker is positive on
-one half of the day only. Current standings: [docs/strategies/README.md](docs/strategies/README.md#where-each-strategy-stands).
+one half of the day only. A paper runner ([docs/PAPER.md](docs/PAPER.md)) now runs strategies against the live feeds with simulated fills; its first 1 h and 6 h runs passed the replay parity check, which validates the plumbing and is not evidence of edge. Current standings: [docs/strategies/README.md](docs/strategies/README.md#where-each-strategy-stands).
 
 ## Backtesting rules
 

@@ -80,7 +80,7 @@ Single Python process, one asyncio loop. A tick runs every `tick_ms` (20) of wal
 (Polymarket's feed delay is ~126 ms median, so about half of them). Live, those trades haven't arrived yet.
 So the live core runs behind the wall clock:
 
-- `H_ts = wall − hold_back_ms` (default 3,000): every Polymarket row with `ts_ms ≤ H_ts` is released, in
+- `H_ts = wall − hold_back_ms` (default 10,000, was 3,000: see "Changes during implementation"): every Polymarket row with `ts_ms ≤ H_ts` is released, in
   `(ts_ms, snapshot-after-change, recv_ms, seq)` order, into the ts-ordered structures (levels, ts-order tops
   and trades, tick sizes).
 - `T = H_ts − skew_ms` (default 1,000): the strategy clock. Events with `recv_ms ≤ T` are released into the
@@ -438,7 +438,7 @@ Tests:
 
 ```
 polydata paper run CONFIG.yaml [--out DIR] [--duration 6h] [--coins ...] [--set k=v ...]
-                               [--hold-back-ms 3000] [--skew-ms 1000] [--warmup-s 60]
+                               [--hold-back-ms 10000] [--skew-ms 1000] [--warmup-s 60]
                                [--max-drain 15m] [--confirm-wait 15m]
                                [--fake-from A --fake-to B | --fake-session DIR] [--speed N|max]
 polydata paper replay RUN_DIR [--vs-recorder] [--keep-parquet]     # exit code 1 if parity fails
@@ -555,3 +555,28 @@ not the risk. Ingest is: Python per-message cost (WebSocket frame + JSON + row w
 Chainlink only (the first half of 7). It writes a complete session, so parity (9), Gamma confirmation, voids
 and the gaps.py fix (11) can be applied to that session afterwards without re-running it. Run it on a
 non-sealed day.
+
+## Changes during implementation
+
+The text above is the original design. These decisions were made while building and supersede it where they differ.
+
+- **`hold_back_ms` default is 10,000, not 3,000.** Measured: in one hour of BTC 5m markets, 25% had Polymarket rows
+  delayed by more than 3 s on the recording host, so a 3 s hold-back would void a quarter of the markets. The
+  hold-back is free for paper (no real orders); it costs about 10 s of extra drain at the end of a run.
+- **Late rows for a market that is not yet open are accepted.** They are written to the session and that market's
+  `GrowingMarketData` is rebuilt in `ts` order (nothing is strategy-visible before the open). Late rows after the
+  open are still dropped and void the market. The void rule: exchange `ts < window_end` and `recv >= open`.
+  This changed `sim_version` (`bt/live.py`, `marketdata_live`).
+- **`price_to_beat` uses start-window ticks received up to the revealing tick** (not later-received ones).
+- **Sealed days are refused by default.** `--allow-sealed --purpose "..."` records a look only if a sealed day is
+  actually reachable by the run.
+- **Runs index:** `paper run` writes the index under `data/runs/`; the committed `docs/runs-index.csv` is rewritten
+  only with `--update-docs-index` (a local-only rebuild had dropped committed rows).
+- **Gap thresholds** are unchanged from `gaps.py` (Binance silence > 1 s, Polymarket > 5 s writes a gap), so the
+  spec's "stalls > 2 s void" is read as "> 2 s writes a gap". Quiet-symbol Binance silences of 1 to 1.6 s void
+  markets of strategies that never read Binance; scoping that rule is a follow-up ([TODO](../../TODO.md)).
+- **Chainlink settlement vs Polymarket outcome:** near-tie mismatches are kept (as in bt, for parity) and reported:
+  `pnl_usd` is Chainlink-settled, `pnl_usd_gamma` is restated with Polymarket's outcome.
+- **Gamma-derived market columns** are computed by one pure function from session files, so `paper replay`
+  reproduces `markets.parquet` exactly.
+- **Decision trace** records handler inputs and a `flag` column (`post_only`); timers are in ms.
