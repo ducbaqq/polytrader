@@ -45,8 +45,9 @@ import os
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -92,13 +93,31 @@ class _Chunk:
     loaded: bool = False
 
 
+class SessionPlan(NamedTuple):
+    """What a paper run did, from its session manifest: the range `[rs, end_ms)` and the admitted markets
+    `(slug, admitted_ms)` in admission (= load) order."""
+    rs: int
+    end_ms: int
+    admitted: list[tuple[str, int]]
+
+
+class _SessMkt:
+    __slots__ = ("slug", "mi", "md", "admitted_ms", "open_ms", "end")
+
+    def __init__(self, slug, mi, md, admitted_ms, open_ms, end):
+        self.slug, self.mi, self.md, self.admitted_ms, self.open_ms, self.end = slug, mi, md, admitted_ms, open_ms, end
+
+
 class ReplayDriver:
     """Feeds a `Core` from the recorded store: picks the replay ranges and markets, loads markets in chunks
-    and Binance/Chainlink one hour at a time, and dispatches each hour's sorted data events."""
+    and Binance/Chainlink one hour at a time, and dispatches each hour's sorted data events.
+
+    With `session` (a `SessionPlan`), it replays a paper run's session instead (`run_session`)."""
 
     def __init__(self, core: Core, loader: Callable, rec_events: pd.DataFrame | None,
-                 clip: tuple[int, int] | None = None):
+                 clip: tuple[int, int] | None = None, session: SessionPlan | None = None):
         self.core, self.loader, self.rec_events, self.clip = core, loader, rec_events, clip
+        self.session = session
 
     # ------------------------------------------------------------------------------- setup
     def _ranges(self, con) -> list[tuple[int, int]]:
@@ -282,6 +301,8 @@ class ReplayDriver:
 
     # ------------------------------------------------------------------------------- run
     def run(self, con) -> CoinResult:
+        if self.session is not None:
+            return self._run_session(con)
         t_start = time.perf_counter()
         ranges = self._ranges(con)
         chunks = self._select_markets(con, ranges) if ranges else []
@@ -308,6 +329,147 @@ class ReplayDriver:
         self.core.stats["elapsed_s"] = time.perf_counter() - t_start
         self.core.stats["ranges"] = ranges
         return self.core.result()
+
+
+    # ------------------------------------------------------------------------------- session mode
+    # A paper run's session replayed with the calls the live driver (`bt.live`) makes: range [rs, end_ms), no
+    # range or market selection and no pre-voiding; the admitted markets are staged in manifest order at the start
+    # of their admission hour (load_ms = admitted_ms), each loaded with its own row window, and join the run as K_ADMIT
+    # events at admitted_ms; a market opens at its first snapshot received at or after admission (if before its
+    # end). Outcomes come from the session's pm_resolution rows through Core.set_resolution (defer_settle), applied
+    # at the start of the hour in which they were received (the settle's heap key does not depend on when), the
+    # rest after the last hour; then finish_unresolved and finish(end_ms).
+    def _session_markets(self, con) -> list[tuple[str, int, tuple]]:
+        plan, core = self.session, self.core
+        slugs = [s for s, _ in plan.admitted]
+        rows = {}
+        if slugs:
+            rows = {r[0]: r for r in con.execute(
+                "SELECT slug, coin, timeframe, window_start_ms, window_end_ms FROM markets WHERE list_contains(?, slug)",
+                [slugs]).fetchall()}
+        out, prev = [], None
+        for slug, adm in plan.admitted:
+            r = rows.get(slug)
+            if r is None:
+                raise RuntimeError(f"session market {slug} is not in the markets table")
+            if prev is not None and adm < prev:
+                raise ValueError(f"session manifest not in admission order at {slug} ({adm} < {prev})")
+            prev = adm
+            if r[1] in core.coins:
+                out.append((slug, int(adm), r))
+        return out
+
+    def _session_stage(self, con, slug: str, adm: int, r: tuple, staged: list, res: list) -> None:
+        core = self.core
+        md = self.loader(con, r[1], [r[2]], int(r[3]), int(r[4]), slugs={slug}).get(slug)
+        if md is None:
+            raise RuntimeError(f"session market {slug}: no market data")
+        full = md.info
+        info = replace(full, outcome=None, resolution_recv_ms=None, price_to_beat=None)  # as the live discovery
+        mi = core.stage(info, md, self.session.rs, adm)
+        sn = md.snaps_recv
+        i = int(np.searchsorted(sn, adm))
+        open_ms = int(sn[i]) if i < len(sn) and sn[i] < info.window_end_ms else None
+        staged.append(_SessMkt(slug, mi, md, adm, open_ms, int(info.window_end_ms)))
+        # the live router ignores a resolution received before the market's admission
+        if full.outcome is not None and full.resolution_recv_ms is not None and full.resolution_recv_ms >= adm:
+            res.append((int(full.resolution_recv_ms), mi, slug, full.outcome))
+
+    def _session_segment(self, con, s: int, e: int, staged: list) -> None:
+        core = self.core
+        t0 = time.perf_counter()
+        recv, kind, mi, idx = [], [], [], []
+
+        def add(r, k, m, i):
+            recv.append(r)
+            kind.append(np.full(len(r), k, np.int8))
+            mi.append(np.full(len(r), m, np.int32))
+            idx.append(i)
+
+        want = core.want
+        for x in staged:
+            if s <= x.admitted_ms < e:
+                add(np.array([x.admitted_ms], np.int64), K_ADMIT, x.mi, np.array([-1]))
+            m = core.mkts[x.mi]
+            if m.closed or x.open_ms is None:
+                continue
+            lo, hi = max(s, x.open_ms), min(e, x.end)
+            if lo >= hi:
+                continue
+            if not m.opened and s <= x.open_ms < e:
+                add(np.array([x.open_ms], np.int64), K_OPEN, x.mi, np.array([-1]))
+            if want["on_book"]:
+                tr = x.md.tops_recv.recv_ms
+                a, b = (int(v) for v in np.searchsorted(tr, [lo, hi]))
+                if b > a:
+                    add(tr[a:b], K_TOP, x.mi, np.arange(a, b))
+            if want["on_trade"]:
+                rr = x.md.trades_recv.recv_ms
+                a, b = (int(v) for v in np.searchsorted(rr, [lo, hi]))
+                if b > a:
+                    add(rr[a:b], K_TRADE, x.mi, np.arange(a, b))
+        bn_lists = []
+        if want["on_binance"]:
+            for j, sym in enumerate(core.syms):
+                bn = core.bn_cur[sym]
+                bn_lists.append((sym, bn.bid.tolist(), bn.ask.tolist(), bn.bid_qty.tolist(), bn.ask_qty.tolist()))
+                if len(bn.recv):
+                    add(bn.recv, K_BN, j, np.arange(len(bn.recv)))
+        cl_lists = []
+        if want["on_chainlink"]:
+            for j, c in enumerate(core.coins):
+                seg = self._cl_seg[c]
+                cl_lists.append((c, seg[2].tolist()))
+                if len(seg[0]):
+                    add(seg[0], K_CL, j, np.arange(len(seg[0])))
+        core.stats["data_s"] += time.perf_counter() - t0
+        if recv:
+            R_ = np.concatenate(recv).astype(np.int64)
+            K_ = np.concatenate(kind)
+            M_ = np.concatenate(mi)
+            I_ = np.concatenate(idx).astype(np.int64)
+            o = np.lexsort((I_, M_, K_, _RANK[K_], R_))
+            core.dispatch(R_[o].tolist(), K_[o].tolist(), M_[o].tolist(), I_[o].tolist(), bn_lists, cl_lists)
+        core._drain(e)
+        core.stats["segments"] += 1
+
+    def _run_session(self, con) -> CoinResult:
+        t_start = time.perf_counter()
+        core, plan = self.core, self.session
+        if not core.defer_settle:
+            raise ValueError("session mode needs Core(defer_settle=True)")
+        rs, end = int(plan.rs), int(plan.end_ms)
+        todo = self._session_markets(con)
+        core.start(rs)
+        core.reset_range()
+        staged: list[_SessMkt] = []
+        res: list[tuple[int, int, str, str]] = []  # (recv_ms, mi, slug, outcome) not yet applied
+        i, s = 0, rs
+        while s < end:
+            e = min((s // HOUR_MS + 1) * HOUR_MS, end)
+            t0 = time.perf_counter()
+            while i < len(todo) and todo[i][1] < e:
+                slug, adm, r = todo[i]
+                i += 1
+                self._session_stage(con, slug, adm, r, staged, res)
+            core.stats["load_s"] += time.perf_counter() - t0
+            staged = [x for x in staged if not core.mkts[x.mi].closed]
+            self._load_bn(con, s, e)
+            core.mark_hour(s)
+            self._cl_seg = self._load_cl(con, s, e)
+            res.sort()
+            while res and res[0][0] < e:
+                r_ms, _, slug, outcome = res.pop(0)
+                core.set_resolution(slug, outcome, r_ms)
+            self._session_segment(con, s, e, staged)
+            s = e
+        for r_ms, _, slug, outcome in sorted(res):
+            core.set_resolution(slug, outcome, r_ms)
+        core.finish_unresolved()
+        core.finish(end)
+        core.stats["elapsed_s"] = time.perf_counter() - t_start
+        core.stats["ranges"] = [(rs, end)]
+        return core.result()
 
 
 # ---------------------------------------------------------------------------------------- entry points
@@ -343,6 +505,35 @@ def run_coin(cfg: RunConfig, coin: str, con_factory: Callable = default_con_fact
     return _replay(cfg, [coin], {coin: b}, con_factory, loader, strategy, rec_events, clip, trace)
 
 
+def _session(cfg: RunConfig, coins: list[str], budgets: dict[str, float], con_factory: Callable, plan: SessionPlan,
+             loader: Callable | None, trace: bool) -> CoinResult:
+    strategy = get_strategy(cfg.strategy)(cfg.params)
+    r = ReplayDriver(Core(cfg, coins, budgets, strategy, trace=trace, defer_settle=True), loader or load_coin, None,
+                     session=plan)
+    con = con_factory()
+    try:
+        con.execute("SET memory_limit='4GB'")
+        spill = os.path.join(tempfile.gettempdir(), "polydata-duckdb")
+        con.execute(f"SET temp_directory='{spill}'")
+        return r.run(con)
+    finally:
+        con.close()
+
+
+def run_session(cfg: RunConfig, con_factory: Callable, plan: SessionPlan, *, trace: bool = True,
+                loader: Callable | None = None) -> RunResult:
+    """Replay a paper run's session (`con_factory` gives views over the session store, sealed days included) in
+    session mode, one budget after the other, as the live run split them: per coin with `capital / len(coins)`
+    each, or one global budget "*"."""
+    t0 = time.perf_counter()
+    if cfg.capital_mode == "global":
+        out = {"*": _session(cfg, list(cfg.coins), {"*": cfg.capital}, con_factory, plan, loader, trace)}
+    else:
+        b = cfg.capital / len(cfg.coins)
+        out = {c: _session(cfg, [c], {c: b}, con_factory, plan, loader, trace) for c in cfg.coins}
+    return RunResult(cfg, out, time.perf_counter() - t0)
+
+
 def _worker(args) -> tuple[str, CoinResult]:
     cfg_d, coin, budget, con_factory, trace = args
     return coin, run_coin(RunConfig.from_dict(cfg_d), coin, con_factory, budget=budget, trace=trace)
@@ -368,4 +559,5 @@ def run(cfg: RunConfig, con_factory: Callable = default_con_factory, workers: in
     return RunResult(cfg, dict(out), time.perf_counter() - t0)
 
 
-__all__ = ["CoinResult", "RunResult", "SimCtx", "default_con_factory", "run", "run_coin", "sym_of"]
+__all__ = ["CoinResult", "RunResult", "SessionPlan", "SimCtx", "default_con_factory", "run", "run_coin", "run_session",
+           "sym_of"]
