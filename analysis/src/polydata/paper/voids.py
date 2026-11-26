@@ -86,11 +86,12 @@ def _late_rows(session: Path, cond_slug: dict[str, str]) -> pd.DataFrame:
                 try:
                     msg = json.loads(d)
                     tick = msg.get("event_type") == "tick_size_change"
-                    slugs.append(cond_slug.get(msg.get("market")) if tick else None)
-                    tss.append(int(msg.get("timestamp")))
-                except (TypeError, ValueError):
-                    slugs.append(None)
-                    tss.append(0)
+                    slug = cond_slug.get(msg.get("market")) if tick else None
+                    ts = int(msg.get("timestamp"))
+                except (TypeError, ValueError, AttributeError):
+                    slug, ts = None, 0  # no usable timestamp: the row cannot be placed against a window
+                slugs.append(slug)
+                tss.append(ts)
         else:
             slugs = [str(a).split("|", 1)[0] for a in df["asset"]]
             tss = df["ts_ms"].astype("int64").tolist()

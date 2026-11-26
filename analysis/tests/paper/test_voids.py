@@ -88,6 +88,18 @@ def test_voids_late_rows(tmp_path):
     assert v == {s2: "late data (2 rows, max 4500 ms)", s3: "late data (2 rows, max 1200 ms)"}
 
 
+def test_late_tick_size_row_without_timestamp(tmp_path):
+    """A late tick-size message with no (or a null) timestamp is ignored, and the other late rows still void."""
+    s2 = SLUGS[1]
+    cid = market_obj("btc", "5m", WS[1])["conditionId"]
+    t2 = WS[1] + 60_000
+    bad = [LiveRow("pm_other", t2, {"event_type": "tick_size_change", "market": cid, "new_tick_size": "0.001"}),
+           LiveRow("pm_other", t2, {"event_type": "tick_size_change", "market": cid, "timestamp": None})]
+    late = [(r, 1_000) for r in bad] + [(a_row("pm_price_change", s2)._replace(recv_ms=t2), 3_000)]
+    root, mk = make(tmp_path, late=late)
+    assert voided(root, mk) == {s2: "late data (1 rows, max 3000 ms)"}
+
+
 def test_late_opening_snapshot_before_open_does_not_void(tmp_path):
     """The Task 8 live case: the opening snapshot's old ts makes it late, at admission, before any row counts."""
     s1 = SLUGS[0]

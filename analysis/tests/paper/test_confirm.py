@@ -179,6 +179,27 @@ def test_api_trades_written_once_after_complete_download(tmp_path):
     assert len(seen) == 3 and len(e.ing.held) == 4  # done: never downloaded or written again
 
 
+def assert_columns_from_session(d, run):
+    """`gamma_columns` over the in-memory Confirmer/router state and over the session files give the markets.parquet
+    columns exactly (what `paper replay` will compute)."""
+    from polydata.paper.results import gamma_columns, load_gamma_answers, load_outcome_sources
+
+    written = pd.read_parquet(d / "markets.parquet")
+    drop = ["outcome_source", "gamma_outcome", "gamma_seen_ms", "outcome_mismatch", "pnl_gamma", "admitted_ms"]
+    base = written.drop(columns=drop)
+    base["reason"] = base["reason"].str.replace(" (Gamma answered after the drain)", "", regex=False)
+    fills = pd.read_parquet(d / "fills.parquet")
+    mem_src = {}
+    for r in run.router.new_resolutions:
+        mem_src.setdefault(r.slug, r.source)
+    for s in run.confirmer.fallbacks:
+        mem_src.setdefault(s, "paper-gamma")
+    mem = gamma_columns(base, fills, run.confirmer.answers, mem_src)
+    ses = gamma_columns(base, fills, load_gamma_answers(d / "session"), load_outcome_sources(d / "session"))
+    pd.testing.assert_frame_equal(mem, ses)
+    pd.testing.assert_frame_equal(ses, written.drop(columns=["admitted_ms"]), check_dtype=False)  # parquet round trip
+
+
 # ------------------------------------------------------------------------------------------- end to end
 
 def run_start(first_gave_up: bool):
@@ -213,6 +234,7 @@ def test_gamma_fallback(tmp_path, monkeypatch):
     g = [json.loads(x) for x in zstandard.ZstdDecompressor().stream_reader(
         next((sess / "paper").glob("gamma_resolution.*")).open("rb")).read().decode().splitlines()]
     assert len(g) == 1 and g[0]["recv_ms"] == rows[0][0] and g[0]["recv_ms"] >= WE + 30_000
+    assert_columns_from_session(d, run)
     rep, man = replay_and_compare(cfg, d, monkeypatch)
     assert man["clean_stop"] is True
     assert rep.markets.set_index("slug").loc[SLUG, "outcome"] == "Up"
@@ -266,6 +288,7 @@ def test_mismatch_reported(tmp_path, monkeypatch):
         assert abs(r.pnl_gamma - want) < 1e-9
     assert abs(res["pnl_usd_gamma"] - mk.loc[~mk.voided, "pnl_gamma"].sum()) < 1e-6
     assert abs(res["pnl_usd"] - mk.loc[~mk.voided, "pnl"].astype(float).sum()) < 1e-6
+    assert_columns_from_session(d, run)
     replay_and_compare(cfg, d, monkeypatch)
 
 
@@ -301,4 +324,5 @@ def test_late_gamma_void_reason(tmp_path, monkeypatch):
     assert mk.loc[SLUG, "gamma_outcome"] == "Up" and mk.loc[SLUG, "outcome_source"] is None
     assert mk.loc[SLUG, "voided"] and mk.loc[SLUG, "reason"].endswith("(Gamma answered after the drain)")
     assert "no outcome" in json.loads((d / "results.json").read_text())["void_reasons"][SLUG]
+    assert_columns_from_session(d, run)
     assert not list((d / "session" / "raw").rglob("pm_resolution.*"))  # no row: replay parity as in the bounded case
