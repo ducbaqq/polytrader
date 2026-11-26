@@ -588,7 +588,10 @@ def explain_differences(run_dir: Path, dp: pd.DataFrame, op: pd.DataFrame, dr: p
     - `recorder_prevoided`: bt never opened the market and voided it for a gap before the replay (bt voids gaps up
       front, the paper run trades the market and voids it afterwards, spec "Gaps": an accepted cause).
 
-    `all_explained`: nothing unexplained and every open-differing market has a cause (`no_cause` lists the others)."""
+    `all_explained`: nothing unexplained and every open-differing market has a cause (`no_cause` lists the others).
+    `load_order_only` (per budget without an open-differing market): raw rows that differ only by order ids assigned
+    in another order at an equal `now` (the spec's load-order difference: markets are dispatched in load order,
+    admission order in the paper run, window-start chunks in bt)."""
     late_f = Path(run_dir) / "session" / "late" / "pm_book.tsv.zst"
     late: dict[str, int] = {}  # slug -> first late pm_book recv
     if late_f.exists():
@@ -631,8 +634,16 @@ def explain_differences(run_dir: Path, dp: pd.DataFrame, op: pd.DataFrame, dr: p
             else:
                 out["no_cause"].append(slug)
                 causes["no_cause"] += 1
+        load_order = 0
+        if not diff and not rest:
+            # identical after order ids are named per market: raw differences are order ids assigned in another
+            # order at an equal `now` (markets dispatched in load order: admission vs bt's window-start chunks)
+            rx, ry = _keyed(dp[dp["budget"].astype(str) == b], DEC_KEY), _keyed(dr[dr["budget"].astype(str) == b],
+                                                                                DEC_KEY)
+            load_order = int(sum((rx - ry).values()) + sum((ry - rx).values()))
         out["budgets"][b] = {"open_differs": len(diff), "opened_only_recorder": len([k for k in diff if k not in ox]),
-                             "opened_only_paper": len([k for k in diff if k not in oy]), "unexplained": rest, **causes}
+                             "opened_only_paper": len([k for k in diff if k not in oy]), "unexplained": rest,
+                             "load_order_only": load_order, **causes}
         out["unexplained"] += rest
         out["open_differs"] += sorted(diff)
     out["all_explained"] = out["unexplained"] == 0 and not out["no_cause"]

@@ -32,6 +32,10 @@ EXPECTED_CAUSES = {
     "fv-taker-m3": {"late_snapshot": 0, "recorder_prevoided": 4, "no_cause": 0},
     "mm-side-pull": {"late_snapshot": 0, "recorder_prevoided": 5, "no_cause": 0},
 }
+# Budgets whose raw decision rows differ only by order ids assigned in another order at an equal `now` (load order:
+# admission order in the paper run, window-start chunks in bt; the spec's documented schedule difference), pinned:
+# budget -> differing raw rows. Identical once order ids are named per market.
+EXPECTED_LOAD_ORDER = {"endgame-maker-v2": {}, "fv-taker-m3": {}, "mm-side-pull": {"xrp": 24}}
 
 
 def _cli(*args: str, env: dict) -> subprocess.CompletedProcess:
@@ -69,6 +73,8 @@ def test_parity_realdata(name, tmp_path):
           f"{e['unexplained']}, all explained {e['all_explained']}; bt pre-voided: {e['recorder_prevoided']}")
     assert e["all_explained"] and e["unexplained"] == 0, json.dumps(e)[:3000]
     assert causes == EXPECTED_CAUSES[name], causes
+    lo = {b: x["load_order_only"] for b, x in e["budgets"].items() if x["load_order_only"]}
+    assert lo == EXPECTED_LOAD_ORDER[name], lo
     for b, d in v["decisions"].items():  # a budget without an open-differing market is decision-identical
         if not e["budgets"].get(b, {}).get("open_differs"):
-            assert d["only_paper"] == d["only_recorder"] == 0, (b, d)
+            assert d["only_paper"] + d["only_recorder"] == lo.get(b, 0), (b, d)
