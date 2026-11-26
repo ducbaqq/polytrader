@@ -22,21 +22,30 @@ class Ingest:
         self.router, self.writer, self.clock = router, writer, clock
         self.recv = -(2**62)
         self._tick_wall = -(2**62)
-        self._stepped = False  # inside a clock step back: `stop` written, `start` waits for the clock to catch up
+        self._step_end: int | None = None  # inside a clock step back: `stop` written, `start` pending at this ms
         self._loop_ms: int | None = None
         self._n_res = 0  # router.new_resolutions already written
 
     def stamp(self) -> int:
         now = int(self.clock())
         prev = self.recv
-        if prev > -(2**61) and now < prev - STEP_MS and not self._stepped:
-            self._stepped = True  # recv stays frozen at prev while the clock is behind: that is a gap in every stream
-            self.writer.event(prev, "stop", "recorder", f"clock stepped back {prev - now} ms")
+        if prev > -(2**61) and now < prev - STEP_MS:
+            # recv stays frozen at prev until the clock catches up, about prev - now later: everything stamped at prev
+            # lies inside the gap [prev, prev + (prev - now)]. A deeper step extends it.
+            end = prev + (prev - now)
+            if self._step_end is None:
+                self.writer.event(prev, "stop", "recorder", f"clock stepped back {prev - now} ms")
+            self._step_end = end if self._step_end is None else max(self._step_end, end)
         self.recv = max(prev, now, self._tick_wall)
-        if self._stepped and now >= prev:
-            self._stepped = False
-            self.writer.event(self.recv, "start", "recorder", "clock caught up")
+        if self._step_end is not None and now >= prev:
+            self._close_step()
         return self.recv
+
+    def _close_step(self) -> None:
+        """Write the pending `start` of a clock step (one stop/start pair per episode, at the estimated catch-up)."""
+        if self._step_end is not None:
+            self.writer.event(self._step_end, "start", "recorder", "clock step")
+            self._step_end = None
 
     def note_tick(self, wall_ms: int) -> None:
         """Call after `router.tick(wall_ms)`: later stamps are at least this wall, and the settler's resolutions the
@@ -80,5 +89,6 @@ class Ingest:
             self.writer.event(int(wall_ms), "start", "recorder", "event loop stall")
 
     def finish(self) -> None:
-        """After `router.finish()`: write the remaining resolutions."""
+        """After `router.finish()`: write the remaining resolutions and any pending clock-step `start`."""
+        self._close_step()
         self._write_resolutions()

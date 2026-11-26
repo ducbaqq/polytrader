@@ -223,26 +223,49 @@ def _market(ws: int) -> pd.DataFrame:
 
 
 def test_monotone_stamp_and_clock_step(tmp_path, monkeypatch):
-    now = [H11]
+    """Dense stamps (1 ms) through a 6 s backward step: recv is frozen at prev meanwhile, and the gap [prev, prev + 6 s]
+    covers every row stamped there."""
+    now = [H11 + 100_000]
     w = SessionWriter(tmp_path)
     ing = Ingest(None, w, lambda: now[0])  # type: ignore[arg-type]
     stamps = []
-    for t in [0, 10, 20, 5_000, 5_010, 2_010, 2_500, 4_000, 11_000, 11_100]:  # back by 3 s, caught up at +11 s
-        now[0] = H11 + t
+    prev = None
+    for k in range(3_000):  # 3 s of normal time
+        now[0] = H11 + 100_000 + k
         stamps.append(ing.stamp())
-    assert stamps == sorted(stamps) and stamps[-1] == H11 + 11_100
-    assert stamps[5:8] == [H11 + 5_010] * 3  # frozen while the clock is behind
+    prev = stamps[-1]
+    now[0] = prev - 6_000  # step back 6 s
+    for k in range(9_000):  # dense stamps through the step and 3 s beyond catch-up
+        stamps.append(ing.stamp())
+        now[0] += 1
+    assert stamps == sorted(stamps) and stamps[3_000] == prev  # frozen
+    assert stamps[-1] == now[0] - 1 and stamps[-1] > prev
     w.close()
     ev = _events(tmp_path, monkeypatch)
     assert list(zip(ev.kind, ev.source)) == [("stop", "recorder"), ("start", "recorder")]  # one pair
-    # the gap runs until the first stamp with the clock caught up (not zero length)
-    assert (ev.ts_ms.iloc[0], ev.ts_ms.iloc[1]) == (H11 + 5_010, H11 + 11_000)
-    g = G.event_gaps(ev, end_ms=H11 + 300_000, bn_syms=["BTCUSDT"])
+    assert (ev.ts_ms.iloc[0], ev.ts_ms.iloc[1]) == (prev, prev + 6_000)
+    g = G.event_gaps(ev, end_ms=H11 + 400_000, bn_syms=["BTCUSDT"])
     pm = g[(g.stream == "pm") & (g.key == "*")].iloc[0]
-    assert pm.to_ms - pm.from_ms == 5_990 > 2_000
-    v = G.voided_markets(_market(H11), g)
-    assert list(v.slug) == [slug_of("btc", "5m", H11)] and "pm gap 5990" in v.reason[0]
-    assert G.voided_markets(_market(H11 + 600_000), g).empty
+    assert pm.to_ms - pm.from_ms == 6_000 >= 5_000
+    v = G.voided_markets(_market(H11), g)  # window [H11, H11+300 s) overlaps the gap
+    assert list(v.slug) == [slug_of("btc", "5m", H11)] and "pm gap 6000" in v.reason[0]
+    ended = _market(H11 - 300_000 - 1_000)  # ends before prev
+    assert G.voided_markets(ended, g).empty
+
+
+def test_clock_step_deepens_extends_gap(tmp_path, monkeypatch):
+    now = [H11]
+    w = SessionWriter(tmp_path)
+    ing = Ingest(None, w, lambda: now[0])  # type: ignore[arg-type]
+    for t in [0, 100, 100_000]:
+        now[0] = H11 + t
+        ing.stamp()
+    for t in [97_000, 96_000, 92_000, 93_000, 100_001]:  # deeper (8 s) before catch-up
+        now[0] = H11 + t
+        ing.stamp()
+    w.close()
+    ev = _events(tmp_path, monkeypatch)
+    assert list(zip(ev.kind, ev.ts_ms)) == [("stop", H11 + 100_000), ("start", H11 + 108_000)]
 
 
 def test_stall_gap_voids_market(tmp_path, monkeypatch):
