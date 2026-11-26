@@ -21,9 +21,12 @@ traded every market as it saw it and only the accounting changes (`apply`: `pnl_
   received before the open, with a ts at or after the window end, or of a market that never opened (no snapshot) never void it. Rows of
   `bn_fut_bbo`, `bn_fut_trade` and `rtds_price` in `late/` never void (the router cannot produce them).
 
-**Quiet book.** A market opens at its first accepted `pm_book` row received at or after its admission. If its opening
-snapshots arrive late (a quiet book's snapshot carries the book's last-change time) they are dropped, and the market
-opens only at the next accepted `pm_book`, maybe never: it is untraded, not voided (nothing it was shown was wrong).
+**Quiet book.** A market opens at its first accepted `pm_book` row received at or after its admission. The opening
+snapshot of a quiet book carries the book's last-change time and often arrives "late" (on 2026-11-24 about 60 s old
+on bnb/doge/hype/xrp/zec). Late rows of a market whose open is not decided yet are accepted (`bt.live`, fix round 1
+ruling A): they go to the session's normal streams, so such a snapshot opens the market at its receipt and never
+voids it. Late rows received after the open are still dropped to `late/` and void the market (rule above). A market
+without any snapshot before its window end never opens: untraded, not voided.
 `session_voids(...).attrs["never_opened"]` lists the admitted markets without an accepted `pm_book` received in
 `[admitted_ms, window_end)`; `results.json` reports them (`never_opened`), and `paper replay` derives the same list.
 """
@@ -109,9 +112,10 @@ def _late_rows(session: Path, cond_slug: dict[str, str]) -> pd.DataFrame:
     return out[out.slug.notna()].reset_index(drop=True)
 
 
-def session_voids(session: Path, markets: pd.DataFrame, cfg: RunConfig, end_ms: int) -> pd.DataFrame:
+def session_voids(session: Path, markets: pd.DataFrame, cfg: RunConfig, end_ms: int, *,
+                  build_store: bool = True) -> pd.DataFrame:
     """Voided markets of the session (module docstring). `markets`: the run's markets (`slug`, `coin`,
-    `window_start_ms`, `window_end_ms`, `outcome`)."""
+    `window_start_ms`, `window_end_ms`, `outcome`). `build_store=False`: `session/parquet` is already built."""
     from polydata.build import build
     from polydata.views import create_views
 
@@ -124,8 +128,9 @@ def session_voids(session: Path, markets: pd.DataFrame, cfg: RunConfig, end_ms: 
         out.attrs["never_opened"] = []
         return out
     with _env_dir(session):
-        with contextlib.redirect_stdout(io.StringIO()):
-            build()
+        if build_store:
+            with contextlib.redirect_stdout(io.StringIO()):
+                build()
         con = duckdb.connect()
         con.execute("SET TimeZone='UTC'")
         names = create_views(con, parquet=session / "parquet", include_sealed=True)  # the run's own session store

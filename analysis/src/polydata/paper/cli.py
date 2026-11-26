@@ -246,7 +246,8 @@ def register(sub) -> None:
                     help="fake feed speed: N x real time, or max (default)")
     sp.set_defaults(fn=cmd_run)
 
-    rp = ps.add_parser("replay", help="parity check: replay a paper run's session and compare (exit 1 if it fails)")
+    rp = ps.add_parser("replay", help="parity check: replay a paper run's session and compare (exit 1 if it fails, "
+                                      "2 if informational: another host)")
     rp.add_argument("run_dir", metavar="RUN_DIR")
     rp.add_argument("--vs-recorder", action="store_true",
                     help="also replay the same window from the recorder store and report the differences")
@@ -259,6 +260,8 @@ def cmd_replay(a) -> None:
     from polydata.paper.parity import replay_command
 
     res = replay_command(Path(a.run_dir), vs_rec=a.vs_recorder, keep_parquet=a.keep_parquet)
+    if res["verdict"] == "informational":
+        sys.exit(2)  # another host: not a pass, not a failure (tolerance counts in parity.json)
     if not res["passed"]:
         sys.exit(1)
 

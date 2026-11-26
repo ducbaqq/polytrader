@@ -510,7 +510,8 @@ class FakeFeed:
         held: list[tuple] = []
         n = 0
         for item in merged:
-            while held and held[0][0] <= item[0]:
+            # a delayed row comes in (recv_ms, rank) order: after the events and the stream rows of its recv_ms
+            while held and held[0][:2] < item[:2]:
                 yield heapq.heappop(held)
             if item[3] == "row":
                 recv, stream, v = item[0], item[4], item[5]

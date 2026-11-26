@@ -7,7 +7,8 @@ over the session, `voids.apply`, `results.gamma_columns` with `load_gamma_answer
 `admitted_ms` from the manifest). `compare` writes the replay's outputs to `parity/` and `parity.json`, and sets
 `results.json["parity"]`.
 
-**Definition (exact, NaN = NaN, per budget in row order):**
+**Definition (exact, NaN = NaN, per budget in row order; decisions, orders, fills and equity also need the same
+dtype per column, `dtype_mismatches`):**
 
 | table | compared |
 |---|---|
@@ -30,11 +31,14 @@ the router in the run and from the manifest in the replay (the manifest is the r
 carries the P&L of voided markets.
 
 **Truncated sessions** (`clean_stop: false`): decisions with `now < cut` and markets settled before `cut` (`settle_ms <
-cut`, as in the run), `cut = manifest.flushed_ms + 1` (the strategy clock reached `flushed_ms`; older manifests: the
-run's last decision `now` + 1); other tables are reported, not judged. Verdict `passed-truncated`.
+cut` on both sides; replay markets voided "no outcome at settlement" at close + R that the run never settled, plan
+Decision 3, are left out and counted as `replay_only_settled_before_cut`), `cut = manifest.flushed_ms + 1` (the
+strategy clock reached `flushed_ms`; older manifests: the run's last decision `now` + 1); other tables are reported,
+not judged. Verdict `passed-truncated`.
 
 **Another host** (`provenance.host` differs from this host's `runs.host_hash()`): libm may differ in the last bit;
-verdict `informational` (never a pass), with the mismatches that remain under a 1e-9 relative tolerance counted.
+verdict `informational` (never a pass; `paper replay` exits 2), with the mismatches that remain under a 1e-9
+relative tolerance counted (`tolerance_mismatches`).
 
 **Checks** (reported, not judged): `cl_rereceipt_gt_60s`: Chainlink `(symbol, ts_ms)` received again more than 60 s
 after its first receipt (the live router deduplicates globally, the replay's `_load_cl` over a 60 s lookback).
@@ -42,10 +46,11 @@ after its first receipt (the live router deduplicates globally, the replay's `_l
 `--vs-recorder` (`vs_recorder`): a normal `engine` replay of the same window `[rs, end_ms)` and days (whatever the
 config's `day_kinds`) over the default store (sealed days hidden, the recorder's gaps), traced, against the paper run:
 decision, fill and P&L differences in `parity/vs_recorder.json`; never a pass or fail (fidelity, not parity).
-`explained` attributes decision differences to markets that opened at another time (`explain_differences`): the
-hold-back dropping a quiet book's opening snapshot (its `timestamp` is the book's last change, ~60 s old on
-bnb/doge/hype/xrp/zec on 2026-11-24), so the paper market opens at a later snapshot or never; or bt voiding a market
-before the replay (gaps) while the paper run trades it and voids it afterwards.
+`explained` attributes decision differences to markets that opened at another time (`explain_differences`). The
+accepted cause is bt voiding a market for a gap before the replay (never opened) while the paper run trades it and
+voids it afterwards (spec "Gaps"). Before fix round 1 the main cause was the hold-back dropping a quiet book's stale
+opening snapshot (its `timestamp` is the book's last change, ~60 s old on bnb/doge/hype/xrp/zec on 2026-11-24); late
+rows of a market that has not opened are now accepted (`bt.live`), so that cause is still detected but not expected.
 """
 
 from __future__ import annotations
@@ -124,14 +129,15 @@ def replay(run_dir: Path) -> RunResult:
 
 
 def replay_markets(run_dir: Path, rep: RunResult) -> tuple[pd.DataFrame, list[str] | None]:
-    """The replay's markets after the paper run's post-processing, and the never-opened markets."""
+    """The replay's markets after the paper run's post-processing, and the never-opened markets (`session/parquet`
+    built: `replay` builds it, `compare` builds it if missing)."""
     from polydata.paper import voids as voids_mod
     from polydata.paper.results import paper_markets
 
     run_dir = Path(run_dir)
     _, man = load_run(run_dir)
     sess = run_dir / "session"
-    v = voids_mod.session_voids(sess, rep.markets, rep.cfg, int(man["end_ms"]))
+    v = voids_mod.session_voids(sess, rep.markets, rep.cfg, int(man["end_ms"]), build_store=False)
     mk = paper_markets(rep, man["admitted"], v, sess)
     return mk, list(v.attrs.get("never_opened", []))
 
@@ -284,6 +290,8 @@ def compare(run_dir: Path, replay: RunResult, *, host: str | None = None) -> dic
     _, man = load_run(run_dir)
     out = run_dir / "parity"
     out.mkdir(exist_ok=True)
+    if not (sess / "parquet").exists():
+        build_session(sess)
     mk, never = replay_markets(run_dir, replay)
     replay.decisions.to_parquet(out / "decisions.parquet", index=False)
     replay.orders.to_parquet(out / "orders.parquet", index=False)
@@ -308,6 +316,7 @@ def compare(run_dir: Path, replay: RunResult, *, host: str | None = None) -> dic
 
     tables: dict[str, dict] = {}
     firsts: list[dict] = []
+    replay_only = 0
     tol_counts: dict[str, int] = {}
     dec_paper = _read(run_dir, "decisions")
     for name in ("decisions", "orders", "fills", "equity", "markets"):
@@ -323,7 +332,15 @@ def compare(run_dir: Path, replay: RunResult, *, host: str | None = None) -> dic
                 b = b[b["now"] < cut] if len(b) else b
             elif name == "markets":
                 a = a[a["settle_ms"].notna() & (a["settle_ms"] < cut)] if len(a) else a
-                b = b[b["slug"].isin(set(a["slug"]))] if len(b) else b
+                if len(b):
+                    b = b[b["settle_ms"].notna() & (b["settle_ms"] < cut)]
+                    # the replay ends the session cleanly: a market still unresolved settles at close + R, voided
+                    # "no outcome at settlement" (plan Decision 3), possibly before the cut; the hard-stopped run
+                    # never settled it. Only those are left out (counted).
+                    d3 = (~b["slug"].isin(set(a["slug"])) & b["outcome"].isna()
+                          & b["reason"].astype(str).str.contains("no outcome at settlement"))
+                    replay_only = int(d3.sum())
+                    b = b[~d3]
             else:
                 judged = False
         if not len(a) and not len(b):
@@ -334,12 +351,22 @@ def compare(run_dir: Path, replay: RunResult, *, host: str | None = None) -> dic
         if "budget" not in b.columns:
             b = b.assign(budget="")
         t, first = _table(name, a, b, cols, None)
+        if name != "markets":  # exact means exact: the same dtype per column too
+            bad_dt = sorted(c for c in cols if c in a.columns and c in b.columns and a[c].dtype != b[c].dtype)
+            if bad_dt:
+                t["dtype_mismatches"] = {c: [str(a[c].dtype), str(b[c].dtype)] for c in bad_dt}
+                t["mismatches"] += len(bad_dt)
+                if first is None:
+                    first = {"table": name, "budget": None, "index": None, "paper": None, "replay": None,
+                             "dtype": t["dtype_mismatches"]}
         if other_host:
             t2, _ = _table(name, a, b, cols, TOL)
             tol_counts[name] = t2["mismatches"]
         if not judged:
             t["judged"] = False
             first = None
+        if name == "markets" and cut is not None:
+            t["replay_only_settled_before_cut"] = replay_only
         tables[name] = t
         if first is not None:
             firsts.append(first)
@@ -553,20 +580,31 @@ def explain_differences(run_dir: Path, dp: pd.DataFrame, op: pd.DataFrame, dr: p
                         orr: pd.DataFrame, rec_markets: pd.DataFrame | None = None) -> dict:
     """Attribute paper/recorder decision differences to markets that opened at a different time (`on_market_open`
     `now` differs or only one side opened). Those markets' own calls (key, token or returned order id naming them) are
-    set aside; `unexplained` counts what remains. `late_snapshot` lists the open-differing markets with a `pm_book`
-    row in the session's `late/` (the hold-back dropped the opening snapshot of a quiet book: it carries the book's
-    last-change time). `recorder_prevoided` lists the open-differing markets the recorder replay voided before
-    replaying them (bt voids gaps up front and never opens such a market; the paper run trades it and voids it
-    afterwards, spec "Gaps"). Every difference is explained (`all_explained`) when `unexplained == 0` and every
-    open-differing market has one of these two causes."""
+    set aside; `unexplained` counts what remains. Each open-differing market needs a cause:
+
+    - `late_snapshot`: the session's `late/` holds a `pm_book` row of the market received before the paper run opened
+      it (before its window end if the run never opened it): the hold-back dropped a snapshot the recorder replay used
+      (after fix round 1's ruling A only a market that had already opened drops one, so this should not occur);
+    - `recorder_prevoided`: bt never opened the market and voided it for a gap before the replay (bt voids gaps up
+      front, the paper run trades the market and voids it afterwards, spec "Gaps": an accepted cause).
+
+    `all_explained`: nothing unexplained and every open-differing market has a cause (`no_cause` lists the others)."""
     late_f = Path(run_dir) / "session" / "late" / "pm_book.tsv.zst"
-    late = set()
+    late: dict[str, int] = {}  # slug -> first late pm_book recv
     if late_f.exists():
-        late = {r[0] for r in duckdb.connect().execute(
-            "SELECT DISTINCT split_part(asset, '|', 1) FROM read_csv(?, delim='\t', header=true, all_varchar=true)",
-            [late_f.as_posix()]).fetchall()}
-    out: dict = {"budgets": {}, "unexplained": 0, "open_differs": [], "late_snapshot": []}
+        late = dict(duckdb.connect().execute(
+            "SELECT split_part(asset, '|', 1), min(recv_ms::BIGINT) FROM read_csv(?, delim='\t', header=true, "
+            "all_varchar=true) GROUP BY 1", [late_f.as_posix()]).fetchall())
+    mp = _read(Path(run_dir), "markets")
+    wend = dict(zip(mp.slug, mp.window_end_ms)) if len(mp) else {}
+    pre_reason = {}
+    if rec_markets is not None and len(rec_markets):
+        v = rec_markets[rec_markets.voided.astype(bool)]
+        pre_reason = dict(zip(v.slug, v.reason.astype(str)))
+    out: dict = {"budgets": {}, "unexplained": 0, "open_differs": [], "late_snapshot": [], "recorder_prevoided": [],
+                 "no_cause": []}
     if not len(dp) and not len(dr):
+        out["all_explained"] = True
         return out
     for b in sorted(set(dp["budget"].astype(str)) | set(dr["budget"].astype(str))):
         x, y = _norm_orders(dp, op, b), _norm_orders(dr, orr, b)
@@ -581,17 +619,23 @@ def explain_differences(run_dir: Path, dp: pd.DataFrame, op: pd.DataFrame, dr: p
 
         cx, cy = _keyed(keep(x), DEC_KEY), _keyed(keep(y), DEC_KEY)
         rest = int(sum((cx - cy).values()) + sum((cy - cx).values()))
+        causes = {"late_snapshot": 0, "recorder_prevoided": 0, "no_cause": 0}
+        for slug in sorted(diff):
+            bound = ox.get(slug, wend.get(slug))
+            if slug in late and bound is not None and late[slug] < int(bound):
+                out["late_snapshot"].append(slug)
+                causes["late_snapshot"] += 1
+            elif slug not in oy and "gap" in pre_reason.get(slug, ""):
+                out["recorder_prevoided"].append(slug)
+                causes["recorder_prevoided"] += 1
+            else:
+                out["no_cause"].append(slug)
+                causes["no_cause"] += 1
         out["budgets"][b] = {"open_differs": len(diff), "opened_only_recorder": len([k for k in diff if k not in ox]),
-                             "opened_only_paper": len([k for k in diff if k not in oy]), "unexplained": rest}
+                             "opened_only_paper": len([k for k in diff if k not in oy]), "unexplained": rest, **causes}
         out["unexplained"] += rest
         out["open_differs"] += sorted(diff)
-        out["late_snapshot"] += sorted(diff & late)
-    out["all_late_snapshot"] = set(out["open_differs"]) <= set(out["late_snapshot"])
-    pre = set()
-    if rec_markets is not None and len(rec_markets):
-        pre = set(rec_markets.slug[rec_markets.voided.astype(bool)])
-    out["recorder_prevoided"] = sorted(set(out["open_differs"]) & pre)
-    out["all_explained"] = out["unexplained"] == 0 and set(out["open_differs"]) <= set(out["late_snapshot"]) | pre
+    out["all_explained"] = out["unexplained"] == 0 and not out["no_cause"]
     return out
 
 
@@ -624,6 +668,10 @@ def replay_command(run_dir: Path, *, vs_rec: bool = False, keep_parquet: bool = 
     if res["first_divergence"]:
         f = res["first_divergence"]
         echo(f"# first divergence: {f['table']} budget {f['budget']} index {f['index']}")
+    if res["verdict"] == "informational":
+        echo(f"# informational (run on host {res['host']['run']}, replayed on {res['host']['replay']}): mismatches "
+             f"under a {TOL:g} relative tolerance in {run_dir / 'parity.json'} (tolerance_mismatches): "
+             + json.dumps(res["tolerance_mismatches"]))
     if vs_rec:
         cfg, man = load_run(run_dir)
         rec = recorder_run(cfg, int(man["rs"]), int(man["end_ms"]))

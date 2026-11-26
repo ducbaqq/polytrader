@@ -22,14 +22,16 @@ ROOT = Path(__file__).resolve().parents[3]  # analysis/
 CONFIGS = ["endgame-maker-v2", "fv-taker-m3", "mm-side-pull"]
 A, B = "2026-11-24T11:00", "2026-11-24T13:00"
 SPAN_S = 2 * 3600
-# Known differences against the recorder replay (`--vs-recorder`), measured on this window: the inputs are the same
-# rows, but (1) the hold-back drops a quiet book's opening `pm_book` snapshot (its `timestamp` is the book's last
-# change, ~60 s before receipt on bnb/doge/hype/xrp/zec), so the paper market opens at a later snapshot or never, while
-# the recorder replay opens it at that snapshot (spec "Parity check": late rows are dropped before use); (2) bt voids
-# markets with recorder gaps before replaying them (never opened), the paper run trades them and voids them afterwards
-# (spec "Gaps"). Every decision difference must sit in a market with one of these causes (`explained.all_explained`:
-# order ids renumbered per market, nothing unexplained); btc/eth are identical.
-IDENTICAL_BUDGETS = ("btc", "eth")
+# --vs-recorder (a bt replay of the same window from the recorder store): the inputs are the same rows, and since fix
+# round 1 (ruling A: late rows of a market that has not opened are accepted, so a quiet book's stale opening snapshot
+# opens the market as in bt) the only accepted cause of decision differences is bt voiding a market for a gap before
+# the replay (never opened), while the paper run trades it and voids it afterwards (spec "Gaps"; ruling B). Pinned per
+# config on this window: open-differing markets by cause; everything else is decision-identical.
+EXPECTED_CAUSES = {
+    "endgame-maker-v2": {"late_snapshot": 0, "recorder_prevoided": 1, "no_cause": 0},
+    "fv-taker-m3": {"late_snapshot": 0, "recorder_prevoided": 4, "no_cause": 0},
+    "mm-side-pull": {"late_snapshot": 0, "recorder_prevoided": 5, "no_cause": 0},
+}
 
 
 def _cli(*args: str, env: dict) -> subprocess.CompletedProcess:
@@ -62,12 +64,11 @@ def test_parity_realdata(name, tmp_path):
     assert r2.returncode == 0 and p["passed"] and p["verdict"] == "passed", json.dumps(p, indent=1)[:4000]
     assert man["clean_stop"] is True and len(man["admitted"]) > 0
     e = v["explained"]
-    print(f"vs recorder explained: {len(e['open_differs'])} markets open at another time ({len(e['late_snapshot'])} "
-          f"late opening snapshot, {len(e['recorder_prevoided'])} voided by bt up front), unexplained "
-          f"{e['unexplained']}, all explained {e['all_explained']}")
+    causes = {k: len(e[k]) for k in ("late_snapshot", "recorder_prevoided", "no_cause")}
+    print(f"vs recorder explained: {len(e['open_differs'])} markets open at another time {causes}, unexplained "
+          f"{e['unexplained']}, all explained {e['all_explained']}; bt pre-voided: {e['recorder_prevoided']}")
     assert e["all_explained"] and e["unexplained"] == 0, json.dumps(e)[:3000]
-    for b in IDENTICAL_BUDGETS:
-        d = v["decisions"].get(b)
-        assert d is None or d["only_paper"] == d["only_recorder"] == 0, (b, d)
-    if not e["open_differs"]:
-        assert v["decision_differences"] == 0
+    assert causes == EXPECTED_CAUSES[name], causes
+    for b, d in v["decisions"].items():  # a budget without an open-differing market is decision-identical
+        if not e["budgets"].get(b, {}).get("open_differs"):
+            assert d["only_paper"] == d["only_recorder"] == 0, (b, d)

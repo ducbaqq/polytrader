@@ -128,6 +128,8 @@ def test_truncated_session_passed_truncated(tmp_path, monkeypatch):
     assert p["tables"]["decisions"]["rows_paper"] > 100 and p["tables"]["decisions"]["mismatches"] == 0
     assert p["tables"]["markets"]["rows_paper"] >= 1  # the 10:45 market settled before the stop
     assert p["tables"]["fills"].get("judged") is False
+    assert p["tables"]["markets"]["replay_only_settled_before_cut"] >= 0
+    assert p["tables"]["markets"]["rows_replay"] == p["tables"]["markets"]["rows_paper"]
 
 
 def test_other_host_is_informational(tmp_path, monkeypatch):
@@ -135,6 +137,65 @@ def test_other_host_is_informational(tmp_path, monkeypatch):
     p = parity.compare(d, parity.replay(d), host="00000000")
     assert p["verdict"] == "informational" and not p["passed"]
     assert p["tolerance_mismatches"]["decisions"] == 0
+    monkeypatch.setattr(parity.runs, "host_hash", lambda: "00000000")
+    assert _replay_cli(d, monkeypatch) == 2  # informational: neither a pass nor a failure
+
+
+def test_stale_opening_snapshot_opens_market(tmp_path, monkeypatch):
+    """Ruling A (fix round 1): a quiet book. The 10:50 market's opening snapshot (Up and Down) is received 60 s after
+    its timestamp and no other snapshot comes for 65 s: the late row is accepted (the market has not opened), written
+    to the session's pm_book stream, and opens the market at its receipt; the session replay matches."""
+    from synth import LiveRow, make_session, sort_rows, write_store
+
+    slug = slug_of("btc", "5m", M1050)
+    rows = make_session(5, START, 22, bn_ms=20, resolutions=True, meta_lead_ms=4 * 60_000)
+    books = [r for r in rows if r.stream == "pm_book" and r.values[1].startswith(slug)]
+    ts0 = min(int(r.values[0]) for r in books)
+    first = [r for r in books if int(r.values[0]) == ts0]
+    r0 = max(r.recv_ms for r in first)
+    # the snapshot of a ts_ms is the Up row if there is one (else the Down row): it opens the market at its receipt
+    snap = max(first, key=lambda r: (r.values[1].endswith("|U"), r.recv_ms))
+    out = []
+    for r in rows:
+        if r.stream == "pm_book" and r.values[1].startswith(slug):
+            if int(r.values[0]) == ts0:
+                r = LiveRow(r.stream, r.recv_ms + 60_000, r.values)  # stale: ts ~60 s old at receipt
+            elif r0 < r.recv_ms <= r0 + 65_000:
+                continue  # a quiet book: no other snapshot meanwhile
+        out.append(r)
+    write_store(sort_rows(out), tmp_path / "store")
+    cfg, d, run, feed, vc = fake_run(tmp_path, monkeypatch)
+    res = json.loads((d / "results.json").read_text())
+    assert res["router"]["late_accepted"] >= 1 and slug not in (res["never_opened"] or [])
+    dec = pd.read_parquet(d / "decisions.parquet")
+    opened = dec[(dec.call == "on_market_open") & (dec.key == slug)]
+    assert list(opened.now) == [snap.recv_ms + 60_000]
+    mk = _markets(d)
+    assert not mk.loc[slug, "voided"]
+    parity.build_session(d / "session")
+    import duckdb
+
+    n = duckdb.connect().execute(
+        f"SELECT count(*) FROM read_parquet('{(d / 'session' / 'parquet').as_posix()}/pm_book/*/*.parquet') "
+        "WHERE asset LIKE ? AND ts_ms = ?", [slug + "|%", ts0]).fetchall()[0][0]
+    assert n == len(first)  # in the session's pm_book stream, not late/
+    assert parity.compare(d, parity.replay(d))["passed"]
+
+
+def test_late_row_after_open_still_voids(tmp_path, monkeypatch):
+    """A late row received after the market opened is dropped to late/ and voids it (unchanged by ruling A)."""
+    slug = slug_of("btc", "5m", M1050)
+    lo = M1050 + 120_000  # long after the 10:50 market opened (~10:46)
+
+    def delay(feed):
+        feed.delay("pm_book", lambda v: v[1].startswith(slug) and lo <= int(v[0]) < lo + 10_000, 15_000)
+
+    cfg, d, run, feed, vc = fake_run(tmp_path, monkeypatch, feed_fn=delay)
+    mk = _markets(d)
+    assert "late data" in mk.loc[slug, "reason"] and mk.loc[slug, "voided"]
+    res = json.loads((d / "results.json").read_text())
+    assert res["late"] > 0
+    assert parity.compare(d, parity.replay(d))["passed"]
 
 
 def test_vs_recorder_synthetic(tmp_path, monkeypatch):
