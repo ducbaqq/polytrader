@@ -21,7 +21,7 @@ parallel with separate cash budgets.
 - **Commands:**
   - Run tests with `cd analysis && uv run pytest`.
   - Every test must pass offline on synthetic data. Real-data checks go in `analysis/tests/bt/realdata/` and are skipped unless `POLYDATA_REALDATA=1`.
-  - Real data: `POLYDATA_DIR=/private/tmp/claude-501/-Users-ducba--paradev-worktrees-polytrader-claude-scan-repository-mine-e4497e50/f2da7beb-7e9c-42f6-a2f6-e09637f48bd4/scratchpad/pd`. Parquet covers 2026-11-23 18:50 – 2026-11-24 ~14:45 UTC. Fetch more with `uv run polydata update --days 2026-11-24` (credentials in the repo-root `.env`; never print them).
+  - Real data: `POLYDATA_DIR=$POLYDATA_DIR`. Parquet covers 2026-11-23 18:50 – 2026-11-24 ~14:45 UTC. Fetch more with `uv run polydata update --days 2026-11-24` (credentials in the repo-root `.env`; never print them).
 - **The repo is public:** never commit secrets, IPs, hostnames or bucket names. `data/` is gitignored, and run folders live under it.
 - **DuckDB 2.0:** use `lambda x: …` (not `x ->`), use `fetchall()[0]` (not `fetchone()`), and run `SET TimeZone='UTC'` (`polydata.connect()` already does).
 - **Fees only via `polydata.fees.taker_fee(shares, avg_price, rate, exponent)`:**

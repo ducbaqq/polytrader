@@ -10,6 +10,7 @@ Guidelines for AI assistants working on this codebase.
 - `analysis/`: `polydata` Python package (uv). Mirrors the Spaces bucket, builds Parquet and exposes
   DuckDB views. Column types live in `analysis/src/polydata/schema.py`; update it whenever the recorder
   adds a stream or column.
+- `analysis/src/polydata/paper/`: paper runner (live feeds, simulated fills; guide `docs/PAPER.md`).
 - `scripts/recorder/`: droplet scripts (`verify.py` data checks, `archive.sh` hourly Spaces upload).
 
 ## Rules
@@ -23,6 +24,8 @@ Guidelines for AI assistants working on this codebase.
 - Test SQL against real data before committing, e.g. `cd analysis && uv run polydata sql "..."`.
 - After changing `analysis/`, run `cd analysis && uv run pytest`.
 - After changing `src/recorder/`, run `npm run build`. Deploy steps are in `docs/RECORDER.md#operations`.
+
+- **The paper runner never places real orders** (no keys, signing or order endpoints). Trust a paper result only after `polydata paper replay` parity passes.
 
 ## Backtester (`analysis/src/polydata/bt/`, `screen.py`)
 

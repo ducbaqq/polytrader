@@ -5,6 +5,8 @@ its hypothesis, the variants tried, results with links to run folders, lessons a
 artifacts themselves are not committed (they live in `data/runs/`, shared through `polydata bt
 push` / `pull`); only the journals, this glossary and `docs/runs-index.csv` are.
 
+Research catalogue of strategy ideas: [research/strategy-ideas.md](../research/strategy-ideas.md).
+
 Status: `idea` / `testing` / `candidate` / `paper` / `live` / `abandoned`.
 
 ## Where each strategy stands

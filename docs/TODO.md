@@ -69,10 +69,15 @@ In this order:
   - enough fillable size
 
 ### 3. Paper trading (next after a candidate passes)
-- [ ] Live/paper runner that runs the same `Strategy` classes against the live feeds; `orders.parquet` has the same schema as the simulator's.
+- [x] Live/paper runner that runs the same `Strategy` classes against the live feeds; `orders.parquet` has the same schema as the simulator's (2026-11-26): [PAPER.md](PAPER.md).
 - [ ] Minimum-size (5 share) real orders to verify the fill model (removes "Fill model: unverified").
 - [ ] Run the best one or two candidates live on the droplet, simulated against the live book.
-- [ ] Compare paper fills with what the backtest predicted for the same period.
+- [ ] Compare paper fills with what the backtest predicted for the same period (`polydata paper replay --vs-recorder`).
+- [ ] Model Polymarket's 250 ms taker delay (clob-markets `itode`) in the exchange model.
+- [ ] Run the end-of-run session build and voids in a subprocess (7 GB RSS spike on a 6 h session).
+- [ ] PolyBolt recorder feed (key required from 2026-11-30), including `price.crypto.twap` once keys exist.
+- [ ] Apply the Binance-gap void rule only to strategies that read Binance (`gaps.py`; changes bt results, test it).
+- [ ] Re-test market making with the taker delay and the trading-region latency.
 
 ## Small / optional
 - [ ] healthchecks.io dead-man's switch (`HEALTHCHECK_URL`), so the droplet dying alerts Telegram.
