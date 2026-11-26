@@ -42,9 +42,10 @@ after its first receipt (the live router deduplicates globally, the replay's `_l
 `--vs-recorder` (`vs_recorder`): a normal `engine` replay of the same window `[rs, end_ms)` and days (whatever the
 config's `day_kinds`) over the default store (sealed days hidden, the recorder's gaps), traced, against the paper run:
 decision, fill and P&L differences in `parity/vs_recorder.json`; never a pass or fail (fidelity, not parity).
-`explained` attributes decision differences to markets that opened at another time (`explain_differences`): on
-2026-11-24 every difference comes from the hold-back dropping a quiet book's opening snapshot (its `timestamp` is the
-book's last change, ~60 s old on bnb/doge/hype/xrp/zec), so the paper market opens at a later snapshot or never.
+`explained` attributes decision differences to markets that opened at another time (`explain_differences`): the
+hold-back dropping a quiet book's opening snapshot (its `timestamp` is the book's last change, ~60 s old on
+bnb/doge/hype/xrp/zec on 2026-11-24), so the paper market opens at a later snapshot or never; or bt voiding a market
+before the replay (gaps) while the paper run trades it and voids it afterwards.
 """
 
 from __future__ import annotations
@@ -496,7 +497,7 @@ def vs_recorder(run_dir: Path, rec: RunResult) -> dict:
                      "before": [_jsonable(r) for _, r in x.iloc[max(0, idx - BEFORE_N):idx].iterrows()]}
     out["decision_differences"] = int(tot)
     out["first_difference"] = first
-    out["explained"] = explain_differences(run_dir, dp, _read(run_dir, "orders"), dr, rec.orders)
+    out["explained"] = explain_differences(run_dir, dp, _read(run_dir, "orders"), dr, rec.orders, rec.markets)
     fp, fr = _read(run_dir, "fills"), rec.fills
     fcols = [c for c in ("budget", "slug", "token", "side", "ts_ms", "report_ms", "px", "size", "fee", "liquidity")
              if c in fp.columns and c in fr.columns]
@@ -525,9 +526,9 @@ _SLUG_RX = r"([a-z]+-updown-[0-9a-z]+-[0-9]+)"
 
 
 def _norm_orders(dec: pd.DataFrame, orders: pd.DataFrame, budget: str) -> pd.DataFrame:
-    """The budget's decisions with order ids (keys of `cancel` / `on_order` / `replace`, `ret` of `place`) renamed
-    `<slug>#<k>` (the market's k-th order): ids are numbered per budget, so one market trading differently shifts
-    every later id."""
+    """The budget's decisions with order ids (keys of `cancel` / `on_order` / `replace`, `ret` of `place` / `take`)
+    renamed `<slug>#<k>` (the market's k-th order): ids are numbered per budget, so one market trading differently
+    shifts every later id."""
     o = orders[orders["budget"].astype(str) == budget].drop_duplicates("order_id") if len(orders) else orders
     name, count = {}, Counter()
     for oid, slug in zip(o.get("order_id", []), o.get("slug", [])):
@@ -543,19 +544,21 @@ def _norm_orders(dec: pd.DataFrame, orders: pd.DataFrame, budget: str) -> pd.Dat
     x = dec[dec["budget"].astype(str) == budget].copy()
     oc = x["call"].isin(["cancel", "on_order", "replace"])
     x.loc[oc, "key"] = x.loc[oc, "key"].map(m)
-    pl = x["call"] == "place"
+    pl = x["call"].isin(["place", "take"])
     x.loc[pl, "ret"] = x.loc[pl, "ret"].map(m)
     return x
 
 
 def explain_differences(run_dir: Path, dp: pd.DataFrame, op: pd.DataFrame, dr: pd.DataFrame,
-                        orr: pd.DataFrame) -> dict:
+                        orr: pd.DataFrame, rec_markets: pd.DataFrame | None = None) -> dict:
     """Attribute paper/recorder decision differences to markets that opened at a different time (`on_market_open`
     `now` differs or only one side opened). Those markets' own calls (key, token or returned order id naming them) are
     set aside; `unexplained` counts what remains. `late_snapshot` lists the open-differing markets with a `pm_book`
     row in the session's `late/` (the hold-back dropped the opening snapshot of a quiet book: it carries the book's
-    last-change time). Every difference is explained when `unexplained == 0` and every open-differing market has a
-    late snapshot."""
+    last-change time). `recorder_prevoided` lists the open-differing markets the recorder replay voided before
+    replaying them (bt voids gaps up front and never opens such a market; the paper run trades it and voids it
+    afterwards, spec "Gaps"). Every difference is explained (`all_explained`) when `unexplained == 0` and every
+    open-differing market has one of these two causes."""
     late_f = Path(run_dir) / "session" / "late" / "pm_book.tsv.zst"
     late = set()
     if late_f.exists():
@@ -584,6 +587,11 @@ def explain_differences(run_dir: Path, dp: pd.DataFrame, op: pd.DataFrame, dr: p
         out["open_differs"] += sorted(diff)
         out["late_snapshot"] += sorted(diff & late)
     out["all_late_snapshot"] = set(out["open_differs"]) <= set(out["late_snapshot"])
+    pre = set()
+    if rec_markets is not None and len(rec_markets):
+        pre = set(rec_markets.slug[rec_markets.voided.astype(bool)])
+    out["recorder_prevoided"] = sorted(set(out["open_differs"]) & pre)
+    out["all_explained"] = out["unexplained"] == 0 and set(out["open_differs"]) <= set(out["late_snapshot"]) | pre
     return out
 
 

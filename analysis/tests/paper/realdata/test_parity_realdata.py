@@ -22,12 +22,14 @@ ROOT = Path(__file__).resolve().parents[3]  # analysis/
 CONFIGS = ["endgame-maker-v2", "fv-taker-m3", "mm-side-pull"]
 A, B = "2026-11-24T11:00", "2026-11-24T13:00"
 SPAN_S = 2 * 3600
-# Known difference against the recorder replay (`--vs-recorder`), measured on this window: the inputs are the same
-# rows, but the hold-back drops a quiet book's opening `pm_book` snapshot (its `timestamp` is the book's last change,
-# ~60 s before receipt on bnb/doge/hype/xrp/zec), so the paper market opens at a later snapshot or never, while the
-# recorder replay opens it at that snapshot (spec "Parity check": late rows are dropped before use). Every decision
-# difference must sit in such a market (`explained.unexplained == 0`, `all_late_snapshot`); btc/eth/sol are identical.
-IDENTICAL_BUDGETS = ("btc", "eth", "sol")
+# Known differences against the recorder replay (`--vs-recorder`), measured on this window: the inputs are the same
+# rows, but (1) the hold-back drops a quiet book's opening `pm_book` snapshot (its `timestamp` is the book's last
+# change, ~60 s before receipt on bnb/doge/hype/xrp/zec), so the paper market opens at a later snapshot or never, while
+# the recorder replay opens it at that snapshot (spec "Parity check": late rows are dropped before use); (2) bt voids
+# markets with recorder gaps before replaying them (never opened), the paper run trades them and voids them afterwards
+# (spec "Gaps"). Every decision difference must sit in a market with one of these causes (`explained.all_explained`:
+# order ids renumbered per market, nothing unexplained); btc/eth are identical.
+IDENTICAL_BUDGETS = ("btc", "eth")
 
 
 def _cli(*args: str, env: dict) -> subprocess.CompletedProcess:
@@ -60,9 +62,10 @@ def test_parity_realdata(name, tmp_path):
     assert r2.returncode == 0 and p["passed"] and p["verdict"] == "passed", json.dumps(p, indent=1)[:4000]
     assert man["clean_stop"] is True and len(man["admitted"]) > 0
     e = v["explained"]
-    print(f"vs recorder explained: {len(e['open_differs'])} markets open at another time, all with a late opening "
-          f"snapshot: {e['all_late_snapshot']}, unexplained {e['unexplained']}")
-    assert e["unexplained"] == 0 and e["all_late_snapshot"], json.dumps(e)[:3000]
+    print(f"vs recorder explained: {len(e['open_differs'])} markets open at another time ({len(e['late_snapshot'])} "
+          f"late opening snapshot, {len(e['recorder_prevoided'])} voided by bt up front), unexplained "
+          f"{e['unexplained']}, all explained {e['all_explained']}")
+    assert e["all_explained"] and e["unexplained"] == 0, json.dumps(e)[:3000]
     for b in IDENTICAL_BUDGETS:
         d = v["decisions"].get(b)
         assert d is None or d["only_paper"] == d["only_recorder"] == 0, (b, d)

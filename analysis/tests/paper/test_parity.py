@@ -137,5 +137,24 @@ def test_other_host_is_informational(tmp_path, monkeypatch):
     assert p["tolerance_mismatches"]["decisions"] == 0
 
 
+def test_vs_recorder_synthetic(tmp_path, monkeypatch):
+    """The same rows replayed by bt from the store: no decision differences (no stale snapshots, no gaps); and order
+    ids renumbered per market for the attribution."""
+    from polydata.build import build
+
+    cfg, d, run, feed, vc = fake_run(tmp_path, monkeypatch)
+    build()  # the source store
+    man = json.loads((d / "session" / "manifest.json").read_text())
+    rec = parity.recorder_run(cfg, man["rs"], man["end_ms"])
+    v = parity.vs_recorder(d, rec)
+    assert v["decision_differences"] == 0 and v["fills"]["only_paper"] == v["fills"]["only_recorder"] == 0
+    assert v["explained"]["all_explained"] and v["explained"]["open_differs"] == []
+    assert (d / "parity" / "vs_recorder.json").exists()
+    dec = pd.read_parquet(d / "decisions.parquet")
+    n = parity._norm_orders(dec, pd.read_parquet(d / "orders.parquet"), "btc")
+    placed = n[n.call.isin(["place", "take"])].ret
+    assert len(placed) and placed.astype(str).str.match(r"btc-updown-5m-\d+#\d+$").all()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
