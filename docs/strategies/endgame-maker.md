@@ -61,6 +61,22 @@ Run folders `data/runs/endgame/endgame-maker/<id>` (day 2026-11-24, train, all 8
 | 2026-11-25T0523-2414d7 | 11-24 | train | +41.9 (whole day, all 5m) | V2 chosen | **H1 +2.00c [-5.9, +9.1] (78 mkts, 649 sh, 90 fills); H2 +4.27c [-3.0, +10.4] (80 mkts, 678 sh, 103 fills, +$28.92); all +3.16c [-1.9, +8.1]** |
 | 2026-11-25T0546-712a7a | 11-24 | train | | V2 at 400 ms | H1 +3.06c [-5.3, +10.6]; **H2 +2.26c [-5.5, +8.8]** (80 mkts, 642 sh, 99 fills) |
 
+**Paper runs** (`polydata paper run configs/validation/endgame-maker-v2.yaml`, live public feeds, simulated fills, the user's Mac via a
+London VPN; validation day 2026-11-26, so each run is one validation look; not evidence of edge on its own):
+| Run | UTC span | Markets (voided) | Orders / fills | P&L (Chainlink settle) | P&L (Polymarket outcomes) | Parity | Notes |
+|---|---|---|---|---|---|---|---|
+| live_task11 run1h | 13:25–14:31 | 88 (6) | 817 / 20 | +$12.04 | +$12.04 | (not replayed) | voids: bn gap 1.0–1.6 s on BNB/HYPE; 2 ZEC never opened; loop lag p99 14 ms |
+| live_task11 run6h | 14:31–20:37 | 568 (72) | 5,469 / 98 | −$6.64 | **+$13.36** | **passed** (2.43M decisions, 0 mismatches) | voids: 58 bn gap, 10 pm gap, 4 late data (one ~30 min network burst, 85k late rows); 3 near-tie outcome mismatches (Chainlink reconstruction vs Polymarket) swing P&L by $20; loop lag p99 11 ms |
+
+Resource measurement (1 h run, sampled every 30 s): runner CPU avg 29 % / max 47 % of one core, RSS max 825 MB, processing lag
+p99 16 ms, Polymarket feed delay p50 7 ms / p99 ~250 ms, session ~230 MB/h (6 h run: ~130 MB/h; trading RSS 0.6–1.4 GB, but the
+end-of-run in-process session build peaked at 7.2 GB, to be moved to a subprocess).
+
+Lessons from the paper runs: the sign of the 6 h result is unresolved (−$6.64 with the simulator's own Chainlink reconstruction,
++$13.36 with Polymarket's official outcomes; 3 near-tie markets decide it). Until we record the settlement TWAP stream itself,
+report both and treat the official-outcome figure as the reference;
+the Binance-gap void rule voids 10% of markets for a strategy that never reads Binance (to be fixed with the gaps.py work).
+
 Attribution per share, V2 (c/share; mid_before = mid 200 ms before the fill):
 | Half | fill px | spread | adverse (10 s after) | settlement (after the 10 s) | total | win rate |
 |---|---|---|---|---|---|---|
