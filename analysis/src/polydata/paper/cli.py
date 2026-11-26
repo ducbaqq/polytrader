@@ -120,6 +120,7 @@ def cmd_run(a) -> None:
     ensure_hashseed(sys.argv[1:])
     from polydata.bt import runs
     from polydata.bt.strategy import get_strategy
+    from polydata.paper.feeds.rest import Rest
     from polydata.paper.runner import PaperRefused, PaperRun
 
     cfg, paper = load_paper_config(a.config, a.coins, a.set)
@@ -133,7 +134,8 @@ def cmd_run(a) -> None:
     print(f"# paper run {cfg.strategy} coins {','.join(cfg.coins)} timeframes {','.join(cfg.timeframes)} -> {out}",
           flush=True)
     try:
-        asyncio.run(PaperRun(cfg, out, opts, live_feeds(cfg), update_docs_index=a.update_docs_index).run())
+        asyncio.run(PaperRun(cfg, out, opts, live_feeds(cfg), update_docs_index=a.update_docs_index,
+                          rest_factory=Rest).run())
     except PaperRefused:
         if created:
             shutil.rmtree(out, ignore_errors=True)

@@ -286,7 +286,10 @@ voids:
 3. **Stalls and clock steps.** An event-loop stall or backward clock step > 2 s writes a `recorder`
    `stop`/`start` pair, which `event_gaps` turns into a gap on every stream.
 4. **Late / future-stamped Polymarket rows** (see the hold-back): the market is voided, reason
-   `late data (n rows, max x ms)`, from `session/late/`.
+   `late data (n rows, max x ms)`, from `session/late/`. Only rows received in `[open, window end)` count, where `open` is the receive time of the market's
+   first `pm_book` row at or after its admission: the opening snapshot of a quiet book carries the book's
+   last-change time (older than the hold-back), so it arrives late before the market is open without any data
+   missing. Rows of other streams in `late/` never void.
 5. **No outcome** at the end (no Chainlink settlement and no Gamma answer).
 
 Thresholds are bt's: `max_gap_ms_pm` 5,000, `max_gap_ms_bn` 1,000. `voided_markets` is applied unchanged to

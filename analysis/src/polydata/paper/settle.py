@@ -11,7 +11,7 @@ at `r_end`) it decides:
 - both `float(np.mean(...))` over the prices in receive order; outcome `Up` iff `close_twap >= ptb`.
 
 If either window holds no tick, or `window_start - 60 s < rs` (the start window was not watched), the market is listed
-in `gave_up` and gets no resolution here: it waits for Gamma (Task 9), or is voided "no outcome" at the end.
+in `gave_up` and gets no resolution here: it waits for Gamma (`confirm.Confirmer`), or is voided "no outcome" at the end.
 """
 
 from __future__ import annotations
@@ -69,8 +69,17 @@ class ChainlinkSettler:
         self.pending: dict[str, dict[str, MarketInfo]] = {}  # coin -> slug -> info, admitted and not decided
         self.gave_up: dict[str, str] = {}  # slug -> reason (no Chainlink outcome: waits for Gamma)
         self.decided: dict[str, Resolution] = {}
+        self.infos: dict[str, MarketInfo] = {}  # every admitted market (the Confirmer's list)
+
+    def give_up(self, slug: str, reason: str) -> None:
+        """The market's outcome comes from elsewhere (Gamma): the settler never decides it, so the session never gets
+        a second `pm_resolution` row for it."""
+        for pend in self.pending.values():
+            pend.pop(slug, None)
+        self.gave_up.setdefault(slug, reason)
 
     def admit(self, info: MarketInfo, admitted_ms: int) -> None:
+        self.infos[info.slug] = info
         self.pending.setdefault(info.coin, {})[info.slug] = info
 
     def on_tick(self, coin: str, recv_ms: int, ts_ms: int, price: float) -> list[Resolution]:
