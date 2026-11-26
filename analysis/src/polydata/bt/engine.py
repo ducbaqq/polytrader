@@ -371,7 +371,8 @@ class ReplayDriver:
         i = int(np.searchsorted(sn, adm))
         open_ms = int(sn[i]) if i < len(sn) and sn[i] < info.window_end_ms else None
         staged.append(_SessMkt(slug, mi, md, adm, open_ms, int(info.window_end_ms)))
-        if full.outcome is not None and full.resolution_recv_ms is not None:
+        # the live router ignores a resolution received before the market's admission
+        if full.outcome is not None and full.resolution_recv_ms is not None and full.resolution_recv_ms >= adm:
             res.append((int(full.resolution_recv_ms), mi, slug, full.outcome))
 
     def _session_segment(self, con, s: int, e: int, staged: list) -> None:

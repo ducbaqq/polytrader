@@ -9,7 +9,8 @@ the Parquet build numbers them) and buffers what the core needs:
   `tick(wall)`, `H = wall - hold_back_ms`, every buffered row with `ts_ms <= H` goes into its market's
   `GrowingMarketData` (`add_ts`, one whole `ts_ms` at a time, in `(ts_ms, slug)` order). A row is *late* if its
   `ts_ms <= H` when it arrives, *future-stamped* if `ts_ms > recv_ms + skew_ms`; both are dropped (listed in
-  `late`), never buffered. Any row received at or before `H` (a broken stamp) is late too.
+  `late`), never buffered; so is one of them received at or before `H` (a broken stamp). Any other row received at
+  or before `H` raises: only these rows can be late.
 - Binance rows are bucketed (`LiveBn`, one per hour and symbol) up to `H` as well, so every Binance lookup the core
   can make (fill times included) is answered from complete buckets; `K_BN` events are still dispatched on the
   strategy clock.
@@ -36,7 +37,9 @@ allows it. The admission order is the load order (`Core.stage`), recorded in `ad
 **Stop.** `request_stop(t)` sets `end_ms` (rounded up to the second, never before what was already dispatched, never
 before the last admitted window end) and stops admissions. Data events at or after `end_ms` are never dispatched and
 the core never drains past `end_ms`; rows keep being released so resolutions (and the settler) still apply.
-`finish()` = `finish_unresolved()` + `Core.finish(end_ms)` per budget.
+`finish()` = `finish_unresolved()` + `Core.finish(end_ms)` per budget once `T >= end_ms - 1`; before that (a hard
+stop) it processes nothing beyond `T` and sets `clean_stop = False`. A resolution counts only if received at or after
+its market's admission.
 """
 
 from __future__ import annotations
@@ -321,8 +324,8 @@ class LiveRouter:
     def __init__(self, cfg: RunConfig, rs: int, *, hold_back_ms: int = 10_000, skew_ms: int = 1000, trace: bool = True,
                  admit_filter: Callable[[MarketInfo, int], bool] | None = None, settler=None):
         hold_back_ms, skew_ms = int(hold_back_ms), int(skew_ms)
-        if hold_back_ms < 0 or skew_ms < 0:
-            raise ValueError("hold_back_ms and skew_ms must be >= 0")
+        if hold_back_ms <= 0 or skew_ms < 0:
+            raise ValueError("hold_back_ms must be > 0 and skew_ms >= 0")
         explain = ExchangeConfig().trade_explain_ms
         if skew_ms + int(cfg.fill_report_latency_ms) < explain:
             # Exchange._explained reads trades up to T - R + trade_explain_ms on the ts clock: that must be <= H_ts
@@ -349,6 +352,7 @@ class LiveRouter:
         self.T = _FAR - skew_ms
         self.end_ms: int | None = None
         self.stopping = False
+        self.clean_stop: bool | None = None  # set by finish()
         self.admitted: list[dict] = []
         self.late: list[tuple[LiveRow, int]] = []
         self.new_resolutions: list[Resolution] = []
@@ -378,6 +382,10 @@ class LiveRouter:
         self._last_recv = recv
         rows = self.stats["rows"]
         rows[row.stream] = rows.get(row.stream, 0) + 1
+        if recv <= self.H_ts and not is_late_candidate(row):
+            # Only Polymarket exchange-clock rows can be late; anything else stamped at or behind the released horizon
+            # is a stamping bug (stamp recv_ms = max(previous, clock, last tick's wall)).
+            raise ValueError(f"{row.stream} row received at {recv}, at or before the released horizon {self.H_ts}")
         if recv <= self.H_ts:  # stamped behind what was already released: nothing may use it
             return self._drop(row, self.H_ts - recv, "late")
         if is_late_candidate(row):
@@ -581,6 +589,7 @@ class LiveRouter:
                 self._admit(info, recv)
             self._pre_admit = []
         cl: dict[LiveSource, dict[str, list]] = {}
+        res_rows = []
         q = self._fifo
         while q and q[0].recv_ms <= b:
             row = q.popleft()
@@ -590,7 +599,9 @@ class LiveRouter:
             elif st == "pm_market_meta":
                 self._admit(self._known[row.values["event"]["slug"]], int(row.recv_ms))
             elif st == "pm_resolution":
-                self._resolution_row(row)
+                res_rows.append(row)
+        for row in res_rows:  # after the piece's admissions: the rule is recv >= admitted_ms, whatever the row order
+            self._resolution_row(row)
         live = end is None or a < end
         for src, d in cl.items():
             kept = False
@@ -644,11 +655,12 @@ class LiveRouter:
     # ------------------------------------------------------------------------------- resolutions / stop
     def apply_resolution(self, res: Resolution) -> None:
         """Tell the market's core its outcome, received at `res.recv_ms` (which must lie after what was processed).
-        Only the first resolution of an admitted market counts (Core.set_resolution would overwrite)."""
+        A resolution counts only for an admitted market and if received at or after its admission (the session replay
+        applies the same rule); only the first one counts (Core.set_resolution would overwrite)."""
         if res.recv_ms <= self._done:
             raise ValueError(f"{res.slug}: resolution at {res.recv_ms} is behind the processed time {self._done}")
         src = self._md_src_admitted(res.slug)
-        if src is None:
+        if src is None or res.recv_ms < src.adm_by_slug[res.slug].admitted_ms:
             self.stats["ignored_resolutions"] += 1
             return
         if res.slug in self._resolved:
@@ -684,16 +696,28 @@ class LiveRouter:
                 s.set_cl(self.end_ms)
 
     def finish(self) -> RunResult:
+        """End the run (calls `request_stop(T)` first if needed).
+
+        Clean stop (`T >= end_ms - 1`: everything up to end_ms was dispatched): `finish_unresolved()` and
+        `Core.finish(end_ms)` per budget, as the session replay ends. Hard stop (`T < end_ms - 1`): nothing beyond `T`
+        is processed (the markets' data is only complete up to the horizons): no further drain, close or settle; the
+        result holds what happened up to `T` (`clean_stop` False, `stats["clean_stop"]`, `stats["flushed_ms"]`). It is
+        the prefix of the session replay's run (spec "Parity check": passed-truncated)."""
         if self.end_ms is None:
-            raise RuntimeError("finish() needs request_stop() first")
-        if not self._started:
+            self.request_stop(self.T)
+        self.clean_stop = self.T >= self.end_ms - 1
+        if self.clean_stop and not self._started:
             self._start()
         out = {}
         for k, s in self.sources.items():
-            s.refresh_grid(self.H_ts, self.end_ms)
-            s.core.finish_unresolved()
-            s.core.finish(self.end_ms)
-            out[k] = s.core.result()
+            if self.clean_stop:
+                s.refresh_grid(self.H_ts, self.end_ms)
+                s.core.finish_unresolved()
+                s.core.finish(self.end_ms)
+            r = s.core.result()
+            r.stats["clean_stop"] = self.clean_stop
+            r.stats["flushed_ms"] = int(min(self.T, self.end_ms - 1))
+            out[k] = r
         return RunResult(self.cfg, out, time.perf_counter() - self._t0)
 
 

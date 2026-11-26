@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
-from synth import make_session, meta_row, slug_of, sort_rows, write_store
+from synth import make_session, meta_row, resolution_row, slug_of, sort_rows, write_store
 
 from polydata.bt.config import RunConfig
 from polydata.bt.core import MARKET_COLS, Core, _Bn, _Grid
@@ -169,8 +169,9 @@ def cfg_of(strategy: str, coins=("btc",), timeframes=("5m",), **kw) -> RunConfig
     return RunConfig(strategy=strategy, coins=list(coins), timeframes=list(timeframes), **kw)
 
 
-def run_live(rows, cfg, rs, stop_ms, *, tick_ms=20, on_tick=None, **router_kw):
-    """The live side. Returns (router, RunResult, rows for the session store)."""
+def run_live(rows, cfg, rs, stop_ms, *, tick_ms=20, on_tick=None, hard_stop_ms=None, **router_kw):
+    """The live side. Returns (router, RunResult, rows for the session store). `hard_stop_ms`: finish as soon as
+    T reaches it (after the stop request), whatever is still pending."""
     router = LiveRouter(cfg, rs, **router_kw)
     ok, i, n = [], 0, len(rows)
     wall = rows[0].recv_ms
@@ -186,6 +187,8 @@ def run_live(rows, cfg, rs, stop_ms, *, tick_ms=20, on_tick=None, **router_kw):
         if router.end_ms is None and router.T >= stop_ms:
             router.request_stop(router.T)
         if router.end_ms is not None and i >= n and router.T >= max(router.end_ms, last):
+            break
+        if hard_stop_ms is not None and router.end_ms is not None and router.T >= hard_stop_ms:
             break
         wall += tick_ms
     res = [LiveRow("pm_resolution", r.recv_ms, {"slug": r.slug, "outcome": r.outcome, "source": r.source,
@@ -273,13 +276,25 @@ def test_ingest_classification():
     assert [x[1] for x in r.late] == [1, 0, 1000, 1000]  # future: beyond recv + skew; late: behind H
     with pytest.raises(ValueError, match="went back"):
         r.ingest(pc(H11 - 38_001, H11 - 38_000))
-    # a row stamped behind the released horizon is late whatever its stream
-    assert r.ingest(LiveRow("rtds_price", H11 - 38_000, ("crypto_prices_chainlink", "btc/usd", "1", "1", "1", "1", "a"))) \
-        == "ok"
+    # a Chainlink row received after the released horizon is used, never late
+    cl = lambda recv: LiveRow("rtds_price", recv, ("crypto_prices_chainlink", "btc/usd", "1", "1", "1", "1", "a"))
+    assert r.ingest(cl(H11 - 38_000)) == "ok"
     # unknown market (no discovery before its rows): kept, never admitted
     assert r.ingest(LiveRow("pm_trade", H11 - 38_000, (str(H11 - 37_000), "btc-updown-5m-1|U", "BUY", "0.5", "1", "0",
                                                        "x"))) == "ok"
     assert r.stats["orphan_rows"] == 1
+    # stamped at or behind the released horizon: a Polymarket exchange-clock row is late; any other row is a
+    # stamping bug and raises (Binance and Chainlink rows are never late)
+    r2 = LiveRouter(_cfg(), H11, hold_back_ms=3000)
+    r2.tick(H11)  # H = H11 - 3000
+    assert r2.ingest(pc(H11 - 3000, H11 - 3500)) == "late"
+    for row in (cl(H11 - 3000), LiveRow("bn_fut_bbo", H11 - 3000, ("BTCUSDT", "1", "1", "1", "1", "1", "1", "1")),
+                meta_row("btc", "5m", H11, H11 - 3000)):
+        with pytest.raises(ValueError, match="released horizon"):
+            r2.ingest(row)
+    assert r2.ingest(cl(H11 - 2999)) == "ok"
+    with pytest.raises(ValueError, match="hold_back_ms"):
+        LiveRouter(_cfg(), H11, hold_back_ms=0)
 
 
 def test_router_rejects_small_skew():
@@ -603,3 +618,59 @@ def test_trades_released_after_a_resting_order(tmp_path, monkeypatch):
     router, live, rep, _ = run_both(rows, cfg_of("rest-one-bid"), H11 - 19 * 60_000, H11 + 3 * 60_000, tmp_path,
                                     monkeypatch)
     assert len(live.fills) > 0 and (live.fills.liquidity == "maker").all()
+
+
+def test_resolution_before_admission_ignored(tmp_path, monkeypatch):
+    """A resolution received before its market's admission counts on neither side; one received exactly at the
+    admission time counts on both, even when its row arrives before the discovery row."""
+    start = H11 - 20 * 60_000
+    rows = make_session(16, start, 32, bn_ms=10)
+    rs = start + 60_000
+    a_slug, b_slug = slug_of("btc", "5m", H11), slug_of("btc", "5m", H11 - 5 * 60_000)
+    meta = {r.values["event"]["slug"]: r for r in rows if r.stream == "pm_market_meta"}
+    a_meta = meta[a_slug]._replace(recv_ms=H11 + 25_000)  # A discovered after its start
+    b_adm = meta[b_slug].recv_ms
+    assert b_adm > rs
+    rows = [r for r in rows if r is not meta[a_slug] and not (r.stream == "pm_resolution"
+            and r.values["slug"] in (a_slug, b_slug)) and not (
+        r.stream.startswith("pm_") and isinstance(r.values, tuple) and r.values[1].startswith(a_slug)
+        and r.recv_ms <= a_meta.recv_ms)]
+    i = rows.index(meta[b_slug])
+    rows = rows[:i] + [resolution_row("btc", "5m", H11 - 5 * 60_000, b_adm, "Up")] + rows[i:]  # same recv, first
+    rows = sort_rows(rows + [a_meta, resolution_row("btc", "5m", H11, H11 + 10_000, "Down")])
+    router, live, rep, _ = run_both(rows, cfg_of("buy-and-hold-up"), rs, H11 + 60_000, tmp_path, monkeypatch)
+    adm = {a["slug"]: a["admitted_ms"] for a in router.admitted}
+    assert adm[a_slug] == H11 + 25_000 and adm[b_slug] == b_adm
+    m = live.markets.set_index("slug")
+    assert m.loc[a_slug, "reason"] == "no outcome at settlement" and m.loc[a_slug, "outcome"] is None
+    assert not m.loc[b_slug, "voided"] and m.loc[b_slug, "outcome"] == "Up"
+    assert router.stats["ignored_resolutions"] >= 1
+    assert a_slug in router.unresolved() and b_slug not in router.unresolved()
+
+
+def test_hard_stop_is_a_prefix(tmp_path, monkeypatch):
+    """finish() before T reaches end_ms: nothing past T is processed (no drain, close or settle beyond it),
+    clean_stop is False, and the run is the prefix of the session replay's (decisions and orders)."""
+    start = H11 - 20 * 60_000
+    rows = make_session(17, start, 30, bn_ms=10)
+    rs = start + 60_000
+    cfg = cfg_of("parity-probe", params={"every_ms": 300, "take_every": 2})
+    stop = H11 + 60_000
+    router, live, store = run_live(rows, cfg, rs, stop, hard_stop_ms=stop + 30_000)
+    T = router.T
+    assert router.end_ms - 1 > T and router.clean_stop is False
+    r = live.coins["btc"]
+    assert r.stats["clean_stop"] is False and r.stats["flushed_ms"] == T
+    assert (r.decisions.now <= T).all() and (r.equity.ms <= T).all() and (r.orders.ms <= T).all()
+    closes = set(r.decisions[r.decisions.call == "on_market_close"].key)
+    m = r.markets.set_index("slug")
+    for slug, row in m.iterrows():
+        if row.window_end_ms > T:
+            assert slug not in closes and np.isnan(row.settle_ms)
+    assert any(row.window_end_ms > T for _, row in m.iterrows())
+    rep = run_replay(store, cfg, router, tmp_path / "session", monkeypatch)
+    b = rep.coins["btc"]
+    for name in ("decisions", "orders"):
+        x, y = getattr(r, name), getattr(b, name)
+        assert len(y) > len(x) > 100
+        assert x.equals(y.iloc[:len(x)].reset_index(drop=True)), _diff(name, x, y)
