@@ -103,6 +103,15 @@ class ParityProbe(Strategy):
 
 
 @register
+class CapProbe(ParityProbe):
+    """`parity-probe` that logs, at every close, the Up top of each market still open (a sibling's close sees them)."""
+    name = "cap-probe"
+
+    def on_market_close(self, ctx, market):
+        ctx.log("close-top", market.slug, [(m.slug, ctx.top(m.slug)) for m in ctx.markets() if m.slug != market.slug])
+
+
+@register
 class ParityProbeBn(ParityProbe):
     """`parity-probe` plus `on_binance`."""
     name = "parity-probe-bn"
@@ -674,3 +683,26 @@ def test_hard_stop_is_a_prefix(tmp_path, monkeypatch):
         x, y = getattr(r, name), getattr(b, name)
         assert len(y) > len(x) > 100
         assert x.equals(y.iloc[:len(x)].reset_index(drop=True)), _diff(name, x, y)
+
+
+def test_no_row_received_at_end_ms_is_visible(tmp_path, monkeypatch):
+    """A Polymarket row received exactly at end_ms (midnight into a sealed day) is never visible, even to the close of a
+    sibling market at end_ms; the session replay sees the same (recv_cap on the market data)."""
+    E = H11
+    rows = make_session(21, E - 20 * 60_000, 22, timeframes=("5m", "15m"), bn_ms=20, meta_lead_ms=25 * 60_000)
+    b = slug_of("btc", "15m", E - 900_000)
+    dn, up = f"{b}|D", f"{b}|U"
+    late = [LiveRow("pm_price_change", E, (str(E - 20), up, "BUY", "0.991", "100", "0.991", "0.993")),
+            LiveRow("pm_price_change", E, (str(E - 20), dn, "SELL", "0.009", "100", "0.007", "0.009"))]
+    rows = sort_rows(rows + late)
+    cfg = cfg_of("cap-probe", timeframes=("5m", "15m"))
+    rs = E - 19 * 60_000
+    router, live, store = run_live(rows, cfg, rs, E - 30_000, admit_filter=lambda info, t: info.window_end_ms <= E)
+    assert router.end_ms == E and all(r in store for r in late)  # accepted, written to the session
+    rep = run_replay(store, cfg, router, tmp_path / "session", monkeypatch)
+    assert_parity(live, rep)
+    tops = [str(x) for x in live.coins["btc"].log if " close-top " in str(x)]
+    assert any("Top(" in t for t in tops) and not any("bid_px=991" in t for t in tops), tops
+    md = router.sources["btc"].mds[b]
+    assert md.recv_cap == E and md.top_at(E, "recv").bid_px != 991 and md.top_at(E + 5, "recv").bid_px != 991
+    assert md.tops_recv.recv_ms.max() < E  # never released into the recv arrays

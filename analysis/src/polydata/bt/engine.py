@@ -364,6 +364,7 @@ class ReplayDriver:
         md = self.loader(con, r[1], [r[2]], int(r[3]), int(r[4]), slugs={slug}).get(slug)
         if md is None:
             raise RuntimeError(f"session market {slug}: no market data")
+        md.recv_cap = int(self.session.end_ms)  # nothing received at or after end_ms is visible (as in the live run)
         full = md.info
         info = replace(full, outcome=None, resolution_recv_ms=None, price_to_beat=None)  # as the live discovery
         mi = core.stage(info, md, self.session.rs, adm)

@@ -78,14 +78,16 @@ class Ingest:
             self._n_res += 1
             self.writer.write(LiveRow("pm_resolution", int(r.recv_ms), resolution_row(r, self.events.get(r.slug))))
 
-    def on_rows(self, rows: list[tuple[str, object]]) -> None:
+    def on_rows(self, rows: list[tuple[str, object]]) -> int:
+        """Stamp and route `rows` (one stamp); returns the stamp."""
         recv = self.stamp()
         if self.held is not None:
             self.held.extend(LiveRow(stream, recv, values) for stream, values in rows)
-            return
+            return recv
         self._write_resolutions()
         for stream, values in rows:
             self._route(LiveRow(stream, recv, values))
+        return recv
 
     def _route(self, row: LiveRow) -> None:
         stream = row.stream

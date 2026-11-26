@@ -13,7 +13,12 @@ Sequence (`run()`):
 5. Stop at the duration end, at the start of the next sealed day (unless allowed) or on the first SIGINT:
    `router.request_stop`, then keep ticking until `T >= end_ms` and no admitted market still waits for its Chainlink
    resolution, or `max_drain_s` passes. A second SIGINT is a hard stop (`clean_stop: false`).
-6. Feeds stopped, `router.finish()`, `ingest.finish()`, `writer.close()`, the manifest, the run files
+6. Feeds stopped. `Confirmer` (when `rest_factory` is given): polled every 30 s during the run (Gamma answers, the
+   fallback for markets without a Chainlink outcome, Data API trades); the drain waits for the markets the settler gave
+   up on while Gamma can still answer (bounded by `--confirm-wait` per market and `--max-drain`). After the drain the
+   Gamma fallback is closed and, with only the REST polling left, the run waits until every market has its Gamma answer
+   and trades or `--confirm-wait` after the last market's end. Then `router.finish()`, `ingest.finish()`,
+   `writer.close()`, the manifest, the post-hoc voids (`voids.session_voids` over the finished session), the run files
    (`results.write_paper_run`), `runs.rebuild_index()`.
 """
 
@@ -35,6 +40,8 @@ from polydata.bt.config import RunConfig
 from polydata.bt.live import LiveRouter
 from polydata.bt.splits import day_kind, record_look
 from polydata.bt.types import MarketInfo
+from polydata.paper.confirm import POLL_MS, Confirmer
+from polydata.paper.feeds.rest import Rest
 from polydata.paper.ingest import Ingest
 from polydata.paper.session import SessionWriter
 from polydata.paper.settle import ChainlinkSettler
@@ -134,7 +141,8 @@ class PaperRun:
                  feeds_factory: Callable[[Ingest, Callable[[], int]], list[Awaitable]], *,
                  clock: Callable[[], int] | None = None, sleep: Callable[[float], Awaitable] | None = None,
                  required_sources: tuple[str, ...] = REQUIRED_SOURCES, ready_timeout_s: float = 180.0,
-                 echo: Callable[[str], None] | None = None, update_docs_index: bool = False):
+                 echo: Callable[[str], None] | None = None, update_docs_index: bool = False,
+                 rest_factory: Callable[[Callable[[], int], Callable[[str, str, str], None]], Rest] | None = None):
         if int(cfg.bn_step_ms) % BN_THIN_MS:
             raise ValueError(f"bn_step_ms {cfg.bn_step_ms} must be a multiple of the session thinning "
                              f"({BN_THIN_MS} ms)")
@@ -147,6 +155,10 @@ class PaperRun:
         self.ready_timeout_s = ready_timeout_s
         self.echo = echo or (lambda s: print(s, flush=True))
         self.sigints = 0
+        self.rest_factory = rest_factory  # None: no Gamma confirmation or Data API trades (offline tests)
+        self.confirmer: Confirmer | None = None
+        self._poll_task: asyncio.Task | None = None
+        self.void_error: str | None = None
         self.update_docs_index = update_docs_index
         self.feed_failures = 0
         self._feeds_closing = False
@@ -260,15 +272,18 @@ class PaperRun:
                     if isinstance(r, BaseException) and not isinstance(r, asyncio.CancelledError):
                         self.say(f"# warning: feed task raised while stopping: {type(r).__name__}: {r}", status=True)
                 self._remove_signals()
+            await self._confirm_phase()
             router = self.router
             res = router.finish()
             self.ingest.finish()
             self.writer.close()
             manifest = self._manifest()
             self.writer.manifest(**manifest)
+            voids = self._voids(res, manifest)
             stats = self._stats()
             summary = write_paper_run(self.out, cfg, opts, res, router, manifest, stats=stats,
-                                      status_lines=self.status_lines)
+                                      status_lines=self.status_lines, voids=voids, confirm=self.confirmer,
+                                      errors=[self.void_error] if self.void_error else None)
             try:
                 # the committed docs/runs-index.csv only on request: a paper run must not rewrite it from a partial
                 # local runs folder (`bt run` keeps its own behaviour)
@@ -323,6 +338,9 @@ class PaperRun:
         if stops:
             self.stop_at, self.stop_reason = min(stops)
         self.settler = ChainlinkSettler(rs)
+        if self.rest_factory is not None:
+            self.confirmer = Confirmer(self.rest_factory(self.clock, self.ingest.on_event), self.ingest, self.settler,
+                                       self.clock, confirm_wait_ms=int(opts.confirm_wait_s) * 1000)
         self.router = LiveRouter(self.cfg, rs, hold_back_ms=opts.hold_back_ms, skew_ms=opts.skew_ms, trace=True,
                                  admit_filter=self.admit_filter, settler=self.settler)
         self.ingest.attach(self.router)
@@ -358,10 +376,58 @@ class PaperRun:
             self.say(f"# warning: could not write the manifest after an error: {e2}")
 
     def _waiting(self) -> list[str]:
-        """Admitted markets still waiting for a resolution this run can produce (the settler gave up on the others:
-        they wait for Gamma, Task 9)."""
-        gave_up = self.settler.gave_up
-        return [s for s in self.router.unresolved() if s not in gave_up]
+        """Admitted markets still waiting for a resolution this run can produce: from the Chainlink settler, or (the
+        settler gave up on them) from Gamma while the Confirmer can still get it (or has it and the router has not
+        applied it yet)."""
+        gave_up, c = self.settler.gave_up, self.confirmer
+        return [s for s in self.router.unresolved() if s not in gave_up or (c is not None and c.holds(s))]
+
+    def _poll_done(self, t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception() is not None:
+            self.warn(f"Gamma/Data API polling failed: {t.exception()!r}")
+
+    def _maybe_poll(self, now: int) -> None:
+        c = self.confirmer
+        if c is not None and now >= self._next_poll and (self._poll_task is None or self._poll_task.done()):
+            self._next_poll = now + POLL_MS
+            self._poll_task = asyncio.ensure_future(c.poll())
+            self._poll_task.add_done_callback(self._poll_done)
+
+    async def _confirm_phase(self) -> None:
+        """After the drain: no more Gamma fallbacks (a `pm_resolution` row now would make the replay settle a market
+        the run left unresolved); keep polling until every admitted market has its Gamma answer and trades, or
+        `confirm_wait` after the last market's end (a second SIGINT skips it)."""
+        c = self.confirmer
+        if c is None:
+            return
+        c.close_fallback()
+        if self._poll_task is not None:
+            await asyncio.wait([self._poll_task], timeout=30)
+        last_end = max([int(i.window_end_ms) for i in self.settler.infos.values()] or [0])
+        deadline = last_end + int(self.opts.confirm_wait_s) * 1000 + 2 * POLL_MS
+        if self.sigints < 2 and c.outstanding():
+            self.say(f"# waiting for Gamma answers and Data API trades (up to {self.opts.confirm_wait_s} s after the "
+                     "last market ended; Ctrl-C to skip)", status=True)
+        nxt = 0
+        while self.sigints < 2 and c.outstanding() and self.clock() < deadline:
+            if self.clock() >= nxt:
+                nxt = self.clock() + POLL_MS
+                await c.poll()
+            await self.sleep(1.0)
+        if c.outstanding():
+            self.warn("confirmation ended with Gamma answers or Data API trades missing")
+
+    def _voids(self, res, manifest):
+        """Post-hoc voids over the finished session (`voids.session_voids`); a failure is reported as an error and
+        leaves every market unvoided."""
+        from polydata.paper import voids
+
+        try:
+            return voids.session_voids(self.out / "session", res.markets, self.cfg, int(manifest["end_ms"]))
+        except Exception as e:  # noqa: BLE001 - the run folder must still be written
+            self.void_error = f"post-hoc voids failed: {type(e).__name__}: {e}"[:400]
+            self.warn(self.void_error)
+            return None
 
     async def _loop(self) -> None:
         router, ingest, opts = self.router, self.ingest, self.opts
@@ -369,6 +435,7 @@ class PaperRun:
         next_status = self.clock() + STATUS_EVERY_MS
         stop_wall: int | None = None
         expected = None
+        self._next_poll = 0
         while True:
             wall = self.clock()
             if expected is not None:
@@ -384,8 +451,11 @@ class PaperRun:
                 stop_wall = self.clock()
             router.tick(wall)
             ingest.note_tick(wall)
+            self._maybe_poll(wall)
             self.proc_lag.add(self.clock() - (wall if expected is None else min(wall, expected)))
             if self.sigints >= 2:
+                if self.confirmer is not None:
+                    self.confirmer.close_fallback()
                 break
             if not router.stopping:
                 if self.sigints:
@@ -393,6 +463,11 @@ class PaperRun:
                 if router.stopping:
                     stop_wall = self.clock()
             if router.stopping:
+                if (self.confirmer is not None and self.confirmer.fallback_open
+                        and self.clock() - stop_wall
+                        > opts.max_drain_s * 1000 - opts.hold_back_ms - opts.skew_ms - 1000):
+                    # a Gamma row written now could not be applied before the drain limit
+                    self.confirmer.close_fallback()
                 if router.T >= router.end_ms and not self._waiting():
                     break
                 if self.clock() - stop_wall > opts.max_drain_s * 1000:

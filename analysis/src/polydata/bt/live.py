@@ -210,7 +210,9 @@ class LiveSource:
         self.refresh_grid(H, end_ms)
         core.mark_hour(h)
 
-    def release_md(self, t: int) -> None:
+    def release_md(self, t: int, end_ms: int | None = None) -> None:
+        if end_ms is not None:
+            t = min(t, end_ms - 1)  # nothing received at or after end_ms reaches the strategy's arrays
         for md in self.mds.values():
             md.release_recv(t)
 
@@ -544,7 +546,7 @@ class LiveRouter:
     def _warm(self, t: int) -> None:
         """Before rs: the markets' recv sides, discoveries (admitted at rs) and Chainlink first receipts."""
         for s in self.sources.values():
-            s.release_md(t)
+            s.release_md(t, self.end_ms)
         cl: dict[LiveSource, dict[str, list]] = {}
         q = self._fifo
         while q and q[0].recv_ms <= t:
@@ -583,7 +585,7 @@ class LiveRouter:
         """Strategy-clock rows received in [a, b] (one hour at most), then the piece's data events."""
         end = self.end_ms
         for s in self.sources.values():
-            s.release_md(b)
+            s.release_md(b, end)
         if self._pre_admit:
             for info, recv in self._pre_admit:
                 self._admit(info, recv)
@@ -691,6 +693,8 @@ class LiveRouter:
             end = max(end, int(self._known[a["slug"]].window_end_ms))
         self.end_ms = _ceil(end, 1000)
         for s in self.sources.values():
+            for md in s.mds.values():
+                md.recv_cap = self.end_ms  # receive-clock queries never see a row received at or after end_ms
             if s.started:
                 s.refresh_grid(self.H_ts, self.end_ms)
                 s.set_cl(self.end_ms)

@@ -74,7 +74,7 @@ def fake_feeds(rows, vc: VClock, open_at: int | None = None, fail: bool = False)
 
 
 def paper_run(tmp_path, monkeypatch, start, minutes, opts, *, strategy="parity-probe", out=None, rows=None, seed=5,
-              runs_csv=True, vc=None, **feed_kw):
+              runs_csv=True, vc=None, rest_factory=None, **feed_kw):
     monkeypatch.setenv("POLYDATA_DIR", str(tmp_path / "data"))
     if runs_csv:
         monkeypatch.setenv("POLYDATA_RUNS_CSV", str(tmp_path / "runs-index.csv"))  # never the committed index
@@ -87,7 +87,8 @@ def paper_run(tmp_path, monkeypatch, start, minutes, opts, *, strategy="parity-p
     if out is None:
         out = runs.new_run_dir("test", strategy, pd.Timestamp(start, unit="ms", tz="UTC").to_pydatetime())
     lines = []
-    run = PaperRun(cfg, out, opts, fake_feeds(rows, vc, **feed_kw), clock=vc, sleep=vc.sleep, echo=lines.append)
+    run = PaperRun(cfg, out, opts, fake_feeds(rows, vc, **feed_kw), clock=vc, sleep=vc.sleep, echo=lines.append,
+                 rest_factory=rest_factory)
     d = asyncio.run(run.run())
     return cfg, d, run, lines
 
