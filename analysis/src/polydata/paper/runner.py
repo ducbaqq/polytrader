@@ -294,6 +294,9 @@ class PaperRun:
             self.say(f"# P&L ${summary['pnl_usd']:.2f}, {summary['orders']} orders, {summary['fills']} fills, "
                      f"{summary['markets']} markets, late {summary['late']}, future {summary['future']}, "
                      f"clean_stop {manifest['clean_stop']}")
+            if summary.get("voided_with_orders"):
+                self.say(f"# voided markets with orders (their P&L is left out): {len(summary['voided_with_orders'])}: "
+                         + ", ".join(f"{k} ({v})" for k, v in summary["voided_with_orders"].items()))
             return self.out
         except PaperRefused:
             if self.writer is not None:
@@ -520,6 +523,7 @@ class PaperRun:
                 "timeframes": list(cfg.timeframes), "hold_back_ms": r.hold_back_ms, "skew_ms": r.skew_ms,
                 "bn_step_ms": int(cfg.bn_step_ms), "bn_thinning_ms": BN_THIN_MS, "tick_ms": self.opts.tick_ms,
                 "warmup_s": self.opts.warmup_s, "stop_reason": "sigint" if self.sigints else self.stop_reason,
+                "flushed_ms": int(min(r.T, r.end_ms - 1)) if r.end_ms is not None else None,
                 "admitted": list(r.admitted)}
 
     def _stats(self) -> dict:

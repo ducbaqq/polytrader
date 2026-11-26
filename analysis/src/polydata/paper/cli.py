@@ -1,4 +1,6 @@
-"""`polydata paper run CONFIG.yaml ...`: a paper session against the live public feeds (no orders are ever sent).
+"""`polydata paper run CONFIG.yaml ...`: a paper session against the live public feeds (no orders are ever sent), or
+offline against the fake feed (`--fake-from A --fake-to B` over the recorder store, `--fake-session DIR`; `--speed`).
+`polydata paper replay RUN_DIR [--vs-recorder] [--keep-parquet]`: the parity check (`paper.parity`).
 
 The command re-executes itself with `PYTHONHASHSEED=0` when that is not already set (spec "Parity check": both the
 paper run and its replay run with the same string hashing).
@@ -8,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -116,6 +120,63 @@ def build_opts(a, paper: dict):
     return o
 
 
+def parse_time(text: str) -> int:
+    """'2026-11-24T11:00', '2026-11-24 11:00:30' (UTC) or epoch ms -> epoch ms."""
+    t = str(text).strip()
+    if t.isdigit():
+        return int(t)
+    try:
+        ts = datetime.fromisoformat(t.replace(" ", "T").replace("Z", "+00:00"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"bad time {text!r} (use e.g. 2026-11-24T11:00)") from None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return int(ts.timestamp() * 1000)
+
+
+def parse_speed(text: str) -> float | None:
+    """'max' -> None (jump), else a positive factor."""
+    if str(text).strip().lower() == "max":
+        return None
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"bad speed {text!r} (a number or max)") from None
+    if v <= 0:
+        raise argparse.ArgumentTypeError("speed must be > 0")
+    return v
+
+
+def fake_setup(a, cfg, opts):
+    """`--fake-from/--fake-to` or `--fake-session`: (feed, clock). Without `--duration`, a store run admits markets
+    ending by `--fake-to` (duration = fake-to - rs, rs = fake-from + warm-up) and a session run lasts as long as the
+    session did. The store is read past `--fake-to` (drain and confirmation)."""
+    from polydata.config import paths
+    from polydata.paper.fakefeed import FakeFeed, VirtualClock
+
+    if a.fake_session:
+        feed = FakeFeed.from_session(Path(a.fake_session))
+        if opts.duration_s is None:
+            man = json.loads((Path(a.fake_session) / "manifest.json").read_text())
+            if man.get("rs") is not None and man.get("end_ms") is not None:
+                opts.duration_s = max(1, (int(man["end_ms"]) - int(man["rs"])) // 1000)
+    else:
+        if a.fake_to is None:
+            raise SystemExit("error: --fake-from needs --fake-to")
+        A, B = a.fake_from, a.fake_to
+        if B <= A:
+            raise SystemExit("error: --fake-to must be after --fake-from")
+        rs = -(-(A + opts.warmup_s * 1000) // 1000) * 1000
+        if opts.duration_s is None:
+            if B <= rs:
+                raise SystemExit("error: --fake-to must be after --fake-from + the warm-up")
+            opts.duration_s = (B - rs) // 1000
+        tail = (opts.max_drain_s + opts.confirm_wait_s + 600) * 1000 + opts.hold_back_ms + opts.skew_ms
+        feed = FakeFeed.from_store(paths().root, A, B + tail, cfg.coins, cfg.timeframes,
+                                   allow_sealed=opts.allow_sealed)
+    return feed, VirtualClock(feed.start_ms, a.speed)
+
+
 def cmd_run(a) -> None:
     ensure_hashseed(sys.argv[1:])
     from polydata.bt import runs
@@ -125,6 +186,9 @@ def cmd_run(a) -> None:
 
     cfg, paper = load_paper_config(a.config, a.coins, a.set)
     opts = build_opts(a, paper)
+    fake = bool(a.fake_from is not None or a.fake_session)
+    if a.fake_to is not None and a.fake_from is None:
+        raise SystemExit("error: --fake-to needs --fake-from")
     created = a.out is None
     if a.out:
         out = Path(a.out)
@@ -134,8 +198,21 @@ def cmd_run(a) -> None:
     print(f"# paper run {cfg.strategy} coins {','.join(cfg.coins)} timeframes {','.join(cfg.timeframes)} -> {out}",
           flush=True)
     try:
-        asyncio.run(PaperRun(cfg, out, opts, live_feeds(cfg), update_docs_index=a.update_docs_index,
-                          rest_factory=Rest).run())
+        if fake:
+            feed, vc = fake_setup(a, cfg, opts)
+            print(f"# fake feed from {'session ' + a.fake_session if a.fake_session else 'the store'}, speed "
+                  f"{'max' if vc.speed is None else vc.speed}", flush=True)
+            t0 = time.perf_counter()
+            run = PaperRun(cfg, out, opts, feed.factory(vc), clock=vc, sleep=vc.sleep,
+                           update_docs_index=a.update_docs_index, rest_factory=feed.rest_factory())
+            asyncio.run(run.run())
+            el = time.perf_counter() - t0
+            span = (feed.last_recv or feed.start_ms) - feed.start_ms
+            print(f"# fake feed: {feed.delivered} rows in {el:.1f} s, {span / 1000 / max(el, 1e-9):.1f}x real time",
+                  flush=True)
+        else:
+            asyncio.run(PaperRun(cfg, out, opts, live_feeds(cfg), update_docs_index=a.update_docs_index,
+                                 rest_factory=Rest).run())
     except PaperRefused:
         if created:
             shutil.rmtree(out, ignore_errors=True)
@@ -160,7 +237,30 @@ def register(sub) -> None:
     sp.add_argument("--purpose", help="why a sealed day is read (with --allow-sealed)")
     sp.add_argument("--update-docs-index", action="store_true",
                     help="also rewrite the committed docs/runs-index.csv (default: data/runs/index.csv only)")
+    fk = sp.add_mutually_exclusive_group()
+    fk.add_argument("--fake-from", type=parse_time, metavar="TIME",
+                    help="offline: replay the recorder store from TIME (UTC) instead of the live feeds")
+    fk.add_argument("--fake-session", metavar="DIR", help="offline: replay a paper session's rows")
+    sp.add_argument("--fake-to", type=parse_time, metavar="TIME", help="end of --fake-from (markets end by then)")
+    sp.add_argument("--speed", type=parse_speed, default=None, metavar="N|max",
+                    help="fake feed speed: N x real time, or max (default)")
     sp.set_defaults(fn=cmd_run)
+
+    rp = ps.add_parser("replay", help="parity check: replay a paper run's session and compare (exit 1 if it fails)")
+    rp.add_argument("run_dir", metavar="RUN_DIR")
+    rp.add_argument("--vs-recorder", action="store_true",
+                    help="also replay the same window from the recorder store and report the differences")
+    rp.add_argument("--keep-parquet", action="store_true", help="keep session/parquet (default: removed after)")
+    rp.set_defaults(fn=cmd_replay)
+
+
+def cmd_replay(a) -> None:
+    ensure_hashseed(sys.argv[1:])
+    from polydata.paper.parity import replay_command
+
+    res = replay_command(Path(a.run_dir), vs_rec=a.vs_recorder, keep_parquet=a.keep_parquet)
+    if not res["passed"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

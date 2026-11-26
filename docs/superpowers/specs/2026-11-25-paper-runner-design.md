@@ -289,7 +289,11 @@ voids:
    `late data (n rows, max x ms)`, from `session/late/`. Only rows received at or after `open` with an exchange ts before the window end count (a row received after the end can still carry an in-window ts the ts-clock fills never saw), where `open` is the receive time of the market's
    first `pm_book` row at or after its admission: the opening snapshot of a quiet book carries the book's
    last-change time (older than the hold-back), so it arrives late before the market is open without any data
-   missing. Rows of other streams in `late/` never void.
+   missing. Rows of other streams in `late/` never void. **Quiet book:** if a market's opening snapshots are
+   all late they are dropped, and the market opens only at its next accepted `pm_book` (maybe never). Such a
+   market is untraded, not voided; `results.json` lists it under `never_opened` (no accepted `pm_book`
+   received in `[admitted_ms, window_end)`), and `paper replay` derives the same list from the session.
+   Voided markets the strategy placed orders in are listed under `voided_with_orders` (risk 7).
 5. **No outcome** at the end (no Chainlink settlement and no Gamma answer).
 
 Thresholds are bt's: `max_gap_ms_pm` 5,000, `max_gap_ms_bn` 1,000. `voided_markets` is applied unchanged to
