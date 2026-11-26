@@ -1,0 +1,17 @@
+{
+ "raw": "{\"event_type\": \"last_trade_price\", \"asset_id\": \"TUP\", \"timestamp\": \"1764000000400\", \"side\": \"BUY\", \"price\": \"0.5\", \"size\": \"12\", \"fee_rate_bps\": \"1000\", \"transaction_hash\": \"0xdead\"}",
+ "expected": [
+  [
+   "pm_trade",
+   [
+    "1764000000400",
+    "s|U",
+    "BUY",
+    "0.5",
+    "12",
+    "1000",
+    "0xdead"
+   ]
+  ]
+ ]
+}

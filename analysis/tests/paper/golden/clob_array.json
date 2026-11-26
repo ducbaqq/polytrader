@@ -1,0 +1,39 @@
+{
+ "raw": "[{\"event_type\": \"last_trade_price\", \"asset_id\": \"TUP\", \"timestamp\": \"1\", \"side\": \"BUY\", \"price\": \"0.5\", \"size\": \"1\", \"fee_rate_bps\": \"0\", \"transaction_hash\": \"h1\"}, {\"event_type\": \"best_bid_ask\", \"asset_id\": \"UNKNOWN\", \"timestamp\": \"2\", \"best_bid\": \"0.1\", \"best_ask\": \"0.2\", \"spread\": \"0.1\"}, {\"event_type\": \"last_trade_price\", \"asset_id\": \"TDN\", \"timestamp\": \"3\", \"side\": \"SELL\", \"price\": \"0.5\", \"size\": \"2\", \"fee_rate_bps\": \"0\", \"transaction_hash\": \"h2\"}]",
+ "expected": [
+  [
+   "pm_trade",
+   [
+    "1",
+    "s|U",
+    "BUY",
+    "0.5",
+    "1",
+    "0",
+    "h1"
+   ]
+  ],
+  [
+   "pm_best_bid_ask",
+   [
+    "2",
+    "UNKNOWN",
+    "0.1",
+    "0.2",
+    "0.1"
+   ]
+  ],
+  [
+   "pm_trade",
+   [
+    "3",
+    "s|D",
+    "SELL",
+    "0.5",
+    "2",
+    "0",
+    "h2"
+   ]
+  ]
+ ]
+}
