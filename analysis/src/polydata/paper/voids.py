@@ -5,9 +5,8 @@ traded every market as it saw it and only the accounting changes (`apply`: `pnl_
 
 - connection events, silences and stalls: `gaps.gap_table(con, rs, end_ms, events=<session catalog>)` and
   `gaps.voided_markets` with bt's thresholds (`cfg.max_gap_ms_pm` / `max_gap_ms_bn`); the catalog is read from the
-  session directly (no `health` look). The recorder logs per-market connections as `pm:<slug>` (series gap keys are the
-  series), which `voided_markets` does not match, so a `pm` gap keyed by a market's slug is also checked against that
-  market only (a second `voided_markets` call over the markets with `series = slug`: never sibling markets);
+  session directly (no `health` look). The recorder logs per-market connections as `pm:<slug>`; `voided_markets` matches
+  a `pm` gap key against the market's series, its slug or `*` (a slug key never voids sibling markets);
 - `no outcome` (`voided_markets`: the market's outcome is missing);
 - `late data (n rows, max x ms)` from `late/`, **only Polymarket rows** (`pm_book`, `pm_price_change`,
   `pm_best_bid_ask`, `pm_trade`, `pm_other` tick-size messages; the slug from `asset`, or the condition id of the
@@ -152,15 +151,6 @@ def session_voids(session: Path, markets: pd.DataFrame, cfg: RunConfig, end_ms: 
                 "GROUP BY b.slug").fetchall())
     base = gaps_mod.voided_markets(mk, gaps, cfg.max_gap_ms_pm, cfg.max_gap_ms_bn)
     reasons: dict[str, list[str]] = {s: r.split("; ") for s, r in zip(base.slug, base.reason)}
-    # TODO(Task 13): goes away when gaps.py matches `pm:<slug>` keys itself, so pm gaps are never counted twice.
-    # a pm gap keyed by a market slug (`pm:<slug>` connections) voids that market only
-    pm_slug = gaps[(gaps.stream == "pm") & gaps.key.isin(set(mk.slug))] if len(gaps) else gaps
-    if len(pm_slug):
-        by_slug = gaps_mod.voided_markets(mk.assign(series=mk.slug), pm_slug, cfg.max_gap_ms_pm, cfg.max_gap_ms_bn)
-        for s, r in zip(by_slug.slug, by_slug.reason):
-            for x in r.split("; "):
-                if x.startswith("pm gap") and not any(y.startswith("pm gap") for y in reasons.get(s, [])):
-                    reasons.setdefault(s, []).append(x)
     late = _late_rows(session, dict(zip(info.condition_id, info.slug)))
     if len(late):
         we = dict(zip(mk.slug, mk.window_end_ms))

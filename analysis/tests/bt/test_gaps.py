@@ -217,3 +217,31 @@ def test_health_look_once_per_sealed_day_per_process(tmp_path, monkeypatch):
     G.gap_table(con, s2, s2 + 86_400_000)  # a new sealed day: one more look, for that day only
     looks = _looks(tmp_path)
     assert len(looks) == 2 and looks[1]["detail"]["rec_events_days"] == ["2026-11-28"]
+
+
+def test_binance_fut_bbo_close_voids_all_syms():
+    g = G.event_gaps(ev([(T0, "ws_close", "binance-fut-bbo", ""), (T0 + 5000, "ws_open", "binance-fut-bbo", "")]),
+                     end_ms=T0 + 9000, bn_syms=["BTCUSDT", "ETHUSDT"])
+    assert {(r.stream, r.key) for r in g.itertuples()} == {("bn", "BTCUSDT"), ("bn", "ETHUSDT")}
+
+
+def test_rtds_a_close_is_cl_gap():
+    e = ev([(T0, "ws_close", "polymarket-rtds-a", ""), (T0 + 2000, "ws_open", "polymarket-rtds-a", ""),
+            (T0 + 5000, "ws_close", "polymarket-rtds-b", ""), (T0 + 6000, "ws_open", "polymarket-rtds-b", "")])
+    g = G.event_gaps(e, end_ms=T0 + 9000)
+    assert {(r.stream, r.key, r.from_ms) for r in g.itertuples()} == {("cl", "*", T0), ("cl", "*", T0 + 5000)}
+
+
+def test_pm_slug_gap_voids_that_market_only():
+    m = markets([mkt("btc-updown-5m-1"), mkt("btc-updown-5m-2", start=T0)])
+    g = G.event_gaps(ev([(T0 + 1000, "ws_close", "pm:btc-updown-5m-1", ""),
+                         (T0 + 9000, "ws_open", "pm:btc-updown-5m-1", "")]), end_ms=T0 + 20_000)
+    assert g.iloc[0].key == "btc-updown-5m-1"
+    assert list(G.voided_markets(m, g).slug) == ["btc-updown-5m-1"]
+
+
+def test_legacy_names_still_map():
+    e = ev([(T0, "ws_close", "binance-fut-public", ""), (T0 + 1000, "ws_open", "binance-fut-public", ""),
+            (T0 + 2000, "ws_close", "polymarket-rtds", ""), (T0 + 3000, "ws_open", "polymarket-rtds", "")])
+    g = G.event_gaps(e, end_ms=T0 + 9000, bn_syms=["BTCUSDT"])
+    assert {(r.stream, r.key) for r in g.itertuples()} == {("bn", "BTCUSDT"), ("cl", "*")}

@@ -80,9 +80,9 @@ def event_gaps(events: pd.DataFrame, end_ms: int, bn_syms: Iterable[str] = ()) -
             out.append(("pm", source[3:], a, b, source))
         elif source in ("polymarket", "polymarket-clob"):
             out.append(("pm", "*", a, b, source))
-        elif source == "polymarket-rtds":
+        elif source in ("polymarket-rtds", "polymarket-rtds-a", "polymarket-rtds-b"):
             out.append(("cl", "*", a, b, source))
-        elif source == "binance-fut-public":
+        elif source in ("binance-fut-public", "binance-fut-bbo"):
             out.extend(("bn", s, a, b, source) for s in syms)
         elif source == "recorder":
             out.append(("pm", "*", a, b, source))
@@ -195,7 +195,7 @@ def voided_markets(markets: pd.DataFrame, gaps: pd.DataFrame, max_gap_ms_pm: int
         reasons = []
         if pd.isna(m.outcome):
             reasons.append("no outcome")
-        sel = pm[(pm.key.isin([m.series, "*"])) & (pm.from_ms < we) & (pm.to_ms > ws)]
+        sel = pm[(pm.key.isin([m.series, m.slug, "*"])) & (pm.from_ms < we) & (pm.to_ms > ws)]
         if len(sel):
             reasons.append(f"pm gap {int(sel.dur.max())} ms")
         sym = f"{str(m.coin).upper()}USDT"
