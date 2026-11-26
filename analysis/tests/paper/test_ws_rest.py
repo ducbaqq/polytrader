@@ -117,3 +117,44 @@ def test_rest_429_pauses_api():
 
 def test_backoff_ms():
     assert [backoff_ms(i) for i in (1, 2, 3, 4, 5, 6, 7, 8)] == [30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000, 600_000]
+
+
+def _silent_run(**kw):
+    """Server accepts and stays silent; returns (events, opens). Client must reconnect after the watchdog fires."""
+    async def main():
+        events, opens = [], [0]
+        two = asyncio.Event()
+
+        async def handler(ws):
+            opens[0] += 1
+            if opens[0] >= 2:
+                two.set()
+            await ws.wait_closed()
+
+        async def fast_sleep(s):
+            await asyncio.sleep(0.01)
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            c = ReconnectingWs("t", lambda: f"ws://127.0.0.1:{port}", lambda r, t: None,
+                               lambda k, s, d: events.append(k), clock=lambda: int(time.time() * 1000),
+                               sleep=fast_sleep, **kw)
+            task = asyncio.ensure_future(c.run())
+            await asyncio.wait_for(two.wait(), 10)
+            while events.count('ws_open') < 2:
+                await asyncio.sleep(0.02)
+            c.stop()
+            await asyncio.wait_for(task, 5)  # stop() ends cleanly after a watchdog-triggered reconnect
+        return events
+
+    return asyncio.run(main())
+
+
+def test_ws_stale_reconnects_and_stops_cleanly():
+    events = _silent_run(stale_ms=500)
+    assert events[:4] == ["ws_open", "ws_stale", "ws_close", "ws_open"]
+
+
+def test_ws_max_lifetime_rotates():
+    events = _silent_run(max_lifetime_ms=500)
+    assert events[:4] == ["ws_open", "ws_rotate", "ws_close", "ws_open"]

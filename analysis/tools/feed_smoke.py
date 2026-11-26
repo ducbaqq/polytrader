@@ -34,12 +34,20 @@ async def main() -> None:
 
     def event(kind, source, detail):
         kinds[kind] += 1
-        if kind not in ("pm_subscriptions",) or True:
-            print(f"[{time.time() - t0:7.1f}s] {kind} {source} {detail}", flush=True)
+        print(f"[{time.time() - t0:7.1f}s] {kind} {source} {detail}", flush=True)
 
     pm = PolymarketFeed(series_for(a.coins, a.timeframes), emit, event, Rest(clock, event), clock)
     feeds = [pm, RtdsFeed(emit, event, clock), BinanceFeed(a.coins, emit, event, clock)]
     tasks = [asyncio.ensure_future(f.run()) for f in feeds]
+    max_lag = [0.0]
+
+    async def lag_monitor():
+        while True:
+            t = time.perf_counter()
+            await asyncio.sleep(0.1)
+            max_lag[0] = max(max_lag[0], time.perf_counter() - t - 0.1)
+
+    lag_task = asyncio.ensure_future(lag_monitor())
     prev: collections.Counter = collections.Counter()
     end = t0 + a.minutes * 60
     while time.time() < end:
@@ -55,6 +63,9 @@ async def main() -> None:
     for k, v in sorted(counts.items()):
         print(f"  {k:18s} {v:9d} rows  {v / el:8.2f}/s")
     print("  events:", dict(kinds))
+    lag_task.cancel()
+    print(f"  max event-loop lag: {max_lag[0] * 1000:.0f} ms")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

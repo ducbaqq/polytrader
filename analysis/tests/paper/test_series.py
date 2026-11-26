@@ -12,7 +12,12 @@ def test_series_matches_recorder_config():
     rows = re.findall(r"\['(\d+)', '([\w-]+)', '(\w+)', '(\w+)'\]", CONFIG_TS)
     assert rows and [tuple(s) for s in S.SERIES] == [tuple(r) for r in rows]
     assert S.SUBSCRIBE_LEAD_WINDOWS == int(re.search(r"subscribeLeadWindows:\s*(\d+)", CONFIG_TS).group(1))
-    num = lambda e: eval(e.replace("_", ""))  # noqa: E731  (e.g. "10 * 60_000")
+    def num(e):  # "10 * 60_000", "5 * 60_000", "60_000"
+        out = 1
+        for f in e.split("*"):
+            out *= int(f.strip().replace("_", ""))
+        return out
+
     assert S.MIN_SUBSCRIBE_LEAD_MS == num(re.search(r"minSubscribeLeadMs:\s*([\d_ *]+),", CONFIG_TS).group(1))
     assert S.UNSUBSCRIBE_AFTER_END_MS == num(re.search(r"unsubscribeAfterEndMs:\s*([\d_ *]+),", CONFIG_TS).group(1))
     rec = re.search(r"const RECURRENCE_MS[^{]*\{(.*?)\};", CONFIG_TS, re.S).group(1)

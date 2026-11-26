@@ -142,7 +142,10 @@ class PolymarketFeed:
                     f"{GAMMA_URL}/events?series_id={s.id}&closed=false&end_date_min={iso}&order=endDate&ascending=true&limit={LOOKAHEAD[s.recurrence]}",
                 )
                 for e in events:
-                    self._register(s, e)
+                    try:
+                        self._register(s, e)
+                    except Exception as ex:  # noqa: BLE001  (one malformed market must not abort the poll)
+                        self.event("rest_error", f"pm_register:{s.slug}", f"{type(ex).__name__}: {ex}"[:300])
             except RateLimited:
                 pass  # the Rest layer logged rate_limited once
             except Exception as e:  # noqa: BLE001

@@ -25,16 +25,22 @@ def parse_rtds(raw: str, conn: str, last_ts: dict) -> list[tuple[str, object]]:
     if not raw or raw == "PONG":
         return []
     m = json.loads(raw)
-    p = m.get("payload") if isinstance(m, dict) else None
-    if m.get("type") == "update" and isinstance(p, dict) and p.get("symbol") is not None and p.get("value") is not None:
+    if not isinstance(m, dict):
+        return [("rtds_other", {"conn": conn, "raw": m})]
+    p = m.get("payload")
+    # recorder: `p.symbol !== undefined && p.value !== undefined` (JSON null still counts as present)
+    if m.get("type") == "update" and isinstance(p, dict) and "symbol" in p and "value" in p:
         k = f"{m.get('topic')}|{p['symbol']}"
-        ts = float(p.get("timestamp") or 0)
+        try:
+            ts = float(p["timestamp"])
+        except (KeyError, TypeError, ValueError):
+            ts = float("nan")  # JS Number(undefined) is NaN: `NaN <= x` is false, so the row is written
         if ts <= last_ts.get(k, 0):
             return []  # already written by the other connection
         last_ts[k] = ts
         return [("rtds_price", (txt(m.get("topic")), txt(p["symbol"]), txt(p.get("timestamp")), txt(p["value"]),
                                 txt(p.get("full_accuracy_value")), txt(m.get("timestamp")), conn))]
-    return [("rtds_other", {"conn": conn, **(m if isinstance(m, dict) else {"raw": m})})]
+    return [("rtds_other", {"conn": conn, **m})]
 
 
 class RtdsFeed:
