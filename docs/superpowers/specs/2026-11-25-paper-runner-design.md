@@ -286,7 +286,7 @@ voids:
 3. **Stalls and clock steps.** An event-loop stall or backward clock step > 2 s writes a `recorder`
    `stop`/`start` pair, which `event_gaps` turns into a gap on every stream.
 4. **Late / future-stamped Polymarket rows** (see the hold-back): the market is voided, reason
-   `late data (n rows, max x ms)`, from `session/late/`. Only rows received in `[open, window end)` count, where `open` is the receive time of the market's
+   `late data (n rows, max x ms)`, from `session/late/`. Only rows received at or after `open` with an exchange ts before the window end count (a row received after the end can still carry an in-window ts the ts-clock fills never saw), where `open` is the receive time of the market's
    first `pm_book` row at or after its admission: the opening snapshot of a quiet book carries the book's
    last-change time (older than the hold-back), so it arrives late before the market is open without any data
    missing. Rows of other streams in `late/` never void.

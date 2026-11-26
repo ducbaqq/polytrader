@@ -267,3 +267,38 @@ def test_mismatch_reported(tmp_path, monkeypatch):
     assert abs(res["pnl_usd_gamma"] - mk.loc[~mk.voided, "pnl_gamma"].sum()) < 1e-6
     assert abs(res["pnl_usd"] - mk.loc[~mk.voided, "pnl"].astype(float).sum()) < 1e-6
     replay_and_compare(cfg, d, monkeypatch)
+
+
+def test_gamma_fallback_mid_run_parity(tmp_path, monkeypatch):
+    """A paper-gamma row received well before end_ms (a later market keeps the run going): the market settles on the
+    strategy clock mid-run, as the session replay does."""
+    start = H11 - 90_000
+    opts = PaperOpts(tick_ms=50, duration_s=660)
+    rest = StubRest(gamma=lambda s: gamma_event(s, up=True), data=lambda c, cur: {"data": []})
+    cfg, d, run, lines = paper_run(tmp_path, monkeypatch, start, 12, opts, rest_factory=factory(rest))
+    man = json.loads((d / "session" / "manifest.json").read_text())
+    assert [a["slug"] for a in man["admitted"]] == [SLUG, slug_of("btc", "5m", WE)] and man["end_ms"] == H11 - 30_000 + 660_000
+    mk = pd.read_parquet(d / "markets.parquet").set_index("slug")
+    assert mk.loc[SLUG, "outcome_source"] == "paper-gamma" and mk.loc[SLUG, "gamma_seen_ms"] < man["end_ms"]
+    assert mk.loc[SLUG, "settle_ms"] < man["end_ms"]
+    assert mk.loc[slug_of("btc", "5m", WE), "outcome_source"] == "paper-chainlink"
+    replay_and_compare(cfg, d, monkeypatch)
+
+
+def test_late_gamma_void_reason(tmp_path, monkeypatch):
+    """Gamma answers only after the drain limit: no pm_resolution row (parity), voided, and the reason says why."""
+    start, minutes, _ = run_start(True)
+    calls = {"n": 0}
+
+    def gamma(slug):
+        calls["n"] += 1
+        return gamma_event(slug, closed=calls["n"] >= 6)
+
+    rest = StubRest(gamma=gamma, data=lambda c, cur: {"data": []})
+    opts = PaperOpts(tick_ms=50, duration_s=360, max_drain_s=60)
+    cfg, d, run, _ = paper_run(tmp_path, monkeypatch, start, minutes, opts, rest_factory=factory(rest))
+    mk = pd.read_parquet(d / "markets.parquet").set_index("slug")
+    assert mk.loc[SLUG, "gamma_outcome"] == "Up" and mk.loc[SLUG, "outcome_source"] is None
+    assert mk.loc[SLUG, "voided"] and mk.loc[SLUG, "reason"].endswith("(Gamma answered after the drain)")
+    assert "no outcome" in json.loads((d / "results.json").read_text())["void_reasons"][SLUG]
+    assert not list((d / "session" / "raw").rglob("pm_resolution.*"))  # no row: replay parity as in the bounded case

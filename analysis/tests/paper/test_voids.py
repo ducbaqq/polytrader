@@ -65,7 +65,8 @@ def test_clean_session_voids_nothing(tmp_path):
 
 
 def test_voids_late_rows(tmp_path):
-    """Late and future rows void a market only if received in [open, window end); non-Polymarket rows never."""
+    """Late and future rows void a market only if received at or after the open with a ts before the window end (also
+    when received after the end); non-Polymarket rows never."""
     s1, s2, s3 = SLUGS
     pc2 = a_row("pm_price_change", s2)
     pc3 = a_row("pm_price_change", s3)
@@ -76,13 +77,15 @@ def test_voids_late_rows(tmp_path):
         (pc2._replace(recv_ms=t2), 3_000), (pc2._replace(recv_ms=t2 + 5), 4_500),  # s2: two rows, max 4500
         (tick, 1_200),  # s3 by its condition id
         (a_row("pm_book", s1)._replace(recv_ms=RS - 5_000), 13_000),  # s1: before admission/open: harmless
-        (pc3._replace(recv_ms=WS[2] + 300_000 + 5), 900),  # s3: after its window: harmless
+        (pc3._replace(recv_ms=WS[2] + 300_000 + 5), 900),  # s3: received after its end with an in-window ts: counts
+        (pc2._replace(recv_ms=WS[1] + 300_000 + 5, values=(str(WS[1] + 300_000 + 1),) + tuple(pc2.values[1:])), 800),
+        # ^ s2: a ts at or after its window end: harmless
         (a_row("bn_fut_bbo", None)._replace(recv_ms=t2), 50_000),  # never void (the router cannot produce them)
         (a_row("rtds_price", None)._replace(recv_ms=t2), 50_000),
     ]
     root, mk = make(tmp_path, late=late)
     v = voided(root, mk)
-    assert v == {s2: "late data (2 rows, max 4500 ms)", s3: "late data (1 rows, max 1200 ms)"}
+    assert v == {s2: "late data (2 rows, max 4500 ms)", s3: "late data (2 rows, max 1200 ms)"}
 
 
 def test_late_opening_snapshot_before_open_does_not_void(tmp_path):

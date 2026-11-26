@@ -11,11 +11,14 @@ traded every market as it saw it and only the accounting changes (`apply`: `pnl_
 - `no outcome` (`voided_markets`: the market's outcome is missing);
 - `late data (n rows, max x ms)` from `late/`, **only Polymarket rows** (`pm_book`, `pm_price_change`,
   `pm_best_bid_ask`, `pm_trade`, `pm_other` tick-size messages; the slug from `asset`, or the condition id of the
-  message). A late or future-stamped row counts against a market only if it was received in `[open, window_end)`, where
-  `open` is the receive time of the market's first `pm_book` row at or after its admission (the manifest's
-  `admitted_ms`): the strategy is not called before it opens, and the opening snapshot of a quiet book carries the
+  message). A late or future-stamped row counts against a market only if it was received at or after `open` with an exchange
+  timestamp before the window end (`ts_ms < window_end`; `values[0]` / the message `timestamp`: with the hold-back, a
+  row received just after the end can carry an in-window ts the ts-clock fill simulation never saw). `open` is the
+  receive time of the market's first `pm_book` row at or after its admission (the manifest's `admitted_ms`; the engine
+  opens at the chosen snapshot's recv, so this approximation can only over-void: rows in [first book recv, engine
+  open) count): the strategy is not called before it opens, and the opening snapshot of a quiet book carries the
   book's last-change time (often older than the hold-back), so it arrives "late" without any data being missed. Rows
-  received before the open, after the window, or of a market that never opened (no snapshot) never void it. Rows of
+  received before the open, with a ts at or after the window end, or of a market that never opened (no snapshot) never void it. Rows of
   `bn_fut_bbo`, `bn_fut_trade` and `rtds_price` in `late/` never void (the router cannot produce them).
 """
 
@@ -78,20 +81,23 @@ def _late_rows(session: Path, cond_slug: dict[str, str]) -> pd.DataFrame:
         if not len(df):
             continue
         if stream == "pm_other":
-            slugs = []
+            slugs, tss = [], []
             for d in df["d"]:
                 try:
                     msg = json.loads(d)
                     tick = msg.get("event_type") == "tick_size_change"
                     slugs.append(cond_slug.get(msg.get("market")) if tick else None)
+                    tss.append(int(msg.get("timestamp")))
                 except (TypeError, ValueError):
                     slugs.append(None)
+                    tss.append(0)
         else:
             slugs = [str(a).split("|", 1)[0] for a in df["asset"]]
-        parts.append(pd.DataFrame({"slug": slugs, "recv_ms": df["recv_ms"].astype("int64"),
+            tss = df["ts_ms"].astype("int64").tolist()
+        parts.append(pd.DataFrame({"slug": slugs, "ts_ms": tss, "recv_ms": df["recv_ms"].astype("int64"),
                                    "late_by_ms": df["late_by_ms"].astype("int64")}))
     if not parts:
-        return pd.DataFrame({"slug": [], "recv_ms": [], "late_by_ms": []})
+        return pd.DataFrame({"slug": [], "ts_ms": [], "recv_ms": [], "late_by_ms": []})
     out = pd.concat(parts, ignore_index=True)
     return out[out.slug.notna()].reset_index(drop=True)
 
@@ -132,6 +138,7 @@ def session_voids(session: Path, markets: pd.DataFrame, cfg: RunConfig, end_ms: 
                 "GROUP BY b.slug").fetchall())
     base = gaps_mod.voided_markets(mk, gaps, cfg.max_gap_ms_pm, cfg.max_gap_ms_bn)
     reasons: dict[str, list[str]] = {s: r.split("; ") for s, r in zip(base.slug, base.reason)}
+    # TODO(Task 13): goes away when gaps.py matches `pm:<slug>` keys itself, so pm gaps are never counted twice.
     # a pm gap keyed by a market slug (`pm:<slug>` connections) voids that market only
     pm_slug = gaps[(gaps.stream == "pm") & gaps.key.isin(set(mk.slug))] if len(gaps) else gaps
     if len(pm_slug):
@@ -147,7 +154,7 @@ def session_voids(session: Path, markets: pd.DataFrame, cfg: RunConfig, end_ms: 
             o = opens.get(slug)
             if o is None or slug not in we:
                 continue
-            g = g[(g.recv_ms >= o) & (g.recv_ms < we[slug])]
+            g = g[(g.recv_ms >= o) & (g.ts_ms < we[slug])]
             if len(g):
                 reasons.setdefault(slug, []).append(f"late data ({len(g)} rows, max {int(g.late_by_ms.max())} ms)")
     order = {s: i for i, s in enumerate(mk.slug)}

@@ -60,6 +60,10 @@ def paper_markets(res: RunResult, router, voids: pd.DataFrame | None = None, con
         sources.setdefault(r.slug, r.source)
     for s in (confirm.fallbacks if confirm is not None else ()):
         sources.setdefault(s, "paper-gamma")
+    late_gamma = [s for s in (confirm.answers if confirm is not None else {}) if s not in sources]
+    if late_gamma:  # Gamma answered after the fallback closed: the run left the market without an outcome
+        hit = mk["slug"].isin(late_gamma) & mk["voided"].astype(bool) & mk["reason"].astype(str).str.contains("no outcome")
+        mk.loc[hit, "reason"] = mk.loc[hit, "reason"].astype(str) + " (Gamma answered after the drain)"
     adm = {a["slug"]: int(a["admitted_ms"]) for a in router.admitted}
     mk["outcome_source"] = pd.Series([sources.get(s) for s in mk["slug"]], index=mk.index, dtype=object)
     mk["admitted_ms"] = pd.Series([adm.get(s) for s in mk["slug"]], index=mk.index, dtype="Int64")
@@ -135,7 +139,7 @@ def write_paper_run(d: Path, cfg, opts, res: RunResult, router, manifest: dict, 
         "gamma_answers": len(confirm.answers) if confirm is not None else None,
         "gamma_fallbacks": len(confirm.fallbacks) if confirm is not None else None,
         "api_trades": {"markets": len(api), "rows": sum(api.values())},
-        "void_reasons": dict(zip(voids.slug, voids.reason)) if voids is not None and len(voids) else {},
+        "void_reasons": dict(zip(mk.slug[mk.voided.astype(bool)], mk.reason[mk.voided.astype(bool)])),
     })
     summary = _clean(summary)
     (d / "results.json").write_text(json.dumps(summary, indent=1, sort_keys=True, allow_nan=False) + "\n")

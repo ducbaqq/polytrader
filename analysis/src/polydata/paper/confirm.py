@@ -8,7 +8,9 @@
 - If the market has no Chainlink outcome (the settler gave up, or has not decided) and the fallback is still open, the
   answer is also a `pm_resolution` row `{slug, outcome, event, source: "paper-gamma"}` through `ingest.on_rows`, stamped
   at the answer's receive time; the router applies it on the strategy clock like any resolution and the session
-  replay settles at the same time. The settler is told to give the market up (`give_up`), so the session never holds a
+  replay settles at the same time. The fallback fires whenever the settler has not decided when Gamma answers, not
+  only when it gave up: a Chainlink delay of more than about 19 s at `end + 30 s` (tick receipt plus the hold-back)
+  switches the market to `paper-gamma`. The settler is told to give the market up (`give_up`), so the session never holds a
   second resolution row. The runner closes the fallback (`close_fallback`) when the drain ends: a row written after
   that would make the replay settle a market the live run left unresolved.
 - From `end + 120 s` it downloads `{data}/v2/trades?condition_id=...&limit=1000&cursor=...`; the pages are buffered
