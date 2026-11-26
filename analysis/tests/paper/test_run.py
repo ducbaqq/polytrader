@@ -65,6 +65,7 @@ def fake_feeds(rows, vc: VClock):
 
 def paper_run(tmp_path, monkeypatch, start, minutes, opts, *, strategy="parity-probe", out=None, rows=None, seed=5):
     monkeypatch.setenv("POLYDATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("POLYDATA_RUNS_CSV", str(tmp_path / "runs-index.csv"))  # never the committed index
     if rows is None:
         rows = make_session(seed, start, minutes, bn_ms=20, resolutions=False, meta_lead_ms=4 * 60_000)
     cfg = cfg_of(strategy)
