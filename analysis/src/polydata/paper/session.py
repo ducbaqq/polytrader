@@ -63,6 +63,15 @@ def _fmt_ts(ts_ms: int) -> str:
     return datetime.fromtimestamp(sec, timezone.utc).strftime("%Y-%m-%d %H:%M:%S") + f".{ms:03d}000+00"
 
 
+def _tsv(stream: str, values) -> str:
+    """Tab-joined values. A tab, newline or carriage return inside a value would corrupt the row (shift columns or
+    split it), so it raises ValueError instead: the feed produced a row the recorder format cannot hold."""
+    line = "\t".join(values)
+    if line.count("\t") != len(values) - 1 or "\n" in line or "\r" in line:
+        raise ValueError(f"{stream}: a value contains a tab or line break: {values!r}"[:300])
+    return line
+
+
 class _Bn:
     """Thinning state of one symbol: the current bucket, its best row by key, and whether that row still has to be
     written (it is not the first row of the bucket)."""
@@ -132,7 +141,7 @@ class SessionWriter:
             v = row.values
             if len(v) != len(cols) - 1:
                 raise ValueError(f"{stream}: {len(v)} values, expected {len(cols) - 1}")
-            self._put(base / f"{stream}.{slot}.tsv.zst", f"{recv}\t" + "\t".join(v) + "\n",
+            self._put(base / f"{stream}.{slot}.tsv.zst", f"{recv}\t" + _tsv(stream, v) + "\n",
                       "\t".join(cols) + "\n")
         elif stream in schema.JSONL:
             self._put(base / f"{stream}.{slot}.jsonl.zst", dumps({"recv_ms": recv, "d": row.values}) + "\n", None)
@@ -166,7 +175,7 @@ class SessionWriter:
         path = self.root / "late" / f"{row.stream}.tsv.zst"
         if row.stream in schema.TSV:
             cols = list(schema.TSV[row.stream])
-            line = f"{int(row.recv_ms)}\t" + "\t".join(row.values) + f"\t{int(late_by_ms)}\n"
+            line = f"{int(row.recv_ms)}\t" + _tsv(row.stream, row.values) + f"\t{int(late_by_ms)}\n"
         else:
             cols = ["recv_ms", "d"]
             line = f"{int(row.recv_ms)}\t{dumps(row.values)}\t{int(late_by_ms)}\n"

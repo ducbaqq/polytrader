@@ -41,6 +41,19 @@ def stream_df(root: Path, stream: str) -> pd.DataFrame | None:
     return con.execute(f"SELECT {sel} FROM read_parquet(?) ORDER BY {order}", [[f.as_posix() for f in files]]).df()
 
 
+def frames(path: Path) -> int:
+    """Number of zstd frames in a file."""
+    import zstandard
+
+    data, n = path.read_bytes(), 0
+    while data:
+        d = zstandard.ZstdDecompressor().decompressobj()
+        d.decompress(data)
+        data = d.unused_data
+        n += 1
+    return n
+
+
 def write_chunks(w: SessionWriter, rows, flushes: int) -> None:
     n = len(rows)
     cuts = {n * (i + 1) // (flushes + 1) for i in range(flushes)}
@@ -71,7 +84,7 @@ def test_session_builds_to_same_rows(tmp_path, monkeypatch):
         pd.testing.assert_frame_equal(a, b, obj=stream)
     assert seen >= 7
     # files really are multi-frame
-    assert any(f.stat().st_size > 0 for f in (tmp_path / "sess" / "raw").rglob("*.zst"))
+    assert max(frames(f) for f in (tmp_path / "sess" / "raw").rglob("*.zst")) >= 2
 
 
 def test_multi_frame_files_readable(tmp_path):
@@ -88,6 +101,7 @@ def test_multi_frame_files_readable(tmp_path):
     t = _read_tsv(tsv, schema.TSV["pm_trade"])
     assert t.num_rows == 9 and t.column("tx_hash").to_pylist() == [f"0x{i}" for i in range(9)]
     assert t.column_names == list(schema.TSV["pm_trade"])  # one header only
+    assert frames(tsv) == 3 and frames(js) == 3
     d = duckdb.sql(f"SELECT recv_ms, d->>'i' AS i FROM read_json('{js}', format='newline_delimited', "
                    f"columns={{'recv_ms': 'BIGINT', 'd': 'JSON'}}) ORDER BY recv_ms").fetchall()
     assert [int(x[1]) for x in d] == list(range(9))
@@ -196,29 +210,70 @@ def test_rec_events_catalog_readable(tmp_path, monkeypatch):
     assert ("cl", "*", H11 + 7_000, H11 + 60_000) in rows  # unmatched close runs to the end
 
 
-def test_monotone_stamp_and_clock_step(tmp_path):
+def _events(root: Path, monkeypatch) -> pd.DataFrame:
+    from datetime import date
+
+    monkeypatch.setenv("POLYDATA_DIR", str(root))
+    return G.load_rec_events([date(2026, 11, 24)], include_sealed=True)
+
+
+def _market(ws: int) -> pd.DataFrame:
+    return pd.DataFrame([(slug_of("btc", "5m", ws), "btc-up-or-down-5m", "btc", ws, ws + 300_000, "Up")],
+                        columns=["slug", "series", "coin", "window_start_ms", "window_end_ms", "outcome"])
+
+
+def test_monotone_stamp_and_clock_step(tmp_path, monkeypatch):
     now = [H11]
     w = SessionWriter(tmp_path)
     ing = Ingest(None, w, lambda: now[0])  # type: ignore[arg-type]
     stamps = []
-    for t in [0, 10, 20, 5_000, 5_010, 2_010, 2_500, 4_000, 5_020, 6_000, 6_100]:  # back by 3 s, then catching up
+    for t in [0, 10, 20, 5_000, 5_010, 2_010, 2_500, 4_000, 11_000, 11_100]:  # back by 3 s, caught up at +11 s
         now[0] = H11 + t
         stamps.append(ing.stamp())
-    assert stamps == sorted(stamps) and stamps[-1] == H11 + 6_100
-    assert stamps[5] == H11 + 5_010
+    assert stamps == sorted(stamps) and stamps[-1] == H11 + 11_100
+    assert stamps[5:8] == [H11 + 5_010] * 3  # frozen while the clock is behind
     w.close()
-    f = next((tmp_path / "catalog").rglob("rec_events.csv.zst"))
-    ev = duckdb.sql(f"SELECT kind, source FROM read_csv('{f}', header=true) ORDER BY ts").fetchall()
-    assert ev == [("stop", "recorder"), ("start", "recorder")]
-    # an event-loop stall of more than 2 s is one more pair; short gaps are not
-    w2 = SessionWriter(tmp_path / "b")
-    i2 = Ingest(None, w2, lambda: H11)  # type: ignore[arg-type]
-    for t in [0, 500, 1_000, 3_500, 4_000]:
-        i2.note_loop(H11 + t)
-    w2.close()
-    f2 = next((tmp_path / "b" / "catalog").rglob("rec_events.csv.zst"))
-    ev2 = duckdb.sql(f"SELECT kind, epoch_ms(ts::TIMESTAMPTZ) FROM read_csv('{f2}', header=true) ORDER BY ts").fetchall()
-    assert ev2 == [("stop", H11 + 1_000), ("start", H11 + 3_500)]
+    ev = _events(tmp_path, monkeypatch)
+    assert list(zip(ev.kind, ev.source)) == [("stop", "recorder"), ("start", "recorder")]  # one pair
+    # the gap runs until the first stamp with the clock caught up (not zero length)
+    assert (ev.ts_ms.iloc[0], ev.ts_ms.iloc[1]) == (H11 + 5_010, H11 + 11_000)
+    g = G.event_gaps(ev, end_ms=H11 + 300_000, bn_syms=["BTCUSDT"])
+    pm = g[(g.stream == "pm") & (g.key == "*")].iloc[0]
+    assert pm.to_ms - pm.from_ms == 5_990 > 2_000
+    v = G.voided_markets(_market(H11), g)
+    assert list(v.slug) == [slug_of("btc", "5m", H11)] and "pm gap 5990" in v.reason[0]
+    assert G.voided_markets(_market(H11 + 600_000), g).empty
+
+
+def test_stall_gap_voids_market(tmp_path, monkeypatch):
+    ws = H11 + 300_000
+    w = SessionWriter(tmp_path)
+    ing = Ingest(LiveRouter(cfg_of("noop"), H11), w, lambda: ws)
+    for t in [ws + 10_000, ws + 10_020, ws + 10_040]:  # ticks every 20 ms
+        ing.note_tick(t)
+    ing.note_tick(ws + 10_040 + 7_000)  # stalled 7 s: gap [last, wall]
+    ing.note_tick(ws + 10_040 + 7_020)
+    ing.note_loop(ws + 10_040 + 9_000)  # a 2 s step is not a stall
+    w.close()
+    ev = _events(tmp_path, monkeypatch)
+    assert list(zip(ev.kind, ev.ts_ms)) == [("stop", ws + 10_040), ("start", ws + 17_040)]
+    g = G.event_gaps(ev, end_ms=ws + 400_000, bn_syms=["BTCUSDT"])
+    v = G.voided_markets(_market(ws), g)
+    assert list(v.slug) == [slug_of("btc", "5m", ws)] and "pm gap 7000" in v.reason[0]
+    # a stall that does not overlap the window voids nothing
+    assert G.voided_markets(_market(ws + 600_000), g).empty
+
+
+def test_tsv_value_with_separator_raises(tmp_path):
+    w = SessionWriter(tmp_path)
+    for bad in ["a\tb", "a\nb", "a\rb"]:
+        with pytest.raises(ValueError):
+            w.write(LiveRow("pm_book", H11, (str(H11), bad, "", "", "h")))
+    with pytest.raises(ValueError):
+        w.write_late(LiveRow("pm_book", H11, (str(H11), "x\ty", "", "", "h")), 5)
+    w.write(LiveRow("pm_book", H11, (str(H11), "ok|U", "", "", "h")))  # empty fields are fine
+    w.close()
+    assert sum(1 for _ in (tmp_path / "raw").rglob("pm_book.*")) == 1
 
 
 def test_json_number_text_and_markets_view(tmp_path, monkeypatch):

@@ -22,27 +22,27 @@ class Ingest:
         self.router, self.writer, self.clock = router, writer, clock
         self.recv = -(2**62)
         self._tick_wall = -(2**62)
-        self._stepped = False  # inside a clock step back (one stop/start pair per episode)
+        self._stepped = False  # inside a clock step back: `stop` written, `start` waits for the clock to catch up
         self._loop_ms: int | None = None
         self._n_res = 0  # router.new_resolutions already written
 
     def stamp(self) -> int:
         now = int(self.clock())
         prev = self.recv
-        if prev > -(2**61) and now < prev - STEP_MS:
-            if not self._stepped:
-                self._stepped = True
-                self.writer.event(prev, "stop", "recorder", f"clock stepped back {prev - now} ms")
-                self.writer.event(prev, "start", "recorder", "clock step")
-        elif now >= prev:
-            self._stepped = False
+        if prev > -(2**61) and now < prev - STEP_MS and not self._stepped:
+            self._stepped = True  # recv stays frozen at prev while the clock is behind: that is a gap in every stream
+            self.writer.event(prev, "stop", "recorder", f"clock stepped back {prev - now} ms")
         self.recv = max(prev, now, self._tick_wall)
+        if self._stepped and now >= prev:
+            self._stepped = False
+            self.writer.event(self.recv, "start", "recorder", "clock caught up")
         return self.recv
 
     def note_tick(self, wall_ms: int) -> None:
         """Call after `router.tick(wall_ms)`: later stamps are at least this wall, and the settler's resolutions the
         tick produced go to the session."""
         self._tick_wall = max(self._tick_wall, int(wall_ms))
+        self.note_loop(wall_ms)
         self._write_resolutions()
         self.writer.maybe_flush()
 
@@ -71,7 +71,9 @@ class Ingest:
         self.writer.event(self.stamp(), kind, source, detail)
 
     def note_loop(self, wall_ms: int) -> None:
-        """Call from a periodic loop task: a gap of more than 2 s since the previous call is a stall."""
+        """A wall jump of more than 2 s since the previous `note_loop`/`note_tick` is an event-loop stall: a
+        `recorder stop` at the previous call and `start` at this wall (a gap in every stream, judged by the
+        unchanged gaps.py thresholds). `note_tick` calls this, so a stall is always seen."""
         last, self._loop_ms = self._loop_ms, int(wall_ms)
         if last is not None and wall_ms - last > STEP_MS:
             self.writer.event(last, "stop", "recorder", f"event loop stalled {wall_ms - last} ms")
