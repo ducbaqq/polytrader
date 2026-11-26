@@ -94,6 +94,7 @@ def write_paper_run(d: Path, cfg, opts, res: RunResult, router, manifest: dict, 
         "processing_lag_ms": stats.get("processing_lag_ms"), "loop_lag_ms": stats.get("loop_lag_ms"),
         "feed_delay_ms": stats.get("feed_delay_ms"), "settler_gave_up": stats.get("gave_up"),
         "connections": stats.get("connections"), "warnings": stats.get("warnings", []),
+        "feed_failures": stats.get("feed_failures", 0),
         "outcome_mismatches": None, "pnl_usd_gamma": None, "parity": None,
     })
     summary = _clean(summary)

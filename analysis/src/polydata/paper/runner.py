@@ -134,7 +134,7 @@ class PaperRun:
                  feeds_factory: Callable[[Ingest, Callable[[], int]], list[Awaitable]], *,
                  clock: Callable[[], int] | None = None, sleep: Callable[[float], Awaitable] | None = None,
                  required_sources: tuple[str, ...] = REQUIRED_SOURCES, ready_timeout_s: float = 180.0,
-                 echo: Callable[[str], None] | None = None):
+                 echo: Callable[[str], None] | None = None, update_docs_index: bool = False):
         if int(cfg.bn_step_ms) % BN_THIN_MS:
             raise ValueError(f"bn_step_ms {cfg.bn_step_ms} must be a multiple of the session thinning "
                              f"({BN_THIN_MS} ms)")
@@ -147,6 +147,9 @@ class PaperRun:
         self.ready_timeout_s = ready_timeout_s
         self.echo = echo or (lambda s: print(s, flush=True))
         self.sigints = 0
+        self.update_docs_index = update_docs_index
+        self.feed_failures = 0
+        self._feeds_closing = False
         self.router: LiveRouter | None = None
         self.settler: ChainlinkSettler | None = None
         self.ingest: Ingest | None = None
@@ -210,6 +213,14 @@ class PaperRun:
         lock.write_text(str(os.getpid()))
         return lock
 
+    def can_touch_sealed(self, rs: int) -> bool:
+        """The session can reach a sealed day: rs is sealed, or the run (until SIGINT, or rs + duration) crosses the
+        start of one."""
+        if day_kind(_utc_day(rs)) == "sealed":
+            return True
+        s = next_sealed_start(rs)
+        return s is not None and (self.opts.duration_s is None or rs + int(self.opts.duration_s) * 1000 > s)
+
     def admit_filter(self, info: MarketInfo, t: int) -> bool:
         if not self.opts.allow_sealed and touches_sealed(info):
             return False
@@ -235,14 +246,19 @@ class PaperRun:
             self.writer = SessionWriter(self.out / "session", bn_step_ms=BN_THIN_MS)
             self.ingest = Ingest(None, self.writer, self.clock, listener=self._on_event)
             tasks = [asyncio.ensure_future(a) for a in self.feeds_factory(self.ingest, self.clock)]
+            for t in tasks:
+                t.add_done_callback(self._feed_done)
             self._install_signals()
             try:
                 await self._start()
                 await self._loop()
             finally:
+                self._feeds_closing = True
                 for t in tasks:
                     t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                for r in await asyncio.gather(*tasks, return_exceptions=True):
+                    if isinstance(r, BaseException) and not isinstance(r, asyncio.CancelledError):
+                        self.say(f"# warning: feed task raised while stopping: {type(r).__name__}: {r}", status=True)
                 self._remove_signals()
             router = self.router
             res = router.finish()
@@ -254,7 +270,9 @@ class PaperRun:
             summary = write_paper_run(self.out, cfg, opts, res, router, manifest, stats=stats,
                                       status_lines=self.status_lines)
             try:
-                runs.rebuild_index()
+                # the committed docs/runs-index.csv only on request: a paper run must not rewrite it from a partial
+                # local runs folder (`bt run` keeps its own behaviour)
+                runs.rebuild_index(None if self.update_docs_index else runs.runs_dir() / "index.csv")
             except Exception as e:  # noqa: BLE001 - the run folder is complete; the index can be rebuilt later
                 self.say(f"# warning: could not rebuild the runs index: {e}")
             self.say(f"# run folder: {self.out}")
@@ -265,6 +283,9 @@ class PaperRun:
         except PaperRefused:
             if self.writer is not None:
                 self.writer.close()
+            raise
+        except Exception as e:
+            self._error_manifest(e)
             raise
         finally:
             try:
@@ -289,7 +310,7 @@ class PaperRun:
             if not opts.allow_sealed:
                 raise PaperRefused(f"error: the session would start on {_utc_day(rs)}, a sealed day: paper runs refuse "
                                    "sealed days (use --allow-sealed --purpose TEXT to record a look)")
-        if opts.allow_sealed:
+        if opts.allow_sealed and self.can_touch_sealed(rs):
             record_look("paper", {"purpose": opts.purpose, "run": self.out.name, "rs": rs,
                                   "strategy": self.cfg.strategy, "coins": list(self.cfg.coins),
                                   "duration_s": opts.duration_s})
@@ -310,6 +331,32 @@ class PaperRun:
                  f"runs {opts.hold_back_ms + opts.skew_ms} ms behind wall time"
                  + (f"; stops at {iso(self.stop_at)} UTC ({self.stop_reason})" if self.stop_at else ""), status=True)
 
+    def _feed_done(self, t: asyncio.Task) -> None:
+        """A feed task ended before the stop: its rows are missing from here on (gaps follow from the session)."""
+        if self._feeds_closing:
+            return
+        self.feed_failures += 1
+        why = "cancelled" if t.cancelled() else (repr(t.exception()) if t.exception() else "returned")
+        self.warn(f"a feed task ended before the stop ({why})")
+
+    def _error_manifest(self, e: BaseException) -> None:
+        """An unexpected error: close the session and mark it unclean, so what was written stays readable."""
+        try:
+            if self.ingest is not None and self.router is not None:
+                self.ingest.finish()
+            if self.writer is None:
+                return
+            self.writer.close()
+            if self.router is not None:
+                m = self._manifest()
+            else:
+                m = {"rs": None, "end_ms": None, "coins": list(self.cfg.coins), "timeframes": list(self.cfg.timeframes),
+                     "admitted": []}
+            m.update(clean_stop=False, stop_reason=f"error: {type(e).__name__}: {e}"[:500])
+            self.writer.manifest(**m)
+        except Exception as e2:  # noqa: BLE001 - never hide the original error
+            self.say(f"# warning: could not write the manifest after an error: {e2}")
+
     def _waiting(self) -> list[str]:
         """Admitted markets still waiting for a resolution this run can produce (the settler gave up on the others:
         they wait for Gamma, Task 9)."""
@@ -329,6 +376,12 @@ class PaperRun:
                 self.loop_lag.add(lag)
                 if lag > STALL_WARN_MS:
                     self.warn(f"event loop stalled {lag} ms (markets overlapping a stall > 2 s are voided)")
+            if (not router.stopping and not self.sigints and self.stop_at is not None
+                    and wall - opts.hold_back_ms - opts.skew_ms >= self.stop_at - 1000):
+                # before the tick: a jump of the wall clock must not dispatch anything at or after stop_at
+                router.request_stop(self.stop_at)
+                self.say(f"# stopping ({self.stop_reason}): draining", status=True)
+                stop_wall = self.clock()
             router.tick(wall)
             ingest.note_tick(wall)
             self.proc_lag.add(self.clock() - (wall if expected is None else min(wall, expected)))
@@ -337,9 +390,6 @@ class PaperRun:
             if not router.stopping:
                 if self.sigints:
                     router.request_stop(router.T)
-                elif self.stop_at is not None and router.T >= self.stop_at - 1000:
-                    router.request_stop(self.stop_at)
-                    self.say(f"# stopping ({self.stop_reason}): draining", status=True)
                 if router.stopping:
                     stop_wall = self.clock()
             if router.stopping:
@@ -408,6 +458,7 @@ class PaperRun:
             "gave_up": dict(self.settler.gave_up),
             "connections": {"up": sum(self.conns.values()), "seen": len(self.conns)},
             "warnings": list(self.warnings),
+            "feed_failures": self.feed_failures,
             "opts": asdict(self.opts),
         }
 

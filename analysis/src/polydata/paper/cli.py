@@ -133,7 +133,7 @@ def cmd_run(a) -> None:
     print(f"# paper run {cfg.strategy} coins {','.join(cfg.coins)} timeframes {','.join(cfg.timeframes)} -> {out}",
           flush=True)
     try:
-        asyncio.run(PaperRun(cfg, out, opts, live_feeds(cfg)).run())
+        asyncio.run(PaperRun(cfg, out, opts, live_feeds(cfg), update_docs_index=a.update_docs_index).run())
     except PaperRefused:
         if created:
             shutil.rmtree(out, ignore_errors=True)
@@ -156,6 +156,8 @@ def register(sub) -> None:
     sp.add_argument("--confirm-wait", type=parse_duration, dest="confirm_wait")
     sp.add_argument("--allow-sealed", action="store_true", help="run on a sealed day (records one look)")
     sp.add_argument("--purpose", help="why a sealed day is read (with --allow-sealed)")
+    sp.add_argument("--update-docs-index", action="store_true",
+                    help="also rewrite the committed docs/runs-index.csv (default: data/runs/index.csv only)")
     sp.set_defaults(fn=cmd_run)
 
 

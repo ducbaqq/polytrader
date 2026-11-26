@@ -23,6 +23,7 @@ from polydata.bt.engine import SessionPlan, run_session  # noqa: E402
 from polydata.build import build  # noqa: E402
 from polydata.paper import cli as paper_cli  # noqa: E402
 from polydata.paper.runner import PaperOpts, PaperRefused, PaperRun  # noqa: E402
+from polydata.bt.strategy import Strategy, register  # noqa: E402
 from polydata.views import create_views  # noqa: E402
 
 RUN_FILES = ["config.yaml", "provenance.json", "results.json", "orders.parquet", "fills.parquet", "equity.parquet",
@@ -33,23 +34,32 @@ class VClock:
     """Virtual wall clock: the runner's sleep moves the target, the fake feed emits every row up to it at the row's
     recv_ms (so stamps equal the recorded recv_ms), then the clock jumps to the target."""
 
-    def __init__(self, t0: int):
+    def __init__(self, t0: int, jump_at: int | None = None, jump_ms: int = 0):
         self.now = self.target = int(t0)
+        self.jump_at, self.jump_ms = jump_at, jump_ms
 
     def __call__(self) -> int:
         return self.now
 
     async def sleep(self, dt: float) -> None:
         self.target = self.now + int(round(dt * 1000))
+        if self.jump_at is not None and self.now < self.jump_at <= self.target:
+            self.target += self.jump_ms  # a stall: the wall clock leaps
         await asyncio.sleep(0)
         self.now = max(self.now, self.target)
 
 
-def fake_feeds(rows, vc: VClock):
+def fake_feeds(rows, vc: VClock, open_at: int | None = None, fail: bool = False):
     def factory(ingest, clock):
         async def run():
+            while open_at is not None and vc.target < open_at:
+                await asyncio.sleep(0)
+            vc.now = max(vc.now, open_at or vc.now)
             for src in ("polymarket-rtds-a", "binance-fut-bbo", "binance-fut-market", "pm:btc-up-or-down-5m"):
                 ingest.on_event("ws_open", src, "")
+            if fail:
+                await asyncio.sleep(0)
+                raise RuntimeError("feed boom")
             i, n = 0, len(rows)
             while True:
                 while i < n and rows[i].recv_ms <= vc.target:
@@ -63,17 +73,21 @@ def fake_feeds(rows, vc: VClock):
     return factory
 
 
-def paper_run(tmp_path, monkeypatch, start, minutes, opts, *, strategy="parity-probe", out=None, rows=None, seed=5):
+def paper_run(tmp_path, monkeypatch, start, minutes, opts, *, strategy="parity-probe", out=None, rows=None, seed=5,
+              runs_csv=True, vc=None, **feed_kw):
     monkeypatch.setenv("POLYDATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("POLYDATA_RUNS_CSV", str(tmp_path / "runs-index.csv"))  # never the committed index
+    if runs_csv:
+        monkeypatch.setenv("POLYDATA_RUNS_CSV", str(tmp_path / "runs-index.csv"))  # never the committed index
+    else:
+        monkeypatch.delenv("POLYDATA_RUNS_CSV", raising=False)
     if rows is None:
         rows = make_session(seed, start, minutes, bn_ms=20, resolutions=False, meta_lead_ms=4 * 60_000)
     cfg = cfg_of(strategy)
-    vc = VClock(start)
+    vc = vc or VClock(start)
     if out is None:
         out = runs.new_run_dir("test", strategy, pd.Timestamp(start, unit="ms", tz="UTC").to_pydatetime())
     lines = []
-    run = PaperRun(cfg, out, opts, fake_feeds(rows, vc), clock=vc, sleep=vc.sleep, echo=lines.append)
+    run = PaperRun(cfg, out, opts, fake_feeds(rows, vc, **feed_kw), clock=vc, sleep=vc.sleep, echo=lines.append)
     d = asyncio.run(run.run())
     return cfg, d, run, lines
 
@@ -238,3 +252,92 @@ def test_cli_parses_flags(tmp_path):
     a = ap.parse_args(["paper", "run", str(cfgf), "--duration", "30m", "--skew-ms", "900"])
     o = paper_cli.build_opts(a, paper)
     assert (o.hold_back_ms, o.skew_ms, o.max_drain_s, o.duration_s, o.allow_sealed) == (12000, 900, 300, 1800, False)
+
+
+# ---------------------------------------------------------------------------------------- fix round 1
+
+DAY25 = 1_795_564_800_000  # 2026-11-25 00:00 UTC, sealed
+
+
+def test_paper_run_leaves_docs_index_alone(tmp_path, monkeypatch):
+    doc = runs.REPO_ROOT / "docs" / "runs-index.csv"
+    before = doc.read_bytes() if doc.exists() else None
+    _, d, _, _ = paper_run(tmp_path, monkeypatch, H11, 1, PaperOpts(tick_ms=100, duration_s=60), rows=[],
+                           runs_csv=False)
+    assert (doc.read_bytes() if doc.exists() else None) == before
+    idx = pd.read_csv(runs.runs_dir() / "index.csv")
+    assert list(idx.run_id) == [d.name] and list(idx.kind) == ["paper"]
+
+
+def test_sealed_stop_before_a_clock_jump(tmp_path, monkeypatch):
+    """No duration: the run stops at the sealed day's start. The wall clock leaps 5 s while T is 1.5 s before it; the
+    stop is requested before that tick, so end_ms stays at midnight and nothing at or after it reaches the strategy."""
+    start = DAY25 - 20 * 60_000
+    opts = PaperOpts(tick_ms=50)
+    vc = VClock(start, jump_at=DAY25 + 11_000 - 1_500, jump_ms=5_000)
+    cfg, d, run, _ = paper_run(tmp_path, monkeypatch, start, 22, opts, vc=vc)
+    man = json.loads((d / "session" / "manifest.json").read_text())
+    assert man["end_ms"] == DAY25 and man["stop_reason"] == "sealed day" and man["clean_stop"] is True
+    assert len(man["admitted"]) == 3 and all(int(a["slug"].rsplit("-", 1)[1]) * 1000 + 300_000 <= DAY25
+                                             for a in man["admitted"])
+    dec = pd.read_parquet(d / "decisions.parquet")
+    assert len(dec) > 100
+    late = dec[dec.now >= DAY25]  # only the end of the run: the last market's close at its window end, order expiry
+    assert set(late.call) <= {"on_market_close", "on_order", "position", "log"}, late
+    assert not late[late.call == "on_market_close"].key.map(lambda k: int(k.rsplit("-", 1)[1]) * 1000 + 300_000
+                                                              > DAY25).any()
+    data = dec[dec.call.isin(["on_book", "on_trade", "on_chainlink", "on_binance", "on_timer"])]
+    assert data.now.max() < DAY25 and data.now.max() > DAY25 - 2_000
+    assert any("stalled" in w for w in run.warnings)
+    looks = tmp_path / "data" / "runs" / "looks.jsonl"
+    assert not looks.exists()
+
+
+def test_look_only_if_sealed_reachable(tmp_path, monkeypatch):
+    looks = tmp_path / "data" / "runs" / "looks.jsonl"
+    opts = PaperOpts(tick_ms=100, duration_s=60, allow_sealed=True, purpose="x")
+    paper_run(tmp_path, monkeypatch, H11, 1, opts, rows=[], out=tmp_path / "a")  # ends hours before the sealed day
+    assert not looks.exists()
+    run = PaperRun(cfg_of("noop"), tmp_path / "b", PaperOpts(allow_sealed=True, purpose="x"), lambda i, c: [])
+    assert run.can_touch_sealed(H11)  # no duration: it may run into 2026-11-25
+    run.opts.duration_s = 13 * 3600 + 1  # 11:00 + 13 h 1 s crosses midnight
+    assert run.can_touch_sealed(H11)
+    run.opts.duration_s = 13 * 3600
+    assert not run.can_touch_sealed(H11) and run.can_touch_sealed(DAY25 + 3_600_000)
+
+
+def test_sealed_rs_refused_at_start(tmp_path, monkeypatch):
+    """now + warm-up is on the train day, but the connections open 20 s late: rs falls on the sealed day."""
+    start = DAY25 - 70_000
+    with pytest.raises(PaperRefused, match="session would start on 2026-11-25"):
+        paper_run(tmp_path, monkeypatch, start, 1, PaperOpts(duration_s=60), rows=[], out=tmp_path / "r",
+                  open_at=start + 20_000)
+
+
+@register
+class Boom(Strategy):
+    name = "boom-at-open"
+    family = "test"
+
+    def on_market_open(self, ctx, market):
+        raise RuntimeError("strategy boom")
+
+
+def test_error_marks_session_unclean(tmp_path, monkeypatch):
+    start = H11 - 20 * 60_000
+    out = tmp_path / "run"
+    with pytest.raises(RuntimeError, match="strategy boom"):
+        paper_run(tmp_path, monkeypatch, start, 22, PaperOpts(tick_ms=50, duration_s=20 * 60), strategy="boom-at-open",
+                  out=out)
+    man = json.loads((out / "session" / "manifest.json").read_text())
+    assert man["clean_stop"] is False and man["stop_reason"].startswith("error: RuntimeError: strategy boom")
+    assert man["files"] and not (out / "paper.lock").exists()
+
+
+def test_feed_failure_warned(tmp_path, monkeypatch):
+    _, d, run, lines = paper_run(tmp_path, monkeypatch, H11, 1, PaperOpts(tick_ms=100, duration_s=60), rows=[],
+                                 fail=True)
+    res = json.loads((d / "results.json").read_text())
+    assert res["feed_failures"] == 1 and run.feed_failures == 1
+    assert any("feed task ended before the stop" in x and "feed boom" in x for x in lines)
+    assert any("feed task ended" in x for x in (d / "log.txt").read_text().splitlines())
