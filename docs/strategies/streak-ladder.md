@@ -373,3 +373,100 @@ small edge could be hidden; nothing here supports trading it.
 | zec-4h | 1 | 1 | 0 | 1 | 1.0 | 0.9703 | 1.0 | 0 | 2.0 | 2.0 | 0.06 | 0.0306 | 0.0 |
 | zec-5m | 31 | 30 | 1 | 57 | 0.5 | 0.8922 | 0.5263 | 5 | 12.0 | 208.0 | -79.38 | -0.3816 | 80.91 |
 | TOTAL | 309 | 303 | 6 | 576 | 0.5325 | 0.6329 | 0.526 | 7 | 16.0 | 2132.0 | -260.01 | -0.122 | 283.87 |
+
+## Variants: recovery sizing, price filter, skip policies (follow-up)
+
+Pre-declared, nothing tuned; same trigger and PRIMARY timing (Chainlink-inferred outcomes, next window at its open),
+same days (A: 11-24, 11-27, 11-26 = the same single validation look; B: outcome only at 0.50 + fee). Code:
+`research/streak_ladder/variants.py` (table: `vtable.py`). Variants tried in this follow-up: 5 (rec, f1, f5, rec_f1,
+coin_f1) x skip policies A/B/C for the three filtered ones.
+
+- **rec** (user's recovery sizing): first bet $2; after losses totalling L in the ladder the next bet has
+  shares = (L + 2) / (1 - c_eff), c_eff = average entry price + fee per share walked through the visible ask depth (if
+  the depth is short, take what is there and record the shortfall). No cap. `bankroll needed` = minus the lowest point
+  of the shared-cash path (every stake out at entry, payout in at resolution recv, all series together, start 0).
+  `bust at $5k` = first time that path goes below -$5,000.
+- **f1**: the +$2 ladder, but a bet (first or continuation) is placed only if the opposite token's ask <= 0.55 and the
+  spread <= 3c at entry. **f5**: same filter, entering at open + 5 s instead of + 1 s. **rec_f1**: filter + recovery
+  sizing. **coin_f1**: negative control, a seeded coin-flip side per window, +$2 ladder, f1 filter, policy A.
+- **Skip policies** (for a window skipped by the filter or an empty book): **A keep waiting** (skip counts as neither
+  win nor loss; stake and direction kept, next window tried); **B shadow** (the skipped window is tracked as if bet
+  without money: if its outcome is our side the ladder ends with no P&L; if it is the streak side the stake level
+  advances as if lost, and for recovery sizing L grows by the shadow stake from the book as of that moment); **C abandon**
+  (a skip ends the ladder, wait for a fresh 3-in-a-row). B/C are for the filtered variants only: the outcome-only B
+  evaluation has no book to filter, so its rows are the unfiltered rec, plus2 and a coin flip.
+- "skips" counts window attempts rejected by the filter (large: most windows open wide or high). Under shadow policy
+  `max ladder loss` includes shadow losses (not real money). `ladders` is larger for C because every skip restarts the wait.
+
+Result table (P&L in $; `A <day>` rows are books, `B` is outcome-only; the "policy" column of the B rows is not used):
+
+| variant | policy | day | ladders | bets | skips | first-bet win @ price | P&L | on staked | max stake | max ladder loss | worst ladder | longest loss run | peak exposure | bankroll needed | bust at $5k | depth shortfall (sh) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| f1 | A | A 2026-11-24 | 76 | 107 | 1010 | 48.3% @ 0.486 | +58 | +15.7% | $14 | $42 | $-22 | 6 | $30 | $18 | no | 0.0 |
+| f1 | A | A 2026-11-27 | 82 | 114 | 814 | 50.0% @ 0.46 | +127 | +34.0% | $10 | $20 | $-12 | 4 | $32 | $8 | no | 0.0 |
+| f1 | A | A 2026-11-26 | 169 | 286 | 1919 | 53.2% @ 0.473 | +151 | +14.3% | $14 | $42 | $-28 | 6 | $48 | $40 | no | 0.0 |
+| f1 | B | A 2026-11-24 | 181 | 49 | 249 | 48.7% @ 0.491 | +55 | +35.5% | $12 | $42 | $-16 | 6 | $24 | $27 | no | 0.0 |
+| f1 | B | A 2026-11-27 | 183 | 74 | 246 | 53.4% @ 0.457 | +65 | +31.4% | $8 | $30 | $-6 | 5 | $34 | $8 | no | 0.0 |
+| f1 | B | A 2026-11-26 | 381 | 158 | 552 | 52.4% @ 0.484 | -6 | -0.9% | $14 | $110 | $-24 | 10 | $76 | $93 | no | 0.0 |
+| f1 | C | A 2026-11-24 | 198 | 43 | 167 | 42.9% @ 0.487 | +26 | +25.8% | $4 | $2 | $-2 | 1 | $14 | $10 | no | 0.0 |
+| f1 | C | A 2026-11-27 | 192 | 67 | 153 | 51.9% @ 0.456 | +45 | +25.9% | $8 | $12 | $-6 | 3 | $22 | $8 | no | 0.0 |
+| f1 | C | A 2026-11-26 | 427 | 109 | 366 | 56.6% @ 0.485 | +23 | +7.9% | $10 | $20 | $-12 | 4 | $20 | $18 | no | 0.0 |
+| f5 | A | A 2026-11-24 | 101 | 169 | 722 | 46.1% @ 0.473 | +87 | +14.4% | $14 | $42 | $-30 | 6 | $44 | $22 | no | 0.0 |
+| f5 | A | A 2026-11-27 | 112 | 194 | 535 | 51.9% @ 0.44 | +137 | +19.6% | $12 | $30 | $-30 | 5 | $66 | $52 | no | 0.0 |
+| f5 | A | A 2026-11-26 | 213 | 427 | 1439 | 46.0% @ 0.455 | +102 | +5.8% | $20 | $90 | $-55 | 9 | $72 | $117 | no | 0.0 |
+| f5 | B | A 2026-11-24 | 181 | 74 | 224 | 54.4% @ 0.484 | +86 | +36.7% | $12 | $42 | $-18 | 6 | $28 | $28 | no | 0.0 |
+| f5 | B | A 2026-11-27 | 183 | 106 | 214 | 52.6% @ 0.446 | +77 | +24.7% | $8 | $30 | $-8 | 5 | $58 | $6 | no | 0.0 |
+| f5 | B | A 2026-11-26 | 381 | 225 | 485 | 48.6% @ 0.457 | -2 | -0.2% | $16 | $110 | $-30 | 10 | $116 | $156 | no | 0.0 |
+| f5 | C | A 2026-11-24 | 196 | 63 | 152 | 49.0% @ 0.478 | +53 | +34.9% | $6 | $6 | $-6 | 2 | $18 | $9 | no | 0.0 |
+| f5 | C | A 2026-11-27 | 192 | 93 | 140 | 50.7% @ 0.446 | +53 | +21.2% | $8 | $12 | $-6 | 3 | $42 | $12 | no | 0.0 |
+| f5 | C | A 2026-11-26 | 416 | 177 | 328 | 47.2% @ 0.456 | +9 | +1.8% | $12 | $42 | $-42 | 6 | $44 | $59 | no | 0.0 |
+| rec_f1 | A | A 2026-11-24 | 76 | 107 | 1010 | 48.3% @ 0.486 | +100 | +4.4% | $1610 | $303 | $-14 | 6 | $1624 | $1835 | no | 0.0 |
+| rec_f1 | A | A 2026-11-27 | 82 | 114 | 814 | 50.0% @ 0.46 | +142 | +32.5% | $33 | $32 | $-2 | 4 | $67 | $16 | no | 0.0 |
+| rec_f1 | A | A 2026-11-26 | 169 | 286 | 1919 | 53.2% @ 0.473 | +320 | +19.7% | $124 | $120 | $-7 | 6 | $199 | $164 | no | 0.0 |
+| rec_f1 | B | A 2026-11-24 | 181 | 49 | 249 | 48.7% @ 0.492 | +7 | +1.5% | $169 | $4291 | $-173 | 6 | $177 | $270 | no | 0.0 |
+| rec_f1 | B | A 2026-11-27 | 183 | 74 | 246 | 53.4% @ 0.456 | +89 | +38.2% | $20 | $17148 | $-5 | 5 | $60 | $22 | no | 0.0 |
+| rec_f1 | B | A 2026-11-26 | 381 | 158 | 552 | 52.4% @ 0.486 | +615 | +14.0% | $3238 | $212929 | $-45 | 10 | $3451 | $3452 | no | 0.0 |
+| rec_f1 | C | A 2026-11-24 | 198 | 43 | 167 | 42.9% @ 0.487 | +25 | +24.4% | $5 | $2 | $-2 | 1 | $14 | $10 | no | 0.0 |
+| rec_f1 | C | A 2026-11-27 | 192 | 67 | 153 | 51.9% @ 0.456 | +54 | +28.9% | $19 | $14 | $-5 | 3 | $35 | $16 | no | 0.0 |
+| rec_f1 | C | A 2026-11-26 | 427 | 109 | 366 | 56.6% @ 0.485 | +51 | +14.1% | $44 | $36 | $-7 | 4 | $66 | $48 | no | 0.0 |
+| rec | A | A 2026-11-24 | 181 | 298 | 0 | 58.0% @ 0.659 | -10105 | -15.9% | $16565 | $4291 | $-3802 | 6 | $21010 | $27240 | 15:20 UTC | 543877.18 |
+| rec | A | A 2026-11-27 | 183 | 320 | 0 | 51.9% @ 0.606 | -19162 | -24.1% | $36905 | $17148 | $-16646 | 5 | $37639 | $40206 | 10:15 UTC | 827170.13 |
+| rec | A | A 2026-11-26 | 381 | 710 | 0 | 56.8% @ 0.649 | -323363 | -67.1% | $45308 | $212929 | $-211518 | 10 | $125601 | $348399 | 06:05 UTC | 31170436.57 |
+| coin_f1 | A | A 2026-11-24 | 75 | 134 | 1011 | 44.1% @ 0.467 | -186 | -27.1% | $26 | $156 | $-122 | 12 | $58 | $251 | no | 0.0 |
+| coin_f1 | A | A 2026-11-27 | 76 | 130 | 851 | 42.9% @ 0.454 | +36 | +6.9% | $14 | $42 | $-31 | 6 | $42 | $27 | no | 0.0 |
+| coin_f1 | A | A 2026-11-26 | 166 | 320 | 1890 | 46.4% @ 0.456 | -111 | -7.7% | $30 | $210 | $-181 | 14 | $84 | $252 | no | 0.0 |
+| rec | A | B | 1044 | 1985 | 0 | 53.0% @ 0.504 | +2082 | +10.6% | $2164 | $2140 | $-14 | 10 | $3403 | $3213 | no | 0.0 |
+| plus2 | A | B | 1044 | 1985 | 0 | 53.0% @ 0.504 | +303 | +4.0% | $22 | $110 | $-84 | 10 | $196 | $278 | no | 0.0 |
+| coin | A | B | 1049 | 2066 | 0 | 51.4% @ 0.504 | +6 | +0.1% | $22 | $110 | $-88 | 10 | $114 | $161 | no | 0.0 |
+
+Reading (A = books):
+- **Recovery sizing, unfiltered (rec): not survivable.** The unfiltered book entries cost 0.61-0.66 (about 0.75 in the
+  wide books), so winning back L + $2 needs stakes of $16k / $37k / $45k from a $2 base on three ordinary days, far beyond
+  the visible depth (shortfall column), and a $5,000 bankroll would have gone bust on all three days (15:20, 10:15 and
+  06:05 UTC). The P&L (-$10k / -$19k / -$323k) is itself optimistic because the fills ignore the depth shortfall. At the
+  0.50 stand-in (B) the same sizing makes +$2,082 (+10.6%) but needs $3,213 of bankroll and a $2,164 stake: the tail is
+  the cost.
+- **Filter (f1, policy A): positive on all three book days**: +$58 (+15.7%, 107 bets), +$127 (+34.0%, 114), +$151
+  (+14.3%, 286, validation), max stake $10-14, bankroll needed $8-$40. But the first-bet win rate is only 48-53% at a
+  price of 0.46-0.49 (pooled first bets, n 327: 51.3% vs 47.3%, +3.9c, standard error about 2.8c, 1.4 sigma), and the
+  coin-flip control with the identical filter, timing and ladder gives -$186 / +$36 / -$111 (-27% / +7% / -8%, with 12-
+  and 14-loss ladders): the swing of this ladder on 100-300 bets (+-25% on staked) is as large as the measured result.
+  Not significant. The filter does remove the opening spread cost that made the unfiltered rule negative.
+- **f5 (open + 5 s):** +$87 / +$137 / +$102 (+14% / +20% / +5.8%), more bets (169 / 194 / 427) but a deeper tail (max
+  stake $20, bankroll $117 on 11-26): no better than f1.
+- **Skip policies:** A keeps the most bets and the highest P&L on 11-24 and 11-27; C (abandon) has the smallest stakes
+  (max $4-$12, bankroll $8-$59) and similar positive returns (+2% to +35%); B (shadow) is flat on 11-26 (-$6 / -$2 for
+  f1 / f5) while A and C are positive. The differences between policies are inside the noise of one day of 100-400 bets.
+- **rec_f1 (recovery + filter):** +$100 / +$142 / +$320 (policy A), stakes small most of the time, but the tail is large:
+  one 11-24 ladder reached $1,610 (bankroll needed $1,835) and under the shadow policy one 11-26 ladder reached $3,238
+  (bankroll needed $3,452, no bust at $5,000 but 69% of it). Under policy C the stakes stay small ($5 / $19 / $44) with
+  +$25 / +$54 / +$51.
+- **Controls:** the outcome-only coin flip (+$5.72, +0.1%) shows the zero baseline; the filtered coin flip (A) is
+  negative on two of three days.
+
+**Verdict of the follow-up.** Unfiltered recovery sizing is rejected (bankroll bust on every day, infeasible stakes).
+The price filter is the one thing that helps: it avoids the opening spread and turns the A results from -5% to -16% into
++6% to +34% on all three book days including the validation day, with small stakes. It stays unproven: 100-430 bets per
+day, a first-bet edge of +3.9c at 1.4 sigma, a control that swings +-27%, one validation day. The filtered +$2 ladder
+(policy A or C) moves to `watchlist`: re-test on new days before any trading. Recovery sizing adds tail risk (up to
+$3.4k of bankroll in one ladder) without changing the edge.
