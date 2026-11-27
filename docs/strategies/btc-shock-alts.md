@@ -155,3 +155,11 @@ fee rate 0.05):
 - Measure the timing caveat: compare the shock's lead over the Polymarket book with London-timed data (mm-location).
 - Size: what the visible ask at the limit allows beyond 10 shares, and whether fills are within the first
   150 ms after the shock (competition) or later (under-reaction).
+
+## Adversarial review (controller, 2026-11-27)
+An independent review found no lookahead, leakage or settlement bug and reproduced the markout tables. One flaw in the event
+study only: it read the Polymarket book by Singapore recv_ms (~127 ms after the exchange ts), i.e. too early; the simulator
+matches on the exchange clock and does not share it. A London-timing emulation (Binance at E+116 ms, Polymarket book at ts+10 ms)
+keeps the per-share edge with 25–40% fewer fills (60 s markout, 50 ms: alts 11-24 +6.9 [−0.4, 14.1], 11-27 +8.1 [+2.1, 14.1];
+BTC 11-24 +10.6 [+3.9, 17.2], 11-27 +15.3 [+8.5, 22.3]). Not modelled: competing takers released from the same 250 ms hold.
+Frozen for validation (configs/validation/btc-shock-alts*.yaml) and paper-traded on BTC+ETH from Amsterdam (configs/paper/btc-shock-btc-eth.yaml).
