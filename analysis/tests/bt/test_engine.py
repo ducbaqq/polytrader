@@ -663,7 +663,8 @@ def test_taker_delay_markets_rule():
     c = RunConfig(strategy="noop")
     assert c.taker_delay_ms == 250 and set(c.taker_delay_markets) == {f"{x}-{tf}" for x in ("btc", "eth", "sol", "xrp", "doge", "bnb", "hype", "zec") for tf in ("5m", "15m", "1h")}
     assert c.taker_delay_for("btc", "5m") == 250 and c.taker_delay_for("eth", "5m") == 250
-    assert c.taker_delay_for("sol", "5m") == 0 and c.taker_delay_for("btc", "1h") == 0
+    assert c.taker_delay_for("sol", "5m") == 250 and c.taker_delay_for("btc", "1h") == 250
+    assert c.taker_delay_for("btc", "4h") == 0 and c.taker_delay_for("btc", "1d") == 0
     assert c.taker_delay_for("sol", "5m", flagged=True) == 250
     assert RunConfig(strategy="noop", taker_delay_ms=0).taker_delay_for("btc", "5m", flagged=True) == 0
     assert RunConfig(strategy="noop", taker_delay_markets=[]).taker_delay_for("btc", "5m") == 0
