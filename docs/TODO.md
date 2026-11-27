@@ -88,3 +88,4 @@ In this order:
 - [ ] `polydata build --prune-raw` to keep only Parquet locally (saves about 250 GB per two weeks).
 - [ ] Reconnect logic: don't reconnect a single-market Polymarket connection after its market
   resolved. Cosmetic; it only adds code=1000 noise.
+- Taker delay follow-ups (review minors, 2026-11-27): `_crosses` should subtract our own impact; stamp close-time rejections of held orders with the release time; document that strategies get no "delayed" status; comment the reference crossing test's tick assumption; `render_run` of pre-change runs should default `taker_delay_ms` to 0; journal line for the fv-taker-m3 change under the delay ($63.83 → $76.96 on 2026-11-24).
