@@ -1,0 +1,8 @@
+# Recording-only paper run: the noop strategy never trades; the run keeps its own feed session (BTC and ETH,
+# 5m + 15m) for parity, voids and feed-location studies. Deploy: scripts/paper/README.md.
+#   cd analysis && uv run polydata paper run configs/paper/record-btc-eth.yaml --duration 30m
+strategy: noop
+params: {}
+coins: [btc, eth]
+timeframes: [5m, 15m]
+day_kinds: [train, validation]

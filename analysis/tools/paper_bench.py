@@ -84,8 +84,11 @@ def bench_fake(frm: int, to: int, coins: list[str] | None = None, config: str | 
         shutil.rmtree(out, ignore_errors=True)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     rss_mb = rss / 1e6 if sys.platform == "darwin" else rss / 1e3
+    kid = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss  # the out-of-process session build
+    rss_children_mb = kid / 1e6 if sys.platform == "darwin" else kid / 1e3
     return {"rows": feed.delivered, "wall_s": wall, "span_s": span / 1000, "speed_x": span / 1000 / max(wall, 1e-9),
             "cpu_pct": 100 * cpu / max(wall, 1e-9), "rss_mb": rss_mb,
+            "rss_children_mb": rss_children_mb,
             "processing_lag_ms": stats.get("processing_lag_ms"), "loop_lag_ms": stats.get("loop_lag_ms")}
 
 

@@ -35,6 +35,10 @@ The strategy clock runs `hold_back_ms + skew_ms` (default 10 s + 1 s) behind wal
 sees and parity is exact. Being late costs nothing in paper (no real orders), but it means a paper run cannot test
 reaction speed. The 10 s default comes from measurement: with 3 s, a quarter of BTC 5m markets had late rows.
 
+## Always-on host
+
+systemd units, daily script, Spaces archive and Telegram watchdog: [scripts/paper/README.md](../scripts/paper/README.md).
+
 ## Run folder
 
 `data/runs/<family>/<strategy>/<time>-<id>/`:
@@ -92,8 +96,11 @@ Markets settle on the Chainlink price, then are confirmed against Polymarket's o
   Runs from before it have no `taker_delay_ms` in `config.yaml` and are replayed with 0.
 - **Chainlink prices** come from the legacy RTDS feed. The PolyBolt key requirement from 2026-11-30 means
   the feed needs replacing (see [TODO](TODO.md)).
-- **End-of-run memory spike:** the in-process session build at the end of a 6 h run peaked near 7 GB RSS (trading
-  itself stays at 0.6 to 1.4 GB). Planned: build in a subprocess.
+- **End-of-run memory:** the session Parquet build runs in a subprocess (`paper/buildproc.py`, DuckDB
+  `memory_limit` 1.5 GB, 2 threads, one build at a time per host; measured child peak about 3 GB for a 1 h 8-coin
+  session, main process 2.3 GB, versus 6.2 GB before); in-process it peaked near 7 GB RSS after a 6 h run (trading stays at 0.6 to
+  1.4 GB). If the build fails or is killed, `results.json` `errors` says so, the session is kept and the voids can be
+  recomputed with `paper replay`.
 - **Binance-gap voids hit strategies that do not read Binance** (quiet-symbol silences of 1 to 1.6 s void their
   markets). Pending the `gaps.py` change.
 - **Voided markets still move cash**; the headline P&L includes them unless you filter.

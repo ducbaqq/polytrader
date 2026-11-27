@@ -318,3 +318,38 @@ def test_feed_failure_warned(tmp_path, monkeypatch):
     assert res["feed_failures"] == 1 and run.feed_failures == 1
     assert any("feed task ended before the stop" in x and "feed boom" in x for x in lines)
     assert any("feed task ended" in x for x in (d / "log.txt").read_text().splitlines())
+
+
+def test_session_build_runs_out_of_process(tmp_path, monkeypatch):
+    """The end-of-run session build is a separate, memory-capped process (the in-process build peaked at 7 GB)."""
+    import subprocess
+
+    from polydata.paper import voids
+
+    calls = []
+    real = subprocess.run
+
+    def spy(cmd, *a, **k):
+        if "polydata.paper.buildproc" in cmd:  # (subprocess.run is shared: provenance also calls git)
+            calls.append(list(cmd))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(voids.subprocess, "run", spy)
+    _, d, _, _ = paper_run(tmp_path, monkeypatch, H11 - 20 * 60_000, 22, PaperOpts(tick_ms=50, duration_s=20 * 60))
+    assert len(calls) == 1 and calls[0][1:4] == ["-m", "polydata.paper.buildproc", str(d / "session")]
+    assert calls[0][4:] == [voids.BUILD_MEMORY_LIMIT, str(voids.BUILD_THREADS)]
+    assert (d / "session" / "parquet" / "markets.parquet").exists()
+    assert json.loads((d / "results.json").read_text())["errors"] == []
+
+
+def test_failed_session_build_is_reported_not_raised(tmp_path, monkeypatch):
+    import subprocess
+
+    from polydata.paper import voids
+
+    monkeypatch.setattr(voids.subprocess, "run", lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, -9, "", "Killed"))
+    _, d, _, lines = paper_run(tmp_path, monkeypatch, H11 - 20 * 60_000, 22, PaperOpts(tick_ms=50, duration_s=20 * 60))
+    res = json.loads((d / "results.json").read_text())
+    assert len(res["errors"]) == 1 and "post-hoc voids failed" in res["errors"][0] and "-9" in res["errors"][0]
+    assert (d / "session" / "manifest.json").exists() and (d / "markets.parquet").exists()
+    assert any("post-hoc voids failed" in x for x in lines)

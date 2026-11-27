@@ -33,10 +33,13 @@ without any snapshot before its window end never opens: untraded, not voided.
 from __future__ import annotations
 
 import contextlib
-import io
 import json
 import math
+import fcntl
 import os
+import subprocess
+import tempfile
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -46,6 +49,9 @@ import pandas as pd
 from polydata.bt import gaps as gaps_mod
 from polydata.bt.config import RunConfig
 
+# the end-of-run Parquet build runs in its own process with a DuckDB cap (the in-process build peaked near 7 GB RSS)
+BUILD_MEMORY_LIMIT = "1.5GB"
+BUILD_THREADS = 2
 PM_LATE_STREAMS = ("pm_book", "pm_price_change", "pm_best_bid_ask", "pm_trade", "pm_other")
 
 
@@ -111,11 +117,26 @@ def _late_rows(session: Path, cond_slug: dict[str, str]) -> pd.DataFrame:
     return out[out.slug.notna()].reset_index(drop=True)
 
 
+def build_session_store(session: Path, *, timeout_s: int = 6 * 3600) -> None:
+    """Build `session/parquet` in a subprocess (`polydata.paper.buildproc`: memory_limit `BUILD_MEMORY_LIMIT`, `BUILD_THREADS`
+    threads). Raises RuntimeError with the exit status and the output tail when it fails or is killed (oom)."""
+    cmd = [sys.executable, "-m", "polydata.paper.buildproc", str(session), BUILD_MEMORY_LIMIT, str(BUILD_THREADS)]
+    lock = Path(os.environ.get("PAPER_BUILD_LOCK") or Path(tempfile.gettempdir()) / "polytrader-paper-build.lock")
+    try:
+        with open(lock, "w") as lf:  # one build at a time per host (parallel paper runs end at the same minute)
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"session build timed out after {timeout_s} s") from e
+    if r.returncode != 0:
+        tail = " | ".join((r.stderr or r.stdout or "").strip().splitlines()[-3:])
+        raise RuntimeError(f"session build exited with status {r.returncode}: {tail}"[:350])
+
+
 def session_voids(session: Path, markets: pd.DataFrame, cfg: RunConfig, end_ms: int, *,
                   build_store: bool = True) -> pd.DataFrame:
     """Voided markets of the session (module docstring). `markets`: the run's markets (`slug`, `coin`,
-    `window_start_ms`, `window_end_ms`, `outcome`). `build_store=False`: `session/parquet` is already built."""
-    from polydata.build import build
+    `window_start_ms`, `window_end_ms`, `outcome`). `build_store=False`: `session/parquet` is already built. The build is out of process (`build_session_store`)."""
     from polydata.views import create_views
 
     session = Path(session)
@@ -128,10 +149,11 @@ def session_voids(session: Path, markets: pd.DataFrame, cfg: RunConfig, end_ms: 
         return out
     with _env_dir(session):
         if build_store:
-            with contextlib.redirect_stdout(io.StringIO()):
-                build()
+            build_session_store(session)
         con = duckdb.connect()
         con.execute("SET TimeZone='UTC'")
+        con.execute(f"SET memory_limit='{BUILD_MEMORY_LIMIT}'")
+        con.execute(f"SET threads={BUILD_THREADS}")
         names = create_views(con, parquet=session / "parquet", include_sealed=True)  # the run's own session store
         info = (con.execute("SELECT slug, series, condition_id FROM markets").df() if "markets" in names
                 else pd.DataFrame({"slug": [], "series": [], "condition_id": []}))
