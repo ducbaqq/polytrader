@@ -47,10 +47,11 @@ Fixed on 2026-11-25, before any validation data exists. Each is run **unchanged*
 | `endgame-maker-v2.yaml` | positive in both train halves (+2.0 / +4.3 ¢/sh), CIs span 0 | the run's verdict passes; at minimum ¢/sh > 0 at 200 and 400 ms |
 | `fv-taker-m3.yaml` | margin 3¢ positive in both halves, but chosen after seeing both (post hoc) | as above |
 | `mm-side-pull.yaml` | best per-share markout on H1; checks whether H2's quiet-evening failure repeats | as above |
+| `endgame-maker-15m.yaml` | (added 2026-11-27) 15m variant, quote in the last 300 s: chosen on train 11-24, held-out train 11-27 +5.2 c/sh [−3.0, 12.1]; same mechanism as V2 | as above |
 
 ```bash
 cd analysis && uv run polydata update --days 2026-11-26
-for c in endgame-maker-v2 fv-taker-m3 mm-side-pull; do
+for c in endgame-maker-v2 endgame-maker-15m; do
   uv run polydata bt run configs/validation/$c.yaml --days 2026-11-26 --latency-sweep
 done
 ```
