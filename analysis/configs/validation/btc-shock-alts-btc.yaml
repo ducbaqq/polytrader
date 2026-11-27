@@ -1,0 +1,14 @@
+# FROZEN for validation (docs/strategies/README.md#validation-queue): the rule chosen on 2026-11-24, held out on 2026-11-27.
+# Do not edit; run unchanged: cd analysis && uv run polydata bt run configs/validation/btc-shock-alts-btc.yaml --days <validation day> --latency-sweep
+strategy: btc-shock-alts
+params:
+  k: 4.0
+  margin: 0.03
+  signal: beta         # beta = 1 for BTC: same as own
+  trade_coins: [btc]
+  timeframes: [5m, 15m]
+  size: 10
+coins: [btc]
+timeframes: [5m, 15m]
+capital_mode: per_coin
+day_kinds: [validation]

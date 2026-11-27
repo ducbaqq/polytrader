@@ -34,6 +34,7 @@ reported on the second half unchanged. No validation day yet (first: 2026-11-26)
 | [martingale-streak-reversal](martingale-streak-reversal.md) | martingale | screen | abandoned | outcomes are close to independent; escalation only reshapes losses |
 | [sharp-wallet copy (study)](../research/wallets.md) | copy-trading | study | abandoned | wallets chosen on H1 at the 49th pct of random sets on H2; copy +0.3–0.5¢/sh, CIs span 0 |
 | [adverse-flow (study)](../research/adverse-flow.md) | market-making | study | done | 26 pre-fill features, none stable H1→H2; ~2/3 of adverse is inside the 200 ms cancel latency |
+| [btc-shock-alts](btc-shock-alts.md) | latency-arb | sim | testing (needs validation days) | after a 4σ 1 s BTC move take the favoured side: alts held-out 11-27 +7.1¢/sh [−0.3, 15.1] at 50 ms, +4.9¢ [−4, 14] at 200 ms; BTC's own books (control) +13–15¢/sh, 10 s markout +10¢ [8, 13] both days, all latencies |
 | [mm-location (study)](mm-location.md) | market-making | study | done | London timing halves mm-binance-pull's markout loss (−1.6 → −0.8¢/sh at 50 ms; −0.2¢ at 20 ms, CI spans 0); still not positive |
 
 ## Validation queue
@@ -51,10 +52,12 @@ Fixed on 2026-11-25, before any validation data exists. Each is run **unchanged*
 | `fv-taker-m3.yaml` | margin 3¢ positive in both halves, but chosen after seeing both (post hoc) | as above |
 | `mm-side-pull.yaml` | best per-share markout on H1; checks whether H2's quiet-evening failure repeats | as above |
 | `endgame-maker-15m.yaml` | (added 2026-11-27) 15m variant, quote in the last 300 s: chosen on train 11-24, held-out train 11-27 +5.2 c/sh [−3.0, 12.1]; same mechanism as V2 | as above |
+| `btc-shock-alts.yaml` | (added 2026-11-27) after a >4σ BTC move in 1 s, take the favoured side of alt 5m/15m books (margin 3c). Event study positive on both train days (11-27 held out +9.2c [+5.1, +13.4] at 50 ms; London-emulated +8.1c [+2.1, +14.1]); adversarial review found no lookahead | as above |
+| `btc-shock-alts-btc.yaml` | (added 2026-11-27) the same rule on BTC's own books (control): +$124–238/day in the sim on both days; London-emulated 60 s markout +10.6c / +15.3c | as above |
 
 ```bash
 cd analysis && uv run polydata update --days 2026-11-26
-for c in endgame-maker-v2 endgame-maker-15m; do
+for c in endgame-maker-v2 endgame-maker-15m btc-shock-alts btc-shock-alts-btc; do
   uv run polydata bt run configs/validation/$c.yaml --days 2026-11-26 --latency-sweep
 done
 ```

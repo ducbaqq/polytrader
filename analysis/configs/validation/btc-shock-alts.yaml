@@ -1,0 +1,14 @@
+# FROZEN for validation (docs/strategies/README.md#validation-queue): the rule chosen on 2026-11-24, held out on 2026-11-27.
+# Do not edit; run unchanged: cd analysis && uv run polydata bt run configs/validation/btc-shock-alts.yaml --days <validation day> --latency-sweep
+strategy: btc-shock-alts
+params:
+  k: 4.0               # shock: |ln(BTC mid / mid 1 s ago)| > k * sig15(BTC)
+  margin: 0.03         # buy when fair_side - ask - fee > margin (IOC at the limit)
+  signal: beta         # alt mid moved by beta * BTC's last-second move (own: alt's own Binance only)
+  trade_coins: [eth, sol, xrp, doge, bnb, hype, zec]
+  timeframes: [5m, 15m]
+  size: 10
+coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]   # btc is needed for its Binance feed
+timeframes: [5m, 15m]
+capital_mode: global   # one pass: the alt decisions need BTC's Binance feed
+day_kinds: [validation]

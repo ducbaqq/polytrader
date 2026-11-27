@@ -1,0 +1,15 @@
+# btc-shock-alts (docs/strategies/btc-shock-alts.md): after a > k sigma BTC move in 1 s, take the favoured side
+# of alt 5m/15m books. Rule chosen on 2026-11-24 in the event study (research/btc_shock/), frozen. Run with:
+#   cd analysis && uv run polydata bt run configs/research/btc-shock-alts.yaml --days 2026-11-24 --latency-sweep
+strategy: btc-shock-alts
+params:
+  k: 4.0               # shock: |ln(BTC mid / mid 1 s ago)| > k * sig15(BTC)
+  margin: 0.03         # buy when fair_side - ask - fee > margin (IOC at the limit)
+  signal: beta         # alt mid moved by beta * BTC's last-second move (own: alt's own Binance only)
+  trade_coins: [eth, sol, xrp, doge, bnb, hype, zec]
+  timeframes: [5m, 15m]
+  size: 10
+coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]   # btc is needed for its Binance feed
+timeframes: [5m, 15m]
+capital_mode: global   # one pass: the alt decisions need BTC's Binance feed
+day_kinds: [train]

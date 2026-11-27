@@ -1,0 +1,13 @@
+# Paper trading (Amsterdam droplet): the frozen btc-shock rule (k=4, margin 3c, beta signal) on BTC's own books (the control)
+# and ETH. It also records BTC/ETH 5m+15m London-timed, so it replaces record-btc-eth. docs/strategies/btc-shock-alts.md
+strategy: btc-shock-alts
+params:
+  k: 4.0
+  margin: 0.03
+  signal: beta
+  trade_coins: [btc, eth]
+  timeframes: [5m, 15m]
+  size: 10
+coins: [btc, eth]
+timeframes: [5m, 15m]
+capital_mode: global
