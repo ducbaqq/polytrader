@@ -32,6 +32,9 @@ reported on the second half unchanged. No validation day yet (first: 2026-11-26)
 
 ## Validation queue
 
+**2026-11-26 (first validation day), run 2026-11-27:** endgame-maker-v2 +$41.35/day (t 0.88, FAIL, positive again: keep testing); fv-taker-m3 −$66.86 (FAIL, abandoned); mm-side-pull +$137 at 200 ms but −$140 / −$138 at 100 / 400 ms (FAIL, luck, abandoned). Details in each journal.
+
+
 Fixed on 2026-11-25, before any validation data exists. Each is run **unchanged** on every validation day
 (first: 2026-11-26, then every third day) from the frozen configs in `analysis/configs/validation/`, with
 `--latency-sweep`. Each run is one look and goes into the strategy's journal, pass or fail.

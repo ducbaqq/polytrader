@@ -107,3 +107,8 @@ Binance moves that we can see, so a Binance-triggered pull (one- or two-sided) h
   Chainlink, Binance spot/futures, context, sibling markets) only the 2 s Binance return predicts adverse fills in
   both halves, weakly in H2; about two thirds of the adverse selection happens inside the last 200 ms before the
   fill, beyond any cancel.
+
+## Validation day 2026-11-26 (frozen `configs/validation/mm-side-pull.yaml`; one validation look)
+Run `2026-11-27T0711-6c7043`, sim_version 765e80fd214c: +$137.36/day at 200 ms (2,672 fills, t = 1.12) but **−$140.00 at 100 ms and
+−$137.81 at 400 ms**: the sign flips with latency, which marks settlement luck rather than edge. FAIL. **Status: abandoned** (the
+market-making question moves to the London-timing test; see docs/TODO.md).
