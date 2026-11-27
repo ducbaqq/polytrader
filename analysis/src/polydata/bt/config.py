@@ -29,7 +29,9 @@ class RunConfig:
     taker_delay_ms: int = 250
     # Markets with the delay, as "coin-timeframe". Provisional (2026-11-26): the recorder does not capture
     # clob-markets `itode` yet; BTC 5m is confirmed, ETH 5m and BTC 15m reported.
-    taker_delay_markets: list[str] = field(default_factory=lambda: ["btc-5m", "eth-5m", "btc-15m"])
+    # itode was true on every coin's 5m, 15m and 1h markets and false on 4h/1d (clob-markets, checked 2026-11-27)
+    taker_delay_markets: list[str] = field(default_factory=lambda: [
+        f"{c}-{tf}" for c in ("btc", "eth", "sol", "xrp", "doge", "bnb", "hype", "zec") for tf in ("5m", "15m", "1h")])
     capital: float = 5000.0
     capital_mode: str = "per_coin"  # or "global": one replay, one shared balance
     redeem_delay_s: int = 60

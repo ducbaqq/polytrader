@@ -143,7 +143,7 @@ new parameters is a new version.
 | `cancel_model` | `behind` | `behind` (others' cancels are behind us, pessimistic) or `proportional` |
 | `impact_reset_ms` | 5000 | How long liquidity we took stays removed from a level |
 | `taker_delay_ms` | 250 | Polymarket's hold of marketable orders on delayed markets (0 turns it off) |
-| `taker_delay_markets` | `[btc-5m, eth-5m, btc-15m]` | Delayed markets as `coin-timeframe`. Provisional, see below (`[]` turns it off) |
+| `taker_delay_markets` | every coin's `5m`, `15m`, `1h` | Delayed markets as `coin-timeframe` (`[]` turns it off). From the `itode` flag on clob-markets, checked 2026-11-27: true on 5m/15m/1h for all 8 coins, false on 4h and daily |
 | `capital` | 5000.0 | Total, split into equal fixed per-coin budgets |
 | `capital_mode` | `per_coin` | `global` replays all coins in one pass with one shared balance |
 | `redeem_delay_s` | 60 | Delay from the recorded resolution to the payout |
@@ -199,10 +199,12 @@ Conservative by default: when in doubt, we do not get filled.
   that time (others' cancels during the hold count), the rest cancelled (take) or resting from then (limit).
   A cancel reaching it during the hold gets `cancel_rejected` ("taker delay"); a hold ending at or after the
   window end is rejected. Makers (non-crossing orders, post-only, cancels) are not delayed. Reports come
-  `fill_report_latency_ms` after the real match time. **Provisional:** the recorder does not capture
-  `itode` yet, so the delayed markets come from `taker_delay_markets` (BTC 5m confirmed 2026-11-26; ETH 5m and
-  BTC 15m reported); a `MarketInfo.taker_delay` flag set by the data also counts. The delay length is
-  config because sources disagreed (50, 150, 250 ms; the live docs say 250). Runs before sim_version
+  `fill_report_latency_ms` after the real match time. The recorder does not capture `itode` yet, so the
+  delayed markets come from `taker_delay_markets`: `itode` was true on every coin's 5m, 15m and 1h markets and
+  false on 4h and daily (clob-markets, checked 2026-11-27); a `MarketInfo.taker_delay` flag set by the data also
+  counts. Real test orders from Amsterdam (2026-11-27) confirmed that non-crossing post-only orders are NOT held:
+  a warm post-only place took 50–60 ms and a cancel 35–40 ms on BTC, SOL and XRP 5m (authenticated read: 27 ms).
+  The delay length is config because sources disagreed (50, 150, 250 ms; the live docs say 250). Runs before sim_version
   with this feature had no delay; `taker_delay_ms: 0` reproduces them exactly.
 - **Latency.** Defaults: 200 ms for orders and cancels, 126 ms for fill reports (measured feed delay).
   `--latency-sweep` shows 100/200/400 ms.
