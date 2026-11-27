@@ -1,6 +1,6 @@
 """Step 1 of docs/strategies/endgame-maker-tf.md: late-window calibration of the favourite per timeframe.
 
-    uv run python -m polydata.research.endgame_tf_calibration 2026-11-24
+    uv run python -m research/endgame_tf/calibration.py 2026-11-24
 """
 import sys, numpy as np, pandas as pd
 from polydata.views import connect
