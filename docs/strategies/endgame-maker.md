@@ -110,3 +110,11 @@ with a CI above 0. A larger size or the 15m market would only add fills, not edg
 The hypothesis came from the calibration study, which used the same recorded data (including 2026-11-24). So the second half here
 is not independent of how the idea was found: it is a check that the simulated execution keeps the edge, not out-of-sample evidence
 for the edge itself. The first real test is validation day 2026-11-26, with V2 run unchanged (strategy version as merged).
+
+## Validation day 2026-11-26 (frozen `configs/validation/endgame-maker-v2.yaml`, run unchanged; one validation look)
+Run `2026-11-27T0642-884ffb`, sim_version 765e80fd214c, all coins 5m: **+$41.35/day**, 349 fills, 18,851 orders, 130/2,304 markets voided,
+block t = 0.88 → verdict FAIL (provisional): positive but far from the significance bar. Latency sweep: 100 ms +$110.88 (367 fills),
+200 ms +$41.35, 400 ms −$3.88 (317 fills), so the edge shrinks with latency.
+Reading: positive in train H1, train H2, this validation day and the London paper run (Polymarket outcomes), but no single reading is
+significant. Status stays **testing**: needs more validation days; the per-share edge must be re-estimated with the taker-delay sim
+(no effect on post-only quotes) and on London-timed data.

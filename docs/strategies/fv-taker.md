@@ -103,3 +103,7 @@ No. For every 2026-11-24 market, the mean of the Chainlink ticks over [window_st
 matches the official `priceToBeat` within 0.10–0.22 bp median (p90 0.36–0.86 bp) for every coin. Using the last tick instead would be
 off by 2–5 bp. The selection gap is timing: the simulator evaluates on every event and takes the first trigger (`max_entries` 1), while the screen
 looks every 5 s, so they enter at different moments and sometimes on different sides. The simulator is the authority.
+
+## Validation day 2026-11-26 (frozen `configs/validation/fv-taker-m3.yaml`, margin 3c, chosen post hoc; one validation look)
+Run `2026-11-27T0656-11c639`, sim_version 765e80fd214c: **−$66.86/day**, 670 fills, 204/936 markets voided, block t = −0.45 → FAIL.
+Latency sweep: 100 ms −$29.46, 400 ms −$11.33. The post-hoc margin-3c candidate does not survive out of sample. **Status: abandoned.**
