@@ -24,6 +24,7 @@ reported on the second half unchanged. No validation day yet (first: 2026-11-26)
 | [underdog-maker](underdog-maker.md) | fair-value (calibration) | sim | abandoned | V1 (5m, 300-120 s left, underdog mid 0.15-0.35): H1 +4.2c/sh [-5.5, 13.8], H2 -1.8c/sh [-11.7, 7.4] (176 mkts, 42 won); about -0.7c at 400 ms; same-data idea, no persistent edge |
 | [complete-set-arb](complete-set-arb.md) | complete-set-arb | screen | abandoned | the two asks never sum below 1 in 5 s snapshots (break-even ≈ 0.97–0.99 after fees) |
 | [xtf-arb](xtf-arb.md) | cross-timeframe | sim | abandoned | shared settlement holds (0/626 violations); Up_A + Down_B < 1 is real but tiny (H2 +1.9¢/pair [0.5, 3.4], ≈$1–4/half at visible size); in sim the legs fill together in 13/76 entries, P&L is unhedged legs |
+| [thin-markets](thin-markets.md) | cross-timeframe | screen | abandoned | 1h/4h/daily priced off the 5m/15m/1h ending with it: L-implied fair forecasts no better than the thin mid; taker m=0.07 (chosen 11-24) 11-27 −1.3¢/sh [−17.5, 12.6], 18 fills |
 | [settlement-lock](settlement-lock.md) | endgame | screen | abandoned | once the average locks the outcome, nothing is offered below 0.99 |
 | [binance-momentum](binance-momentum.md) | momentum | screen | abandoned | negative in all four half-variants, CIs span 0; the book has already repriced |
 | [martingale-streak-reversal](martingale-streak-reversal.md) | martingale | screen | abandoned | outcomes are close to independent; escalation only reshapes losses |
