@@ -1,0 +1,22 @@
+[Unit]
+Description=Polytrader paper run %i (one UTC day; polytrader-paper@%i.timer starts it daily)
+After=network-online.target
+Wants=network-online.target
+# at most 5 starts per hour: a crash loop stops instead of hot-looping (the watchdog alerts)
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=polytrader
+Group=polytrader
+# %i is a config stem; paper-daily.sh finds configs/paper/%i.yaml, configs/validation/%i.yaml or configs/%i.yaml
+ExecStart=/bin/bash /opt/polytrader/app/scripts/paper/paper-daily.sh %i
+Restart=on-failure
+RestartSec=60
+MemoryMax=4G
+MemorySwapMax=1G
+Nice=0
+# `systemctl stop` sends SIGINT = a clean stop (drain, session build, results); allow time for it
+KillSignal=SIGINT
+TimeoutStopSec=900

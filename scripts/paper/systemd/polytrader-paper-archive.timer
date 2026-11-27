@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly upload of polytrader paper runs to Spaces
+
+[Timer]
+OnCalendar=*-*-* *:17:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

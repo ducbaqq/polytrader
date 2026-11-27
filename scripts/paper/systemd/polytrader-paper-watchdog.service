@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the polytrader paper runs and alert on Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=polytrader
+Group=polytrader
+EnvironmentFile=/opt/polytrader/.env
+ExecStart=/usr/bin/python3 /opt/polytrader/app/scripts/paper/paper-watchdog.py
+TimeoutStartSec=60

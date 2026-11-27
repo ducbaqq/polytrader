@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the polytrader paper watchdog every 5 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/5:20
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

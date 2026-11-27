@@ -1,0 +1,14 @@
+[Unit]
+Description=Upload finished polytrader paper runs to Spaces and prune old local sessions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=polytrader
+Group=polytrader
+EnvironmentFile=/opt/polytrader/.env
+Environment=PAPER_RUNS_DIR=/opt/polytrader/paper/runs
+ExecStart=/bin/bash /opt/polytrader/app/scripts/paper/paper-archive.sh
+Nice=10
+IOSchedulingClass=idle
