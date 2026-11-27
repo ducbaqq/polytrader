@@ -23,7 +23,7 @@ snapshot at or before t, only when its best price equals the quote.
 
 **Primary metric.** Settlement markout (outcome - fill price - fee) in c/share of the frozen rules on 2026-11-27,
 rules chosen on 2026-11-24, 95% CI from a bootstrap over 15-minute blocks. Train days 11-24 (windows from 10:46 UTC)
-and 11-27 (data through ~14:00 UTC); 11-25 sealed and 11-26 (validation) not read.
+and 11-27 (partial day, resolved windows only); 11-25 sealed and 11-26 (validation) not read.
 
 **Frozen rules (on 11-24, before 11-27 was built).** R1 taker, ask < 0.49 at T-3 min. R2 taker, tilted-fair - ask -
 fee > 3c with spread <= 5c at T-0.5 min. R3 maker bid 0.48, 5m, T-3 min. R4 maker bid 0.48, 15m, T-1 min.
