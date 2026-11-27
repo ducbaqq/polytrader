@@ -23,7 +23,7 @@ calibration check; the simulator is only used where it shows a plausible gap.
 - 4h has 6 markets per day and 1d about one per coin: said plainly where the sample can't support a conclusion.
 
 ## Step 1: late-window calibration of the favourite (2026-11-24, no simulator)
-`polydata.research.endgame_tf_calibration`. Gap = realised win rate - mean mid, in cents, over favourite-in-band,
+`research/endgame_tf/calibration.py`. Gap = realised win rate - mean mid, in cents, over favourite-in-band,
 spread <= 2c snapshots (one per market and time-to-end), 15-minute block bootstrap 95% CI. Markets are those ending
 on 11-24 with a top of book (data starts 10:36 UTC). "n" is markets, not independent: coins move together.
 | Timeframe | tau (s) | n | win % | mid % | gap (c) [CI] |
