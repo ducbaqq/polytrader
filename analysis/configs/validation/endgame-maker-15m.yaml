@@ -1,0 +1,19 @@
+# FROZEN for validation (docs/strategies/README.md#validation-queue), chosen on 2026-11-24, held-out 2026-11-27 positive. Do not edit; run unchanged:
+#   cd analysis && uv run polydata bt run configs/validation/endgame-maker-15m.yaml --days <validation day> --latency-sweep
+# endgame-maker timeframe study (docs/strategies/endgame-maker-tf.md). Frozen before any sim run.
+#   cd analysis && POLYDATA_RUNS_CSV=<scratch>/runs.csv uv run polydata bt run configs/research/endgame-tf-15m-300.yaml --days 2026-11-24
+strategy: endgame-maker
+params:
+  timeframes: [15m]
+  start_tau_s: 300
+  stop_tau_s: 5
+  band_lo: 0.75
+  band_hi: 0.95
+  max_spread: 0.02
+  size: 10
+  check_ms: 1000
+  fair_guard: false
+  guard_margin: 0.0
+coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]
+timeframes: [15m]
+day_kinds: [validation]
