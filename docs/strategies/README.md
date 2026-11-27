@@ -31,6 +31,7 @@ reported on the second half unchanged. No validation day yet (first: 2026-11-26)
 | [martingale-streak-reversal](martingale-streak-reversal.md) | martingale | screen | abandoned | outcomes are close to independent; escalation only reshapes losses |
 | [sharp-wallet copy (study)](../research/wallets.md) | copy-trading | study | abandoned | wallets chosen on H1 at the 49th pct of random sets on H2; copy +0.3–0.5¢/sh, CIs span 0 |
 | [adverse-flow (study)](../research/adverse-flow.md) | market-making | study | done | 26 pre-fill features, none stable H1→H2; ~2/3 of adverse is inside the 200 ms cancel latency |
+| [btc-shock-alts](btc-shock-alts.md) | latency-arb | sim | testing (needs validation days) | after a 4σ 1 s BTC move take the favoured side: alts held-out 11-27 +7.1¢/sh [−0.3, 15.1] at 50 ms, +4.9¢ [−4, 14] at 200 ms; BTC's own books (control) +13–15¢/sh, 10 s markout +10¢ [8, 13] both days, all latencies |
 | [mm-location (study)](mm-location.md) | market-making | study | done | London timing halves mm-binance-pull's markout loss (−1.6 → −0.8¢/sh at 50 ms; −0.2¢ at 20 ms, CI spans 0); still not positive |
 
 ## Validation queue

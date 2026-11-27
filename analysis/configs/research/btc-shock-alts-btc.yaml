@@ -1,0 +1,14 @@
+# btc-shock-alts, BTC control (docs/strategies/btc-shock-alts.md): the frozen rule on BTC's own 5m/15m books.
+#   cd analysis && uv run polydata bt run configs/research/btc-shock-alts-btc.yaml --days 2026-11-24 --latency-sweep
+strategy: btc-shock-alts
+params:
+  k: 4.0
+  margin: 0.03
+  signal: beta         # beta = 1 for BTC: same as own
+  trade_coins: [btc]
+  timeframes: [5m, 15m]
+  size: 10
+coins: [btc]
+timeframes: [5m, 15m]
+capital_mode: per_coin
+day_kinds: [train]
