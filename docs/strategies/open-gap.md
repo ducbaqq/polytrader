@@ -84,3 +84,9 @@ trades whose win rate is noise-sized, so it was not treated as a pass.
   the executable set is small even before the effect: 26-29 trades per cell per day.
 - Sizes at the ask are unmeasured here; irrelevant given the verdict.
 - A re-test would need more days (n ~ 500 trades for a +-3c CI) and a trigger not chosen from the 24-cell grid.
+
+## Controller note (2026-11-27): watchlist, not abandoned
+The frozen cell (+2 s after reveal, margin 6c, favoured side) repeated on the held-out day at about the same size
+(11-24 +12.5 c/sh n=29; 11-27 +11.6 c/sh n=26, CIs span 0, settlement-only). That's the early pattern endgame-maker showed.
+Keep it frozen exactly as chosen and re-run the screen unchanged (`research/open_gap/screen.py`, that cell only) on every
+new train and validation day; promote to a simulator strategy only if the pooled held-out days keep it positive.
