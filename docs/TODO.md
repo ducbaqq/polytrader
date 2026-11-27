@@ -45,6 +45,10 @@ In this order:
 - [ ] Second recorder in the region we'd trade from: at least the Polymarket streams and Binance top
   of book. One box in Singapore is a single point of failure, gaps are permanent, and every backtest
   is tied to Singapore's receive times.
+- [ ] Recorder: capture Polymarket's taker-delay flag per market at discovery
+  (`GET https://clob.polymarket.com/clob-markets/{condition_id}` -> `itode`; not in Gamma or `/markets/{id}`),
+  then let the backtester read it into `MarketInfo.taker_delay` instead of the provisional
+  `RunConfig.taker_delay_markets` rule (BTC 5m confirmed; ETH 5m, BTC 15m reported).
 - [ ] More feeds that can't be fetched later, by value:
   - Coinbase and one more perp venue: top of book and trades
   - Deribit implied volatility, for the fair-value model

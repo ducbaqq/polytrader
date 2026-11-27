@@ -156,3 +156,11 @@ fills after the whole queue ahead trades, mostly on sweeps)? Same config and day
 A better queue position triples the fills and earns more spread, but adverse selection per share is unchanged. The loss is not an artefact
 of the queue model: symmetric quoting at the touch loses ~1.6¢/share to the next 10 s under either model. Market making in this form is
 dead in simulation; the next MM idea needs a different source of edge (where we quote, or when), not a better pull trigger.
+
+## Taker delay (2026-11-27, sim_version 2582971fc64e)
+Same config and day (2026-11-24) with the simulated 250 ms taker delay on (default: btc-5m, eth-5m, btc-15m) and off:
+run `2026-11-26T2321-705914` (on) and `2026-11-26T2325-03920b` (off) are identical: 3,014 fills, −$224.23, spread +0.59 /
+adverse −1.58 / inventory −0.08 ¢/share, the same as `2026-11-25T0056-0abdaa`. The quotes are post-only (a crossing quote
+is rejected, 43,931 "would cross"), so none is held; and other traders' delayed takers are already in the recording (the
+trades we are filled by happened after their real hold). The delay does not rescue this MM: whatever protection it gives
+makers is already in the adverse number. Variants: 2 (measurement, no tuning).

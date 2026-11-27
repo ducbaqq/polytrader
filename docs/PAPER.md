@@ -86,8 +86,10 @@ Markets settle on the Chainlink price, then are confirmed against Polymarket's o
 - **Fills are simulated** with the bt fill model, which is unverified against real orders.
 - **Timing differs from the recorder's host.** The paper host receives feeds at different times than the host that
   recorded the backtest data; `--vs-recorder` quantifies it.
-- **250 ms taker delay** that Polymarket applies on some markets is not modelled (Polymarket docs, clob-markets
-  `itode`). Taker results are optimistic and market-making fill assumptions may change.
+- **250 ms taker delay** that Polymarket applies on some markets is simulated by the shared exchange model
+  (`taker_delay_ms`, `taker_delay_markets`; see [BACKTESTER.md](BACKTESTER.md#the-fill-model-in-plain-words)).
+  Which markets are delayed is a provisional config rule until the recorder captures clob-markets `itode`.
+  Runs from before it have no `taker_delay_ms` in `config.yaml` and are replayed with 0.
 - **Chainlink prices** come from the legacy RTDS feed. The PolyBolt key requirement from 2026-11-30 means
   the feed needs replacing (see [TODO](TODO.md)).
 - **End-of-run memory spike:** the in-process session build at the end of a 6 h run peaked near 7 GB RSS (trading

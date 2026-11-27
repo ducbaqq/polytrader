@@ -60,6 +60,9 @@ class MarketInfo:
     min_order_size: float
     outcome: str | None
     resolution_recv_ms: int | None
+    # Polymarket holds marketable (taker) orders on this market for `RunConfig.taker_delay_ms` (clob-markets
+    # `itode`). Not recorded yet: the engine sets it from `RunConfig.taker_delay_markets` (see BACKTESTER.md).
+    taker_delay: bool = False
 
 
 @dataclass(frozen=True)

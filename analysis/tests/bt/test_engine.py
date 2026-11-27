@@ -88,7 +88,9 @@ def loader_for(mds: dict[str, MarketData]):
 
 
 def cfg(**kw) -> RunConfig:
-    base = dict(strategy="test", params={}, coins=["btc"], timeframes=["5m", "15m", "1h"], days=[DAY], capital=1000.0)
+    # the fixtures are BTC 5m, a taker-delay market: off here, on in test_taker_delay_*
+    base = dict(strategy="test", params={}, coins=["btc"], timeframes=["5m", "15m", "1h"], days=[DAY], capital=1000.0,
+                taker_delay_ms=0)
     base.update(kw)
     return RunConfig(**base)
 
@@ -640,3 +642,32 @@ def test_equity_marks_hold_last_finite_mid_through_one_sided_book():
     one_sided = eq[(eq.ms > T0 + 21_000) & (eq.ms < T0 + 40_000)]
     assert len(one_sided) > 5
     assert one_sided.mtm.tolist() == pytest.approx([5.0] * len(one_sided))
+
+
+def test_taker_delay_in_engine():
+    s, res = run_recorder(taker_delay_ms=250)
+    assert s.infos and all(i.taker_delay for i in s.infos)
+    o = res.orders
+    take = o[(o.kind == "take") & (o.event == "placed")].iloc[0]
+    acc = o[(o.order_id == take.order_id) & (o.event == "accepted")].iloc[0]
+    assert acc.ms == take.ms + 200 + 250 and acc.report_ms == acc.ms + 126
+    f = res.fills
+    t = f[f.liquidity == "taker"].iloc[0]
+    assert t.ts_ms == acc.ms and t.report_ms == t.ts_ms + 126 and t.px == pytest.approx(0.52)
+    # the resting bid does not cross: not delayed
+    lim = o[(o.kind == "limit") & (o.event == "placed")].iloc[0]
+    assert o[(o.order_id == lim.order_id) & (o.event == "accepted")].iloc[0].ms == lim.ms + 200
+
+
+def test_taker_delay_markets_rule():
+    c = RunConfig(strategy="noop")
+    assert c.taker_delay_ms == 250 and c.taker_delay_markets == ["btc-5m", "eth-5m", "btc-15m"]
+    assert c.taker_delay_for("btc", "5m") == 250 and c.taker_delay_for("eth", "5m") == 250
+    assert c.taker_delay_for("sol", "5m") == 0 and c.taker_delay_for("btc", "1h") == 0
+    assert c.taker_delay_for("sol", "5m", flagged=True) == 250
+    assert RunConfig(strategy="noop", taker_delay_ms=0).taker_delay_for("btc", "5m", flagged=True) == 0
+    assert RunConfig(strategy="noop", taker_delay_markets=[]).taker_delay_for("btc", "5m") == 0
+    with pytest.raises(ValueError):
+        RunConfig(strategy="noop", taker_delay_markets=["btc5m"])
+    with pytest.raises(ValueError):
+        RunConfig(strategy="noop", taker_delay_ms=-1)

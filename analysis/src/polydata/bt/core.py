@@ -761,7 +761,11 @@ class Core:
         """Create a market's state (exchange included) and give it the next load index. Nothing is scheduled
         and the market is not live until `admit`."""
         mi = len(self.mkts)
-        m = _Mkt(info, mi, md, Exchange(md, self.exc), rs, load_ms)
+        exc = self.exc
+        if delay := self.cfg.taker_delay_for(info.coin, info.timeframe, info.taker_delay):
+            info = replace(info, taker_delay=True)
+            exc = replace(exc, taker_delay_ms=delay)
+        m = _Mkt(info, mi, md, Exchange(md, exc), rs, load_ms)
         self.mkts.append(m)
         self.by_slug[info.slug] = m
         return mi

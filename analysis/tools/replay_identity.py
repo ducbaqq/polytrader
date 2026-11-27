@@ -3,6 +3,9 @@
     cd analysis && POLYDATA_DIR=$PD uv run python tools/replay_identity.py save --out DIR [--only NAME ...]
     cd analysis && POLYDATA_DIR=$PD uv run python tools/replay_identity.py check --ref DIR [--only NAME ...]
 
+`--set k=v` (repeatable) overrides a RunConfig field in every case, e.g. `--set taker_delay_ms=0` checks a
+reference saved before the taker delay existed (`ref-gaps`); `ref-taker-on` is saved with the defaults.
+
 The CLI re-execs itself with PYTHONHASHSEED=0 when it is unset, so spawned workers share one hash seed.
 
 Each case writes `<DIR>/<case>/results.json` (summary + metrics, canonical JSON) and `hashes.json` (sha256 per
@@ -80,8 +83,19 @@ def fingerprint(res, cfg) -> dict[str, bytes]:
     return {"results.json": results, "hashes.json": json.dumps(hashes, indent=1).encode()}
 
 
-def _select(only):
-    cases = [c for c in CASES if not only or c[0] in only]
+def _overrides(sets) -> dict:
+    import yaml
+
+    out = {}
+    for kv in sets or ():
+        k, _, v = kv.partition("=")
+        out[k] = yaml.safe_load(v)
+    return out
+
+
+def _select(only, sets=None):
+    ov = _overrides(sets)
+    cases = [(n, replace(c, **ov) if ov else c) for n, c in CASES if not only or n in only]
     if only and (bad := set(only) - {c[0] for c in CASES}):
         sys.exit(f"unknown case(s): {sorted(bad)}")
     return cases
@@ -95,7 +109,7 @@ def _run(cfg):
 
 def cmd_save(a) -> int:
     t0 = time.perf_counter()
-    for name, cfg in _select(a.only):
+    for name, cfg in _select(a.only, a.set):
         t = time.perf_counter()
         fp = fingerprint(_run(cfg), cfg)
         d = Path(a.out) / name
@@ -109,7 +123,7 @@ def cmd_save(a) -> int:
 
 def cmd_check(a) -> int:
     same = total = 0
-    for name, cfg in _select(a.only):
+    for name, cfg in _select(a.only, a.set):
         total += 1
         fp = fingerprint(_run(cfg), cfg)
         diff = None
@@ -143,6 +157,7 @@ def main(argv=None) -> int:
     c.add_argument("--ref", required=True)
     for x in (s, c):
         x.add_argument("--only", nargs="+", metavar="NAME")
+        x.add_argument("--set", action="append", metavar="K=V", help="override a RunConfig field in every case")
     a = p.parse_args(argv)
     if os.environ.get("PYTHONHASHSEED") != "0":
         os.execve(sys.executable, [sys.executable, *sys.argv], {**os.environ, "PYTHONHASHSEED": "0"})

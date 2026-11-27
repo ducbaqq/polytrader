@@ -22,7 +22,7 @@ The model is deliberately pessimistic (spec: "Queue and fill model"):
     usually printed as ONE row at its worst price with the total size (2026-11-24 data), so `x` can
     include volume executed at better levels that never reached P; the level decrease bounds what
     really traded at P. Uses no data after the trade. Trade-throughs are not capped this way.
-  - **Trade echo:** trades with `ts_ms <= arrival_ms + trade_echo_ms` never touch the order (no queue
+  - **Trade echo:** trades with `ts_ms <= book_ms + trade_echo_ms` (book_ms: when the order joined) never touch the order (no queue
     reduction, no fill): a trade's `ts_ms` lags the level change it caused (median 21 ms, p99 134 ms), so its
     volume may already be missing from the level we joined behind.
 - **Cancels by others.** `"behind"`: ignored. `"proportional"`: a level decrease not explained by
@@ -31,6 +31,11 @@ The model is deliberately pessimistic (spec: "Queue and fill model"):
 - **Takers** (and the crossing part of a non-post-only limit) walk `book_at(arrival, "ts")` up to the
   limit, minus our own earlier impact; one fee per order on its average price; a `take` remainder
   is cancelled (IOC), a limit remainder rests.
+- **Taker delay** (`taker_delay_ms` > 0, Polymarket's hold on some crypto markets): a non-post-only order that
+  crosses the recorded top at arrival stays pending for the hold (a cancel of it is rejected, "taker delay"),
+  then is validated again and processed as an arrival at the hold's end: accepted, matched against the book
+  of that time, the rest cancelled (take) or resting (limit, joining then). Others' cancels during the hold
+  are in that book. A hold ending at or after the window end is rejected ("after window end").
 - **Impact** (liquidity we took) per (level side, px) stays removed until the recorded level reaches
   0 after our last take there, or more than `impact_reset_ms` after it.
 
@@ -76,6 +81,7 @@ class Order:
     fee: float = 0.0
     queue_ahead: float = 0.0
     reason: str = ""
+    book_ms: int = 0  # when it joined our book (its arrival, or the end of a taker hold)
 
     @property
     def up_side(self) -> Side:
@@ -118,6 +124,7 @@ class ExchangeConfig:
     # Trade ts minus the ts of the level change it caused (BTC 5m): median 21 ms, p95 40 ms, p99 134 ms.
     trade_echo_ms: int = 150
     trade_explain_ms: int = 150  # proportional: a decrease followed by trade volume this soon is not a cancel
+    taker_delay_ms: int = 0  # Polymarket's hold of marketable orders on this market (0: none)
 
 
 @dataclass
@@ -144,6 +151,7 @@ class Exchange:
         self._lvl: dict[tuple[str, int], _LevelState] = {}
         self._end = int(md.info.window_end_ms)
         self._expired = False  # open orders were expired at the window end
+        self._held: set[int] = set()  # marketable orders in the taker hold (back in `_arrivals` at its end)
 
     # ------------------------------------------------------------------------------------ requests
     def submit(self, order: Order) -> None:
@@ -192,7 +200,7 @@ class Exchange:
             elif tc <= ta:
                 oid = self._cancels[0][2]
                 o = self.orders.get(oid)
-                if o is not None and o.status == "pending" and o.arrival_ms <= tc:
+                if o is not None and o.status == "pending" and o.arrival_ms <= tc and oid not in self._held:
                     # its own order arrives at the same ms: the order (sent first) is processed first
                     i = next(i for i, x in enumerate(self._arrivals) if x[2] is o)
                     self._arrivals[i] = self._arrivals[-1]
@@ -203,8 +211,11 @@ class Exchange:
                 t, _, oid = heapq.heappop(self._cancels)
                 self._on_cancel(oid, t, out)
             else:
-                _, _, o = heapq.heappop(self._arrivals)
-                self._on_arrival(o, out)
+                t, _, o = heapq.heappop(self._arrivals)
+                if o.id in self._held:
+                    self._on_release(o, t, out)
+                else:
+                    self._on_arrival(o, out)
         self._now = max(self._now, t_ms)
         return out
 
@@ -227,8 +238,13 @@ class Exchange:
         out = self.advance(t_ms)
         self._expire_open(t_ms, out)
         for _, _, o in sorted(self._arrivals):
+            if o.id in self._held:  # its re-validation would come after the window end
+                o.status, o.reason = "rejected", "after window end"
+                out.append(ExEvent(t_ms, o.id, "rejected", None, "after window end"))
+                continue
             o.status, o.reason = "cancelled", "never arrived"
             out.append(ExEvent(t_ms, o.id, "cancelled", None, "never arrived"))
+        self._held.clear()
         self._arrivals.clear()
         self._cancels.clear()
         return out
@@ -241,8 +257,8 @@ class Exchange:
             out.append(ExEvent(t, o.id, "expired", None, "window end"))
 
     # ------------------------------------------------------------------------------------ arrivals
-    def _reject_reason(self, o: Order) -> str:
-        info, t = self.md.info, o.arrival_ms
+    def _reject_reason(self, o: Order, t: int) -> str:
+        info = self.md.info
         if o.kind not in ("limit", "take"):
             return "bad kind"
         if o.kind == "take" and o.post_only:
@@ -266,11 +282,37 @@ class Exchange:
 
     def _on_arrival(self, o: Order, out: list[ExEvent]) -> None:
         t = o.arrival_ms
-        reason = self._reject_reason(o)
+        reason = self._reject_reason(o, t)
         if reason:
             o.status, o.reason = "rejected", reason
             out.append(ExEvent(t, o.id, "rejected", None, reason))
             return
+        if self.cfg.taker_delay_ms and not o.post_only and self._crosses(o, t):
+            # Polymarket's taker delay: the marketable order stays pending (not cancellable) for the hold, then is
+            # re-validated and matched against the book of that time
+            self._held.add(o.id)
+            heapq.heappush(self._arrivals, (t + int(self.cfg.taker_delay_ms), self._next_seq(), o))
+            return
+        self._execute(o, t, out)
+
+    def _on_release(self, o: Order, t: int, out: list[ExEvent]) -> None:
+        """The end of a taker hold: validated again, then matched (or rested) as if it arrived now."""
+        self._held.discard(o.id)
+        reason = self._reject_reason(o, t)
+        if reason:
+            o.status, o.reason = "rejected", reason
+            out.append(ExEvent(t, o.id, "rejected", None, reason))
+            return
+        self._execute(o, t, out)
+
+    def _crosses(self, o: Order, t: int) -> bool:
+        """Marketable against the recorded top of book at t (the same test `_take` starts with)."""
+        bids, asks = self.md.book_at(t, "ts", depth=1)
+        if o.up_side == "BUY":
+            return bool(asks) and asks[0][0] <= o.up_px
+        return bool(bids) and bids[0][0] >= o.up_px
+
+    def _execute(self, o: Order, t: int, out: list[ExEvent]) -> None:
         o.status = "open"
         out.append(ExEvent(t, o.id, "accepted"))
         if not o.post_only:
@@ -292,6 +334,7 @@ class Exchange:
         if q:  # never ahead of our own earlier orders at this level
             ahead = max(ahead, max(x.queue_ahead for x in q))
         o.queue_ahead = ahead
+        o.book_ms = t
         q.append(o)
         self._n_open += 1
         self._lvl.setdefault(key, _LevelState(t))
@@ -308,7 +351,8 @@ class Exchange:
     def _on_cancel(self, oid: int, t: int, out: list[ExEvent]) -> None:
         o = self.orders.get(oid)
         if o is None or o.status != "open":
-            out.append(ExEvent(t, oid, "cancel_rejected", None, "unknown order" if o is None else o.status))
+            why = "unknown order" if o is None else "taker delay" if oid in self._held else o.status
+            out.append(ExEvent(t, oid, "cancel_rejected", None, why))
             return
         self._remove(o)
         o.status, o.reason = "cancelled", "cancel request"
@@ -389,7 +433,7 @@ class Exchange:
                     self._apply_cancels((rest, px), ts)
                 xp = None  # the at-price volume: min(x, recorded level decrease), computed when first needed
                 for o in list(lv.get(px, ())):
-                    if ts <= o.arrival_ms + echo:
+                    if ts <= o.book_ms + echo:
                         continue
                     if xp is None:
                         xp = min(x, self._level_decrease(rest, px, ts - echo, ts))
@@ -405,7 +449,7 @@ class Exchange:
                 # x already excludes our own earlier fills (deliberately pessimistic).
                 better = None  # B: what the taker took at levels strictly better than px, computed when needed
                 for o in list(lv.get(px, ())):
-                    if ts <= o.arrival_ms + echo:
+                    if ts <= o.book_ms + echo:
                         continue
                     if better is None:
                         better = self._better_decrease(rest, px, ts - echo, ts)
@@ -451,7 +495,7 @@ class Exchange:
                 unexplained = dec - self._explained(side, px, tc, dec, st.used)
                 if unexplained > EPS:
                     for o in q:
-                        if o.arrival_ms < tc:
+                        if o.book_ms < tc:
                             o.queue_ahead = max(0.0, o.queue_ahead - min(unexplained, unexplained * o.queue_ahead / prev))
             prev = s
         st.t = t

@@ -24,6 +24,12 @@ class RunConfig:
     fill_report_latency_ms: int = 126  # exchange event -> strategy's on_order
     cancel_model: str = "behind"
     impact_reset_ms: int = 5000
+    # Polymarket's taker delay: a marketable order on a delayed market is held this long, then re-validated and
+    # matched against the book of that later time (cancels of a held order are rejected). Makers are not delayed.
+    taker_delay_ms: int = 250
+    # Markets with the delay, as "coin-timeframe". Provisional (2026-11-26): the recorder does not capture
+    # clob-markets `itode` yet; BTC 5m is confirmed, ETH 5m and BTC 15m reported.
+    taker_delay_markets: list[str] = field(default_factory=lambda: ["btc-5m", "eth-5m", "btc-15m"])
     capital: float = 5000.0
     capital_mode: str = "per_coin"  # or "global": one replay, one shared balance
     redeem_delay_s: int = 60
@@ -41,13 +47,23 @@ class RunConfig:
             raise ValueError(f"cancel_model must be behind or proportional, not {self.cancel_model!r}")
         if bad := [k for k in self.day_kinds if k not in DAY_KINDS]:
             raise ValueError(f"unknown day kinds {bad}")
-        for name in ("order_latency_ms", "latency_jitter_ms", "fill_report_latency_ms", "redeem_delay_s"):
+        for name in ("order_latency_ms", "latency_jitter_ms", "fill_report_latency_ms", "redeem_delay_s",
+                     "taker_delay_ms"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0")
         if self.bn_step_ms <= 0 or 1000 % self.bn_step_ms:
             raise ValueError("bn_step_ms must divide one second")
         if not self.coins:
             raise ValueError("no coins")
+        if bad := [m for m in self.taker_delay_markets if not isinstance(m, str) or m.count("-") != 1]:
+            raise ValueError(f"taker_delay_markets entries are coin-timeframe (btc-5m), not {bad}")
+
+    def taker_delay_for(self, coin: str, timeframe: str, flagged: bool = False) -> int:
+        """The taker hold (ms) of a market: `taker_delay_ms` if it is flagged (MarketInfo.taker_delay) or matches
+        `taker_delay_markets`, else 0."""
+        if self.taker_delay_ms and (flagged or f"{coin}-{timeframe}" in self.taker_delay_markets):
+            return int(self.taker_delay_ms)
+        return 0
 
     @classmethod
     def from_dict(cls, d: dict) -> RunConfig:
