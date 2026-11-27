@@ -1,0 +1,18 @@
+# endgame-maker timeframe study (docs/strategies/endgame-maker-tf.md). Frozen before any sim run.
+#   cd analysis && POLYDATA_RUNS_CSV=<scratch>/runs.csv uv run polydata bt run configs/research/endgame-tf-4h1d-1800.yaml --days 2026-11-24
+strategy: endgame-maker
+params:
+  timeframes: [4h, 1d]
+  start_tau_s: 1800
+  stop_tau_s: 5
+  band_lo: 0.75
+  band_hi: 0.95
+  max_spread: 0.02
+  size: 10
+  check_ms: 1000
+  fair_guard: false
+  guard_margin: 0.0
+coins: [btc, eth, sol, xrp, bnb, doge, hype, zec]
+timeframes: [4h, 1d]
+day_kinds: [train]
+days: [2026-11-24]
